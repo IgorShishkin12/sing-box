@@ -34,6 +34,7 @@ const (
 	TypeOOMKiller          = "oom-killer"
 	TypeACME               = "acme"
 	TypeCloudflareOriginCA = "cloudflare-origin-ca"
+	TypeReticulum          = "reticulum"
 )
 
 const (
