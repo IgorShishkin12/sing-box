@@ -3,6 +3,7 @@ pub mod connection;
 pub mod c_api;
 pub mod listener;
 pub mod runtime;
+pub mod store;
 pub mod task;
 
 // Re-export c_api for integration tests

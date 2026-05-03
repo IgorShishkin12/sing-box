@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["staticlib", "cdylib"]
+crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
@@ -13,3 +13,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
 reticulum-rs = { version = "0.2", features = ["core", "transport"] }
+

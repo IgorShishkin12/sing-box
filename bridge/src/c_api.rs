@@ -1,24 +1,28 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
+use crate::connection::Connection;
+use crate::listener::Listener;
 use crate::runtime;
+use crate::store::global_store;
 use crate::task::{TaskResult, global_registry};
 
 /// Initialize the reticulum bridge with a JSON config string.
 /// Returns 0 on success, -1 on error.
+/// If config_json is NULL, uses default configuration.
 #[no_mangle]
 pub extern "C" fn reticulum_init(config_json: *const c_char) -> i32 {
-    if config_json.is_null() {
-        return -1;
+    if !config_json.is_null() {
+        let c_str = match unsafe { CStr::from_ptr(config_json).to_str() } {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+        // TODO: parse config and store globally
+        let _config_str = c_str;
     }
-    let c_str = unsafe { CStr::from_ptr(config_json) };
-    let _config_str = match c_str.to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-    // TODO: parse config and store globally
     runtime::init_runtime()
 }
+
 
 /// Get the destination hash for a given name.
 #[no_mangle]
@@ -48,12 +52,29 @@ pub extern "C" fn reticulum_dial(destination_hash: *const c_char) -> i32 {
     if destination_hash.is_null() {
         return -1;
     }
-    let _dest = unsafe { CStr::from_ptr(destination_hash) }.to_string_lossy().into_owned();
-    // For now, create a stub connection and return task
+    let _dest = match unsafe { CStr::from_ptr(destination_hash) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return -1,
+    };
+    
     let registry = global_registry();
+    let store = global_store();
+    
+    // Create a pending task
     let task_id = runtime::block_on(async {
-        registry.insert(TaskResult::Done { handle: 1, data: vec![] }).await
+        registry.insert_pending().await
     });
+    
+    // Spawn the async dial operation
+    runtime::block_on(async move {
+        // Create a new connection (in-memory for now, will be replaced with rns-transport)
+        let conn = Connection::new();
+        let handle = store.insert_connection(conn).await;
+        
+        // Complete the task with the handle
+        registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
+    });
+    
     task_id as i32
 }
 
@@ -64,40 +85,77 @@ pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i32 {
     if listen_hash.is_null() {
         return -1;
     }
-    let _dest = unsafe { CStr::from_ptr(listen_hash) }.to_string_lossy().into_owned();
+    let _dest = match unsafe { CStr::from_ptr(listen_hash) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return -1,
+    };
+    
     let registry = global_registry();
+    let store = global_store();
+    
+    // Create a pending task
     let task_id = runtime::block_on(async {
-        registry.insert(TaskResult::Done { handle: 1, data: vec![] }).await
+        registry.insert_pending().await
     });
+    
+    // Spawn the async listen operation
+    runtime::block_on(async move {
+        // Create a new listener (in-memory for now, will be replaced with rns-transport)
+        let listener = Listener::new();
+        let handle = store.insert_listener(listener).await;
+        
+        // Complete the task with the handle
+        registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
+    });
+    
     task_id as i32
 }
 
 /// Close a connection or listener handle.
 #[no_mangle]
-pub extern "C" fn reticulum_close(_handle: u64) {
-    // No-op for stub.
+pub extern "C" fn reticulum_close(handle: u64) {
+    let store = global_store();
+    runtime::block_on(async move {
+        store.remove(handle).await;
+    });
 }
 
 /// Write data to a connection.
 /// Returns number of bytes written, or -1 on error.
 #[no_mangle]
-pub extern "C" fn reticulum_write(_conn_handle: u64, data: *const u8, len: usize) -> i32 {
+pub extern "C" fn reticulum_write(conn_handle: u64, data: *const u8, len: usize) -> i32 {
     if data.is_null() || len == 0 {
         return -1;
     }
-    // For stub, just return len
-    len as i32
+    let store = global_store();
+    let data_slice = unsafe { std::slice::from_raw_parts(data, len) };
+    
+    let result = runtime::block_on(async move {
+        match store.get_connection(conn_handle).await {
+            Some(conn) => conn.write(data_slice).await as i32,
+            None => -1,
+        }
+    });
+    result
 }
 
 /// Read data from a connection.
 /// Returns number of bytes read, or -1 on error.
 #[no_mangle]
-pub extern "C" fn reticulum_read(_conn_handle: u64, buffer: *mut u8, max_len: usize) -> i32 {
+pub extern "C" fn reticulum_read(conn_handle: u64, buffer: *mut u8, max_len: usize) -> i32 {
     if buffer.is_null() || max_len == 0 {
         return -1;
     }
-    // No data available for stub.
-    0
+    let store = global_store();
+    let buffer_slice = unsafe { std::slice::from_raw_parts_mut(buffer, max_len) };
+    
+    let result = runtime::block_on(async move {
+        match store.get_connection(conn_handle).await {
+            Some(conn) => conn.read(buffer_slice).await as i32,
+            None => -1,
+        }
+    });
+    result
 }
 
 /// Poll for completion of a task.
