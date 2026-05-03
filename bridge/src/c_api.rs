@@ -120,6 +120,43 @@ pub extern "C" fn reticulum_close(handle: u64) {
     });
 }
 
+/// Accept a pending connection from a listener.
+/// Returns a task ID. Use reticulum_poll to get the new connection handle.
+#[no_mangle]
+pub extern "C" fn reticulum_accept(listener_handle: u64) -> i32 {
+    let registry = global_registry();
+    let store = global_store();
+
+    // Create a pending task
+    let task_id = runtime::block_on(async {
+        registry.insert_pending().await
+    });
+
+    // Spawn the async accept operation
+    runtime::block_on(async move {
+        match store.get_listener(listener_handle).await {
+            Some(listener) => {
+                match listener.accept().await {
+                    Some(conn) => {
+                        let handle = store.insert_connection(conn).await;
+                        registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
+                    }
+                    None => {
+                        // No pending connection; treat as error for now
+                        registry.complete(task_id, TaskResult::Error { message: "no pending connection".to_string() }).await;
+                    }
+                }
+            }
+            None => {
+                registry.complete(task_id, TaskResult::Error { message: "invalid listener handle".to_string() }).await;
+            }
+        }
+    });
+
+    task_id as i32
+}
+
+
 /// Write data to a connection.
 /// Returns number of bytes written, or -1 on error.
 #[no_mangle]

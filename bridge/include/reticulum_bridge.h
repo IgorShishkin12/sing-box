@@ -33,16 +33,25 @@ void get_hash(char** hash, const char* name);
 void reticulum_shutdown(void);
 
 /*
- * Dial a destination hash, returning a connection handle.
- * Returns 0 on error, otherwise a positive handle.
+ * Dial a destination hash, returning a task ID.
+ * Use reticulum_poll to check for completion and get the connection handle.
+ * Returns -1 on error, otherwise a positive task ID.
  */
-uint64_t reticulum_dial(const char* destination_hash);
+int32_t reticulum_dial(const char* destination_hash);
 
 /*
- * Listen on a hash, returning a listener handle.
- * Returns 0 on error, otherwise a positive handle.
+ * Listen on a hash, returning a task ID.
+ * Use reticulum_poll to check for completion and get the listener handle.
+ * Returns -1 on error, otherwise a positive task ID.
  */
-uint64_t reticulum_listen(const char* listen_hash);
+int32_t reticulum_listen(const char* listen_hash);
+
+/*
+ * Accept a pending connection from a listener.
+ * Returns a task ID. Use reticulum_poll to get the new connection handle.
+ * Returns -1 on error, otherwise a positive task ID.
+ */
+int32_t reticulum_accept(uint64_t listener_handle);
 
 /*
  * Close a connection or listener handle.
@@ -77,3 +86,4 @@ void reticulum_free(void* ptr);
 #endif
 
 #endif /* RETICULUM_BRIDGE_H */
+

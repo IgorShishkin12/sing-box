@@ -23,19 +23,40 @@ func BridgeInit(configJSON string) error {
 	return nil
 }
 
-// BridgeDial calls reticulum_dial and returns a handle.
-func BridgeDial(destinationHash string) uint64 {
+// BridgeDial calls reticulum_dial and returns a task ID.
+// Use BridgePollTask to wait for completion and get the connection handle.
+func BridgeDial(destinationHash string) (int, error) {
 	cstr := C.CString(destinationHash)
 	defer C.free(unsafe.Pointer(cstr))
-	return uint64(C.reticulum_dial(cstr))
+	taskID := int(C.reticulum_dial(cstr))
+	if taskID < 0 {
+		return -1, ErrBridgeDialFailed
+	}
+	return taskID, nil
 }
 
-// BridgeListen calls reticulum_listen and returns a handle.
-func BridgeListen(listenHash string) uint64 {
+// BridgeListen calls reticulum_listen and returns a task ID.
+// Use BridgePollTask to wait for completion and get the listener handle.
+func BridgeListen(listenHash string) (int, error) {
 	cstr := C.CString(listenHash)
 	defer C.free(unsafe.Pointer(cstr))
-	return uint64(C.reticulum_listen(cstr))
+	taskID := int(C.reticulum_listen(cstr))
+	if taskID < 0 {
+		return -1, ErrBridgeListenFailed
+	}
+	return taskID, nil
 }
+
+// BridgeAccept calls reticulum_accept and returns a task ID.
+// Use BridgePollTask to wait for completion and get the new connection handle.
+func BridgeAccept(listenerHandle uint64) (int, error) {
+	taskID := int(C.reticulum_accept(C.uint64_t(listenerHandle)))
+	if taskID < 0 {
+		return -1, ErrBridgeAcceptFailed
+	}
+	return taskID, nil
+}
+
 
 // BridgeClose closes a handle.
 func BridgeClose(handle uint64) {
@@ -86,6 +107,10 @@ func BridgeShutdown() {
 
 // Errors
 var (
-	ErrBridgeInitFailed = errors.New("bridge init failed")
-	ErrBridgePollFailed = errors.New("bridge poll failed")
+	ErrBridgeInitFailed  = errors.New("bridge init failed")
+	ErrBridgeDialFailed  = errors.New("bridge dial failed")
+	ErrBridgeListenFailed = errors.New("bridge listen failed")
+	ErrBridgeAcceptFailed = errors.New("bridge accept failed")
+	ErrBridgePollFailed  = errors.New("bridge poll failed")
 )
+
