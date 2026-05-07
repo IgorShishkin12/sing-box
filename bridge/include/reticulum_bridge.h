@@ -24,8 +24,15 @@ int reticulum_init(const char* config_json);
 /*
  * Get the destination hash for a given name.
  * The caller must free `*hash` with reticulum_free after use.
+ * Returns 0 on success, -1 if the name is unknown.
  */
-void get_hash(char** hash, const char* name);
+int get_hash(char** hash, const char* name);
+
+/*
+ * Register a name→hash mapping for later lookup via get_hash.
+ * Returns 0 on success, -1 on error.
+ */
+int reticulum_register_name(const char* name, const char* hash);
 
 /*
  * Shutdown the bridge and release all resources.

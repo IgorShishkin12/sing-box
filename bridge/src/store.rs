@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -83,6 +84,33 @@ impl HandleStore {
             }
         }
         entry
+    }
+
+    /// Clear all entries from the store.
+    pub async fn clear_all(&self) {
+        self.entries.write().await.clear();
+        self.listener_hashes.write().await.clear();
+    }
+
+    /// Register a name→hash mapping.
+    pub async fn register_name(&self, name: &str, _hash: &str) {
+        let mut hashes = self.listener_hashes.write().await;
+        hashes.insert(format!("name:{}", name), 0); // Placeholder; real impl in Step 12 uses Reticulum identity
+    }
+
+    /// Get the hash for a registered name. Returns None if unknown.
+    pub async fn get_hash_for_name(&self, name: &str) -> Option<String> {
+        let hashes = self.listener_hashes.read().await;
+        // For now, we store hash lookups separately. In Step 12, this resolves via reticulum-rs.
+        let key = format!("name:{}", name);
+        if hashes.contains_key(&key) {
+            // Return a deterministic hash based on the name
+            let mut hasher = DefaultHasher::new();
+            name.hash(&mut hasher);
+            Some(format!("{:016x}", hasher.finish()))
+        } else {
+            None
+        }
     }
 }
 

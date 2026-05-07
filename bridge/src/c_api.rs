@@ -37,23 +37,72 @@ pub extern "C" fn reticulum_init(config_json: *const c_char) -> i32 {
 
 
 /// Get the destination hash for a given name.
+/// The caller must free `*hash` with reticulum_free after use.
+/// Returns 0 on success, -1 if the name is unknown.
 #[no_mangle]
-pub extern "C" fn get_hash(hash: *mut *mut c_char, name: *const c_char) {
+pub extern "C" fn get_hash(hash: *mut *mut c_char, name: *const c_char) -> i32 {
     if hash.is_null() || name.is_null() {
-        return;
+        return -1;
     }
-    let name_str = unsafe { CStr::from_ptr(name) }.to_string_lossy().into_owned();
-    // TODO: implement actual lookup
-    let fake_hash = format!("rln://{}", name_str);
-    let c_hash = CString::new(fake_hash).unwrap();
-    unsafe {
-        *hash = c_hash.into_raw();
+    let name_str = match unsafe { CStr::from_ptr(name) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return -1,
+    };
+
+    let store = global_store();
+    let result = runtime::block_on(async move {
+        store.get_hash_for_name(&name_str).await
+    });
+
+    match result {
+        Some(hash_str) => {
+            let c_hash = CString::new(hash_str).unwrap();
+            unsafe {
+                *hash = c_hash.into_raw();
+            }
+            0
+        }
+        None => -1,
     }
 }
 
+/// Register a name→hash mapping for later lookup via get_hash.
+/// Returns 0 on success, -1 on error.
+#[no_mangle]
+pub extern "C" fn reticulum_register_name(name: *const c_char, hash: *const c_char) -> i32 {
+    if name.is_null() || hash.is_null() {
+        return -1;
+    }
+    let name_str = match unsafe { CStr::from_ptr(name) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return -1,
+    };
+    let hash_str = match unsafe { CStr::from_ptr(hash) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return -1,
+    };
+
+    let store = global_store();
+    runtime::block_on(async move {
+        store.register_name(&name_str, &hash_str).await;
+    });
+    0
+}
+
 /// Shutdown the bridge and release resources.
+/// Clears all handles and the task registry, then shuts down the runtime.
 #[no_mangle]
 pub extern "C" fn reticulum_shutdown() {
+    // Clear the store and registry before shutting down the runtime
+    // (so block_on can still execute the async clear operations)
+    let store = global_store();
+    runtime::block_on(async move {
+        store.clear_all().await;
+    });
+    let registry = global_registry();
+    runtime::block_on(async move {
+        registry.clear_all().await;
+    });
     runtime::shutdown();
 }
 

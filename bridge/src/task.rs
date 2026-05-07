@@ -43,6 +43,11 @@ impl TaskRegistry {
     pub async fn complete(&self, id: u64, result: TaskResult) -> bool {
         self.tasks.write().await.insert(id, result).is_none()
     }
+
+    /// Clear all tasks from the registry.
+    pub async fn clear_all(&self) {
+        self.tasks.write().await.clear();
+    }
 }
 
 static REGISTRY: once_cell::sync::OnceCell<Arc<TaskRegistry>> = once_cell::sync::OnceCell::new();

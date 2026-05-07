@@ -114,6 +114,39 @@ func BridgePoll(taskID int) (done bool, result []byte, err error) {
 	}
 }
 
+// BridgeGetHash gets the destination hash for a given name.
+// Returns the hash string, or an error if the name is unknown.
+func BridgeGetHash(name string) (string, error) {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+
+	var hashOut *C.char
+	ret := C.get_hash(&hashOut, cname)
+	if ret != 0 {
+		return "", ErrBridgeGetHashFailed
+	}
+	if hashOut == nil {
+		return "", ErrBridgeGetHashFailed
+	}
+	hashStr := C.GoString(hashOut)
+	C.reticulum_free(unsafe.Pointer(hashOut))
+	return hashStr, nil
+}
+
+// BridgeRegisterName registers a name→hash mapping for later lookup via BridgeGetHash.
+func BridgeRegisterName(name string, hash string) error {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	chash := C.CString(hash)
+	defer C.free(unsafe.Pointer(chash))
+
+	ret := C.reticulum_register_name(cname, chash)
+	if ret != 0 {
+		return ErrBridgeRegisterNameFailed
+	}
+	return nil
+}
+
 // BridgeShutdown shuts down the bridge.
 func BridgeShutdown() {
 	C.reticulum_shutdown()
@@ -121,10 +154,12 @@ func BridgeShutdown() {
 
 // Errors
 var (
-	ErrBridgeInitFailed  = errors.New("bridge init failed")
-	ErrBridgeDialFailed  = errors.New("bridge dial failed")
-	ErrBridgeListenFailed = errors.New("bridge listen failed")
-	ErrBridgeAcceptFailed = errors.New("bridge accept failed")
-	ErrBridgePollFailed  = errors.New("bridge poll failed")
+	ErrBridgeInitFailed       = errors.New("bridge init failed")
+	ErrBridgeDialFailed       = errors.New("bridge dial failed")
+	ErrBridgeListenFailed     = errors.New("bridge listen failed")
+	ErrBridgeAcceptFailed     = errors.New("bridge accept failed")
+	ErrBridgePollFailed       = errors.New("bridge poll failed")
+	ErrBridgeGetHashFailed    = errors.New("bridge get hash failed")
+	ErrBridgeRegisterNameFailed = errors.New("bridge register name failed")
 )
 
