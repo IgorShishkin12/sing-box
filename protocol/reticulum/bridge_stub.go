@@ -104,6 +104,12 @@ func BridgePoll(taskID int) (done bool, result []byte, err error) {
 		}
 		return true, result, nil
 	default:
+		// Error: read the error message from C
+		if lenOut > 0 && resultOut != nil {
+			errMsg := string(C.GoBytes(unsafe.Pointer(resultOut), C.int(lenOut)))
+			C.reticulum_free(unsafe.Pointer(resultOut))
+			return false, nil, errors.New(errMsg)
+		}
 		return false, nil, ErrBridgePollFailed
 	}
 }

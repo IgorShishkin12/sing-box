@@ -24,3 +24,4 @@ AGENTS.md
 /bridge/target/
 reticulum.test
 Cargo.lock
+coverage.out

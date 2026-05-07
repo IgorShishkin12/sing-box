@@ -240,6 +240,7 @@ pub extern "C" fn reticulum_poll(task_id: i32, result_out: *mut *mut u8, len_out
         }
         Some(TaskResult::Error { message }) => {
             let msg_bytes = message.into_bytes();
+            let len = msg_bytes.len();
             let boxed_slice = msg_bytes.into_boxed_slice();
             let ptr = Box::into_raw(boxed_slice) as *mut u8;
             unsafe {
@@ -247,7 +248,7 @@ pub extern "C" fn reticulum_poll(task_id: i32, result_out: *mut *mut u8, len_out
                     *result_out = ptr;
                 }
                 if !len_out.is_null() {
-                    *len_out = 0;
+                    *len_out = len;
                 }
             }
             -1
