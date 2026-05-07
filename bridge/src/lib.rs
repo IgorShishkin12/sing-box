@@ -13,6 +13,17 @@ use once_cell::sync::OnceCell;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+// Global config state
+static CONFIG: OnceCell<Option<config::ReticulumConfig>> = OnceCell::new();
+
+pub fn set_global_config(config: Option<config::ReticulumConfig>) {
+    let _ = CONFIG.set(config);
+}
+
+pub fn get_global_config() -> Option<&'static config::ReticulumConfig> {
+    CONFIG.get().and_then(|c| c.as_ref())
+}
+
 // Simplified global state for TDD iterations
 #[derive(Clone)]
 pub struct BridgeState {

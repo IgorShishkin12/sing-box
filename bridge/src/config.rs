@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct ReticulumConfig {
     pub identity_path: Option<String>,
     pub storage_path: Option<String>,
+    #[serde(default)]
     pub interfaces: Vec<ReticulumInterface>,
 }
 

@@ -1,6 +1,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
+use crate::config;
 use crate::connection::Connection;
 use crate::listener::Listener;
 use crate::runtime;
@@ -17,8 +18,19 @@ pub extern "C" fn reticulum_init(config_json: *const c_char) -> i32 {
             Ok(s) => s,
             Err(_) => return -1,
         };
-        // TODO: parse config and store globally
-        let _config_str = c_str;
+        // Treat empty string as NULL (use default config)
+        if c_str.is_empty() {
+            crate::set_global_config(None);
+        } else {
+            match config::parse_config(c_str) {
+                Ok(cfg) => {
+                    crate::set_global_config(Some(cfg));
+                }
+                Err(_) => return -1,
+            }
+        }
+    } else {
+        crate::set_global_config(None);
     }
     runtime::init_runtime()
 }
@@ -249,7 +261,11 @@ pub extern "C" fn reticulum_poll(task_id: i32, result_out: *mut *mut u8, len_out
 pub extern "C" fn reticulum_free(ptr: *mut u8) {
     if !ptr.is_null() {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, 0, 0);
+            // Box<[u8]> allocated via Box::into_raw in reticulum_poll.
+            // We need to reconstruct the Box to drop it properly.
+            // Since we don't have the length, use libc::free which is
+            // compatible with the system allocator used by Box.
+            libc::free(ptr as *mut libc::c_void);
         }
     }
 }

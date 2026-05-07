@@ -13,7 +13,15 @@ import (
 
 // BridgeInit initializes the Rust bridge with a JSON config string.
 // Returns nil on success, or an error string.
+// Passes NULL to reticulum_init when configJSON is empty (default config).
 func BridgeInit(configJSON string) error {
+	if configJSON == "" {
+		ret := C.reticulum_init(nil)
+		if ret != 0 {
+			return ErrBridgeInitFailed
+		}
+		return nil
+	}
 	cstr := C.CString(configJSON)
 	defer C.free(unsafe.Pointer(cstr))
 	ret := C.reticulum_init(cstr)

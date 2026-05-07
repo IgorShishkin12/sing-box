@@ -22,3 +22,5 @@ CLAUDE.md
 AGENTS.md
 /.claude/
 /bridge/target/
+reticulum.test
+Cargo.lock
