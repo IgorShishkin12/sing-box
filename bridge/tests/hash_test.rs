@@ -1,12 +1,20 @@
 use std::ffi::CString;
 
-extern crate libc;
+/// Helper: init with fresh runtime for each test
+fn bridge_init() {
+    let ret = sing_box_reticulum_bridge::c_api::reticulum_init(std::ptr::null());
+    assert_eq!(ret, 0);
+}
+
+/// Helper: clean shutdown
+fn bridge_shutdown() {
+    sing_box_reticulum_bridge::c_api::reticulum_shutdown();
+}
 
 /// Test that get_hash returns -1 for an unknown name
 #[test]
 fn test_get_hash_unknown_name() {
-    let ret = sing_box_reticulum_bridge::c_api::reticulum_init(std::ptr::null());
-    assert_eq!(ret, 0);
+    bridge_init();
 
     let name = CString::new("nonexistent").unwrap();
     let mut hash_out: *mut std::ffi::c_char = std::ptr::null_mut();
@@ -14,14 +22,13 @@ fn test_get_hash_unknown_name() {
     assert_eq!(result, -1, "unknown name should return -1");
     assert!(hash_out.is_null(), "hash pointer should be null for unknown name");
 
-    sing_box_reticulum_bridge::c_api::reticulum_shutdown();
+    bridge_shutdown();
 }
 
 /// Test that get_hash returns a valid hash after the name is registered
 #[test]
 fn test_get_hash_after_register() {
-    let ret = sing_box_reticulum_bridge::c_api::reticulum_init(std::ptr::null());
-    assert_eq!(ret, 0);
+    bridge_init();
 
     // Register a name
     let name = CString::new("alice").unwrap();
@@ -42,10 +49,10 @@ fn test_get_hash_after_register() {
     // (since register_name is currently a placeholder)
     assert_eq!(hash_str.len(), 16, "hash should be 16 hex chars");
 
-    // Free the result
-    unsafe { libc::free(hash_out as *mut libc::c_void) };
+    // Free the result using the bridge's free function (consistent allocator)
+    sing_box_reticulum_bridge::c_api::reticulum_free(hash_out as *mut u8);
 
-    sing_box_reticulum_bridge::c_api::reticulum_shutdown();
+    bridge_shutdown();
 }
 
 /// Test get_hash with null parameters
@@ -66,8 +73,7 @@ fn test_register_name_null_params() {
 /// Test that get_hash returns deterministic hashes for the same name
 #[test]
 fn test_get_hash_deterministic() {
-    let ret = sing_box_reticulum_bridge::c_api::reticulum_init(std::ptr::null());
-    assert_eq!(ret, 0);
+    bridge_init();
 
     // Register a name
     let name = CString::new("bob").unwrap();
@@ -79,14 +85,14 @@ fn test_get_hash_deterministic() {
     let mut hash_out1: *mut std::ffi::c_char = std::ptr::null_mut();
     let _ = sing_box_reticulum_bridge::c_api::get_hash(&mut hash_out1, name.as_ptr());
     let hash1 = unsafe { std::ffi::CStr::from_ptr(hash_out1).to_string_lossy().into_owned() };
-    unsafe { libc::free(hash_out1 as *mut libc::c_void) };
+    sing_box_reticulum_bridge::c_api::reticulum_free(hash_out1 as *mut u8);
 
     let mut hash_out2: *mut std::ffi::c_char = std::ptr::null_mut();
     let _ = sing_box_reticulum_bridge::c_api::get_hash(&mut hash_out2, name.as_ptr());
     let hash2 = unsafe { std::ffi::CStr::from_ptr(hash_out2).to_string_lossy().into_owned() };
-    unsafe { libc::free(hash_out2 as *mut libc::c_void) };
+    sing_box_reticulum_bridge::c_api::reticulum_free(hash_out2 as *mut u8);
 
     assert_eq!(hash1, hash2, "hash should be deterministic for the same name");
 
-    sing_box_reticulum_bridge::c_api::reticulum_shutdown();
+    bridge_shutdown();
 }

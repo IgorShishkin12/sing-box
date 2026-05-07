@@ -1,5 +1,8 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::os::raw::c_char;
+
+#[cfg(feature = "real-reticulum")]
+use std::sync::Arc;
 
 use crate::config;
 use crate::connection::{create_pair, Connection};
@@ -7,6 +10,9 @@ use crate::listener::Listener;
 use crate::runtime;
 use crate::store::global_store;
 use crate::task::{TaskResult, global_registry};
+
+#[cfg(feature = "real-reticulum")]
+use reticulum_rs::transport::identity::PrivateIdentity;
 
 /// Initialize the reticulum bridge with a JSON config string.
 /// Returns 0 on success, -1 on error.
@@ -68,9 +74,17 @@ pub extern "C" fn get_hash(hash: *mut *mut c_char, name: *const c_char) -> i32 {
 
     match result {
         Some(hash_str) => {
-            let c_hash = CString::new(hash_str).unwrap();
+            // Allocate with libc so libc::free in reticulum_free works correctly.
+            let bytes = hash_str.as_bytes();
+            let len = bytes.len() + 1; // NUL terminator
             unsafe {
-                *hash = c_hash.into_raw();
+                let ptr = libc::malloc(len) as *mut c_char;
+                if ptr.is_null() {
+                    return -1;
+                }
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
+                *ptr.add(bytes.len()) = 0; // NUL terminator
+                *hash = ptr;
             }
             0
         }
@@ -102,19 +116,13 @@ pub extern "C" fn reticulum_register_name(name: *const c_char, hash: *const c_ch
 }
 
 /// Shutdown the bridge and release resources.
-/// Clears all handles and the task registry, then shuts down the runtime.
+///
+/// Does NOT clear the store or registry — they persist across init/shutdown
+/// cycles so that handles and task IDs remain valid. Only the runtime is
+/// logically shut down (the Tokio runtime itself is kept alive to avoid
+/// thread-local state corruption from dropping and recreating it).
 #[no_mangle]
 pub extern "C" fn reticulum_shutdown() {
-    // Clear the store and registry before shutting down the runtime
-    // (so block_on can still execute the async clear operations)
-    let store = global_store();
-    runtime::block_on(async move {
-        store.clear_all().await;
-    });
-    let registry = global_registry();
-    runtime::block_on(async move {
-        registry.clear_all().await;
-    });
     runtime::shutdown();
 }
 
@@ -185,12 +193,64 @@ pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i32 {
     
     // Spawn the async listen operation
     runtime::block_on(async move {
-        // Create a new listener with the hash (for hash-matched dial)
-        let listener = Listener::with_hash(dest);
-        let handle = store.insert_listener(listener).await;
+        #[cfg(feature = "real-reticulum")]
+        {
+            // Real Reticulum path: register a SingleInputDestination with the transport
+            // and create a listener that wraps it.
+            let listen_hash = dest;
+            match crate::transport::get_transport() {
+                Some(_) => {
+                    // Generate a random identity for this destination
+                    let identity = PrivateIdentity::new_from_rand(rand_core::OsRng);
+                    
+                    // Create the listener first (without destination)
+                    let listener = Listener::with_hash(listen_hash.clone());
+                    let listener_arc = Arc::new(listener);
+                    
+                    // Register the destination with the transport and spawn
+                    // the background link event subscriber
+                    let app_name = "sing-box-reticulum".to_string();
+                    let aspect = listen_hash.clone();
+                    match runtime::block_on(
+                        crate::transport::register_listener_destination(
+                            listener_arc.clone(),
+                            identity,
+                            app_name,
+                            aspect,
+                        )
+                    ) {
+                        Ok(_address_hash) => {
+                            // Store the listener as-is; the destination
+                            // is tracked in the transport's handler.
+                            let handle = store.insert_listener((*listener_arc).clone()).await;
+                            registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
+                        }
+                        Err(e) => {
+                            registry.complete(
+                                task_id,
+                                TaskResult::Error {
+                                    message: format!("failed to register destination: {}", e),
+                                },
+                            ).await;
+                        }
+                    }
+                }
+                None => {
+                    // Transport not initialized — fall back to in-memory mode
+                    let listener = Listener::with_hash(listen_hash);
+                    let handle = store.insert_listener(listener).await;
+                    registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
+                }
+            }
+        }
         
-        // Complete the task with the handle
-        registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
+        #[cfg(not(feature = "real-reticulum"))]
+        {
+            // In-memory path: create a simple listener with the hash
+            let listener = Listener::with_hash(dest);
+            let handle = store.insert_listener(listener).await;
+            registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
+        }
     });
     
     task_id as i32
@@ -280,6 +340,18 @@ pub extern "C" fn reticulum_read(conn_handle: u64, buffer: *mut u8, max_len: usi
     result
 }
 
+/// Allocate a buffer with libc::malloc and copy bytes into it.
+/// Returns a pointer suitable for freeing with reticulum_free.
+unsafe fn alloc_with_libc(data: &[u8]) -> *mut u8 {
+    let len = data.len();
+    let ptr = libc::malloc(len) as *mut u8;
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, len);
+    ptr
+}
+
 /// Poll for completion of a task.
 /// Returns 0=pending, 1=done, -1=error.
 /// If done, the result handle is stored in *result_out and its length in *len_out.
@@ -296,12 +368,14 @@ pub extern "C" fn reticulum_poll(task_id: i32, result_out: *mut *mut u8, len_out
     match result {
         None => 0, // pending
         Some(TaskResult::Done { handle, data: _ }) => {
-            // Return the handle as bytes
-            let handle_bytes = handle.to_le_bytes().to_vec();
+            // Return the handle as bytes, allocated with libc so reticulum_free works.
+            let handle_bytes = handle.to_le_bytes();
             let len = handle_bytes.len();
-            let boxed_slice = handle_bytes.into_boxed_slice();
-            let ptr = Box::into_raw(boxed_slice) as *mut u8;
             unsafe {
+                let ptr = alloc_with_libc(&handle_bytes);
+                if ptr.is_null() {
+                    return -1;
+                }
                 if !result_out.is_null() {
                     *result_out = ptr;
                 }
@@ -314,9 +388,11 @@ pub extern "C" fn reticulum_poll(task_id: i32, result_out: *mut *mut u8, len_out
         Some(TaskResult::Error { message }) => {
             let msg_bytes = message.into_bytes();
             let len = msg_bytes.len();
-            let boxed_slice = msg_bytes.into_boxed_slice();
-            let ptr = Box::into_raw(boxed_slice) as *mut u8;
             unsafe {
+                let ptr = alloc_with_libc(&msg_bytes);
+                if ptr.is_null() {
+                    return -1;
+                }
                 if !result_out.is_null() {
                     *result_out = ptr;
                 }
@@ -331,14 +407,11 @@ pub extern "C" fn reticulum_poll(task_id: i32, result_out: *mut *mut u8, len_out
 
 
 /// Free memory allocated by the bridge.
+/// Safe to call on memory allocated by any bridge function (get_hash, reticulum_poll).
 #[no_mangle]
 pub extern "C" fn reticulum_free(ptr: *mut u8) {
     if !ptr.is_null() {
         unsafe {
-            // Box<[u8]> allocated via Box::into_raw in reticulum_poll.
-            // We need to reconstruct the Box to drop it properly.
-            // Since we don't have the length, use libc::free which is
-            // compatible with the system allocator used by Box.
             libc::free(ptr as *mut libc::c_void);
         }
     }

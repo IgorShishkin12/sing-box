@@ -2,15 +2,81 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+#[cfg(feature = "real-reticulum")]
+use std::sync::Mutex;
+#[cfg(feature = "real-reticulum")]
+use reticulum_rs::transport::destination::SingleInputDestination;
+#[cfg(feature = "real-reticulum")]
+use reticulum_rs::transport::hash::AddressHash;
+
 use crate::connection::Connection;
 
 static NEXT_LISTENER_ID: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug)]
+/// A listener that accepts incoming connections.
+///
+/// When the `real-reticulum` feature is active, the listener may also hold
+/// a reference to a registered `SingleInputDestination` in the global Transport,
+/// and its accept queue is populated by a background link event subscriber.
 pub struct Listener {
     id: u64,
     hash: Option<String>,
     accept_queue: Arc<RwLock<Vec<Connection>>>,
+    /// Real Reticulum destination (only used when real-reticulum feature is active).
+    #[cfg(feature = "real-reticulum")]
+    destination: Option<Arc<Mutex<SingleInputDestination>>>,
+    /// The address hash of the registered destination.
+    #[cfg(feature = "real-reticulum")]
+    destination_hash: Option<AddressHash>,
+}
+
+// Manual Debug impl to avoid requiring Debug on all generic fields.
+// We implement it conditionally for both feature sets.
+impl std::fmt::Debug for Listener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        #[cfg(not(feature = "real-reticulum"))]
+        {
+            f.debug_struct("Listener")
+                .field("id", &self.id)
+                .field("hash", &self.hash)
+                .field("accept_queue", &self.accept_queue)
+                .finish()
+        }
+        #[cfg(feature = "real-reticulum")]
+        {
+            f.debug_struct("Listener")
+                .field("id", &self.id)
+                .field("hash", &self.hash)
+                .field("accept_queue", &self.accept_queue)
+                .field("destination", &self.destination.as_ref().map(|_| "Some(...)"))
+                .field("destination_hash", &self.destination_hash)
+                .finish()
+        }
+    }
+}
+
+// Manual Clone impl to avoid requiring Clone on SingleInputDestination.
+impl Clone for Listener {
+    fn clone(&self) -> Self {
+        #[cfg(not(feature = "real-reticulum"))]
+        {
+            Self {
+                id: self.id,
+                hash: self.hash.clone(),
+                accept_queue: self.accept_queue.clone(),
+            }
+        }
+        #[cfg(feature = "real-reticulum")]
+        {
+            Self {
+                id: self.id,
+                hash: self.hash.clone(),
+                accept_queue: self.accept_queue.clone(),
+                destination: self.destination.clone(),
+                destination_hash: self.destination_hash,
+            }
+        }
+    }
 }
 
 impl Listener {
@@ -19,6 +85,10 @@ impl Listener {
             id: NEXT_LISTENER_ID.fetch_add(1, Ordering::SeqCst),
             hash: None,
             accept_queue: Arc::new(RwLock::new(Vec::new())),
+            #[cfg(feature = "real-reticulum")]
+            destination: None,
+            #[cfg(feature = "real-reticulum")]
+            destination_hash: None,
         }
     }
 
@@ -27,6 +97,26 @@ impl Listener {
             id: NEXT_LISTENER_ID.fetch_add(1, Ordering::SeqCst),
             hash: Some(hash),
             accept_queue: Arc::new(RwLock::new(Vec::new())),
+            #[cfg(feature = "real-reticulum")]
+            destination: None,
+            #[cfg(feature = "real-reticulum")]
+            destination_hash: None,
+        }
+    }
+
+    /// Create a listener with a real Reticulum destination.
+    #[cfg(feature = "real-reticulum")]
+    pub fn with_destination(
+        hash: String,
+        destination: Arc<Mutex<SingleInputDestination>>,
+        destination_hash: AddressHash,
+    ) -> Self {
+        Self {
+            id: NEXT_LISTENER_ID.fetch_add(1, Ordering::SeqCst),
+            hash: Some(hash),
+            accept_queue: Arc::new(RwLock::new(Vec::new())),
+            destination: Some(destination),
+            destination_hash: Some(destination_hash),
         }
     }
 
@@ -36,6 +126,18 @@ impl Listener {
 
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Get the real Reticulum destination, if any.
+    #[cfg(feature = "real-reticulum")]
+    pub fn destination(&self) -> Option<&Arc<Mutex<SingleInputDestination>>> {
+        self.destination.as_ref()
+    }
+
+    /// Get the destination address hash, if any.
+    #[cfg(feature = "real-reticulum")]
+    pub fn destination_hash(&self) -> Option<AddressHash> {
+        self.destination_hash
     }
 
     /// Accept a pending connection, if any.
@@ -96,5 +198,26 @@ mod tests {
         assert!(listener.accept().await.is_some());
         assert!(listener.accept().await.is_none());
         assert_eq!(listener.pending().await, 0);
+    }
+
+    #[cfg(feature = "real-reticulum")]
+    #[tokio::test]
+    async fn test_listener_with_destination() {
+        use reticulum_rs::transport::destination::SingleInputDestination;
+        use reticulum_rs::transport::destination::DestinationName;
+        use reticulum_rs::transport::identity::PrivateIdentity;
+        use std::sync::Mutex;
+
+        let identity = PrivateIdentity::new_from_rand(rand_core::OsRng);
+        let dest = Arc::new(Mutex::new(SingleInputDestination::new(
+            identity.clone(),
+            DestinationName::new("bridge-test", "listen"),
+        )));
+        let dest_hash = *identity.address_hash();
+
+        let listener = Listener::with_destination("test-hash".to_string(), dest.clone(), dest_hash);
+        assert_eq!(listener.hash(), Some("test-hash"));
+        assert_eq!(listener.destination_hash(), Some(dest_hash));
+        assert!(listener.destination().is_some());
     }
 }
