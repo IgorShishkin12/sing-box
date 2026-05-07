@@ -117,12 +117,19 @@ pub extern "C" fn reticulum_register_name(name: *const c_char, hash: *const c_ch
 
 /// Shutdown the bridge and release resources.
 ///
-/// Does NOT clear the store or registry — they persist across init/shutdown
-/// cycles so that handles and task IDs remain valid. Only the runtime is
-/// logically shut down (the Tokio runtime itself is kept alive to avoid
-/// thread-local state corruption from dropping and recreating it).
+/// Clears the store so that old handles become invalid.
+/// The Tokio runtime itself is kept alive to avoid thread-local
+/// state corruption from dropping and recreating it.
 #[no_mangle]
 pub extern "C" fn reticulum_shutdown() {
+    // Only try to clear the store if we have a runtime — tests may call
+    // shutdown without having called init first (e.g. null-param tests).
+    if runtime::has_runtime() {
+        let store = global_store();
+        runtime::block_on(async move {
+            store.clear_all().await;
+        });
+    }
     runtime::shutdown();
 }
 
@@ -259,17 +266,16 @@ pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i32 {
                     // the background link event subscriber
                     let app_name = "sing-box-reticulum".to_string();
                     let aspect = listen_hash.clone();
-                    match runtime::block_on(
-                        crate::transport::register_listener_destination(
-                            listener_arc.clone(),
-                            identity,
-                            app_name,
-                            aspect,
-                        )
-                    ) {
-                        Ok(_address_hash) => {
-                            // Store the listener as-is; the destination
-                            // is tracked in the transport's handler.
+                    match crate::transport::register_listener_destination(
+                        listener_arc.clone(),
+                        identity,
+                        app_name,
+                        aspect,
+                    ).await {
+                        Ok(address_hash) => {
+                            // Store the address hash on the listener so it can be
+                            // retrieved later for dialing.
+                            listener_arc.set_destination_hash(address_hash).await;
                             let handle = store.insert_listener((*listener_arc).clone()).await;
                             registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
                         }

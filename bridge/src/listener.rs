@@ -26,8 +26,9 @@ pub struct Listener {
     #[cfg(feature = "real-reticulum")]
     destination: Option<Arc<Mutex<SingleInputDestination>>>,
     /// The address hash of the registered destination.
+    /// Uses Arc<RwLock> so it can be set after creation via Arc reference.
     #[cfg(feature = "real-reticulum")]
-    destination_hash: Option<AddressHash>,
+    destination_hash: Arc<RwLock<Option<AddressHash>>>,
 }
 
 // Manual Debug impl to avoid requiring Debug on all generic fields.
@@ -73,7 +74,7 @@ impl Clone for Listener {
                 hash: self.hash.clone(),
                 accept_queue: self.accept_queue.clone(),
                 destination: self.destination.clone(),
-                destination_hash: self.destination_hash,
+                destination_hash: self.destination_hash.clone(),
             }
         }
     }
@@ -88,7 +89,7 @@ impl Listener {
             #[cfg(feature = "real-reticulum")]
             destination: None,
             #[cfg(feature = "real-reticulum")]
-            destination_hash: None,
+            destination_hash: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -100,7 +101,7 @@ impl Listener {
             #[cfg(feature = "real-reticulum")]
             destination: None,
             #[cfg(feature = "real-reticulum")]
-            destination_hash: None,
+            destination_hash: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -116,7 +117,7 @@ impl Listener {
             hash: Some(hash),
             accept_queue: Arc::new(RwLock::new(Vec::new())),
             destination: Some(destination),
-            destination_hash: Some(destination_hash),
+            destination_hash: Arc::new(RwLock::new(Some(destination_hash))),
         }
     }
 
@@ -136,8 +137,14 @@ impl Listener {
 
     /// Get the destination address hash, if any.
     #[cfg(feature = "real-reticulum")]
-    pub fn destination_hash(&self) -> Option<AddressHash> {
-        self.destination_hash
+    pub async fn destination_hash(&self) -> Option<AddressHash> {
+        *self.destination_hash.read().await
+    }
+
+    /// Set the destination address hash after creation (works through Arc).
+    #[cfg(feature = "real-reticulum")]
+    pub async fn set_destination_hash(&self, hash: AddressHash) {
+        *self.destination_hash.write().await = Some(hash);
     }
 
     /// Accept a pending connection, if any.
@@ -217,7 +224,7 @@ mod tests {
 
         let listener = Listener::with_destination("test-hash".to_string(), dest.clone(), dest_hash);
         assert_eq!(listener.hash(), Some("test-hash"));
-        assert_eq!(listener.destination_hash(), Some(dest_hash));
+        assert_eq!(listener.destination_hash().await, Some(dest_hash));
         assert!(listener.destination().is_some());
     }
 }

@@ -25,8 +25,8 @@ pub fn init_runtime() -> i32 {
         eprintln!("Runtime already initialized");
         return 0;
     }
-    eprintln!("Building runtime");
-    match Builder::new_current_thread()
+    eprintln!("Building runtime (multi-thread)");
+    match Builder::new_multi_thread()
         .enable_all()
         .build()
     {
@@ -59,6 +59,15 @@ static BLOCK_ON_LOCK: once_cell::sync::OnceCell<Mutex<()>> = once_cell::sync::On
 
 fn get_block_on_lock() -> &'static Mutex<()> {
     BLOCK_ON_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Check if the runtime has been initialized.
+pub fn has_runtime() -> bool {
+    let guard = match get_runtime_lock().lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.is_some()
 }
 
 /// Execute a future on the runtime and block on it.

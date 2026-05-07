@@ -157,20 +157,29 @@ pub fn init_transport(cfg: &ReticulumConfig) -> i32 {
         tp_config.set_ratchet_store_path(rstore.clone());
     }
 
-    // 5. Create Transport (this spawns background tasks internally)
-    let transport = Transport::new(tp_config);
-
-    // 6. Spawn interfaces from config (async, run via block_on)
-    let iface_mgr = transport.iface_manager();
+    // 5. Create Transport and spawn interfaces (both require Tokio runtime context)
     let interfaces = cfg.interfaces.clone();
-    runtime::block_on(async move {
+    eprintln!("[bridge-tp] about to block_on for Transport::new");
+    let transport = runtime::block_on(async move {
+        eprintln!("[bridge-tp] inside block_on, creating Transport");
+        // Create Transport inside the async context so it can spawn background tasks
+        let transport = Transport::new(tp_config);
+        eprintln!("[bridge-tp] Transport created, spawning interfaces");
+
+        // Spawn interfaces from config
+        let iface_mgr = transport.iface_manager();
         let mut mgr = iface_mgr.lock().await;
+        eprintln!("[bridge-tp] got iface manager lock, spawning interfaces");
         spawn_interfaces(&mut *mgr, &interfaces).await;
+        eprintln!("[bridge-tp] interfaces spawned");
+
+        transport
     });
+    eprintln!("[bridge-tp] block_on completed");
 
     eprintln!("[bridge-tp] Transport initialized successfully");
 
-    // 7. Store globally
+    // 6. Store globally
     let _ = TRANSPORT.set(Arc::new(Mutex::new(transport)));
     0
 }
