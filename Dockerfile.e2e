@@ -1,0 +1,13 @@
+FROM golang:1.25-alpine AS builder
+
+RUN apk add --no-cache rust cargo build-base
+
+COPY . /workspace/sing-box
+WORKDIR /workspace/sing-box
+
+# Build Rust bridge
+RUN cd bridge && cargo build
+
+# Set LD_LIBRARY_PATH and run E2E tests
+ENV LD_LIBRARY_PATH=/workspace/sing-box/bridge/target/debug
+CMD cd bridge && cargo build && cd .. && go test -v -count=1 ./e2e/...

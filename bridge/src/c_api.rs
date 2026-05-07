@@ -2,7 +2,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
 use crate::config;
-use crate::connection::Connection;
+use crate::connection::{create_pair, Connection};
 use crate::listener::Listener;
 use crate::runtime;
 use crate::store::global_store;
@@ -64,7 +64,7 @@ pub extern "C" fn reticulum_dial(destination_hash: *const c_char) -> i32 {
     if destination_hash.is_null() {
         return -1;
     }
-    let _dest = match unsafe { CStr::from_ptr(destination_hash) }.to_str() {
+    let dest = match unsafe { CStr::from_ptr(destination_hash) }.to_str() {
         Ok(s) => s.to_string(),
         Err(_) => return -1,
     };
@@ -79,12 +79,24 @@ pub extern "C" fn reticulum_dial(destination_hash: *const c_char) -> i32 {
     
     // Spawn the async dial operation
     runtime::block_on(async move {
-        // Create a new connection (in-memory for now, will be replaced with rns-transport)
-        let conn = Connection::new();
-        let handle = store.insert_connection(conn).await;
-        
-        // Complete the task with the handle
-        registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
+        // Try to find a listener registered for this hash
+        match store.get_listener_by_hash(&dest).await {
+            Some(listener) => {
+                // Paired connection: dial-side connection A, listener-side connection B
+                let (conn_a, conn_b) = create_pair().await;
+                // Push conn_b into the listener's accept queue
+                listener.push_connection((*conn_b).clone()).await;
+                // Insert conn_a into the store as the dial result
+                let handle = store.insert_connection((*conn_a).clone()).await;
+                registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
+            }
+            None => {
+                // No matching listener — standalone connection
+                let conn = Connection::new();
+                let handle = store.insert_connection(conn).await;
+                registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
+            }
+        }
     });
     
     task_id as i32
@@ -97,7 +109,7 @@ pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i32 {
     if listen_hash.is_null() {
         return -1;
     }
-    let _dest = match unsafe { CStr::from_ptr(listen_hash) }.to_str() {
+    let dest = match unsafe { CStr::from_ptr(listen_hash) }.to_str() {
         Ok(s) => s.to_string(),
         Err(_) => return -1,
     };
@@ -112,8 +124,8 @@ pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i32 {
     
     // Spawn the async listen operation
     runtime::block_on(async move {
-        // Create a new listener (in-memory for now, will be replaced with rns-transport)
-        let listener = Listener::new();
+        // Create a new listener with the hash (for hash-matched dial)
+        let listener = Listener::with_hash(dest);
         let handle = store.insert_listener(listener).await;
         
         // Complete the task with the handle

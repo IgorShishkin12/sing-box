@@ -9,6 +9,7 @@ static NEXT_LISTENER_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug)]
 pub struct Listener {
     id: u64,
+    hash: Option<String>,
     accept_queue: Arc<RwLock<Vec<Connection>>>,
 }
 
@@ -16,8 +17,21 @@ impl Listener {
     pub fn new() -> Self {
         Self {
             id: NEXT_LISTENER_ID.fetch_add(1, Ordering::SeqCst),
+            hash: None,
             accept_queue: Arc::new(RwLock::new(Vec::new())),
         }
+    }
+
+    pub fn with_hash(hash: String) -> Self {
+        Self {
+            id: NEXT_LISTENER_ID.fetch_add(1, Ordering::SeqCst),
+            hash: Some(hash),
+            accept_queue: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    pub fn hash(&self) -> Option<&str> {
+        self.hash.as_deref()
     }
 
     pub fn id(&self) -> u64 {
