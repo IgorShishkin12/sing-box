@@ -294,13 +294,12 @@ mod tests {
         assert_eq!(&buf, b"world");
     }
 
+    /// Helper to create a minimal Link for testing.
     #[cfg(feature = "real-reticulum")]
-    #[tokio::test]
-    async fn test_connection_new_from_link() {
+    fn make_test_link() -> (Arc<Mutex<Link>>, AddressHash) {
         use reticulum_rs::transport::destination::link::Link;
         use reticulum_rs::transport::destination::DestinationDesc;
-        use reticulum_rs::transport::hash::AddressHash;
-        use reticulum_rs::transport::identity::{Identity, PrivateIdentity};
+        use reticulum_rs::transport::identity::PrivateIdentity;
         use tokio::sync::broadcast;
 
         let identity = PrivateIdentity::new_from_rand(rand_core::OsRng);
@@ -313,9 +312,103 @@ mod tests {
         let (tx, _) = broadcast::channel(16);
         let link = Arc::new(Mutex::new(Link::new(desc, tx)));
         let link_id = *identity.address_hash();
+        (link, link_id)
+    }
 
+    #[cfg(feature = "real-reticulum")]
+    #[tokio::test]
+    async fn test_connection_new_from_link() {
+        let (link, link_id) = make_test_link();
         let conn = Connection::new_from_link(link.clone(), link_id);
         assert_eq!(conn.link_id(), Some(link_id));
         assert!(conn.link().is_some());
+    }
+
+    #[cfg(feature = "real-reticulum")]
+    #[tokio::test]
+    async fn test_link_connection_push_read_data() {
+        let (link, link_id) = make_test_link();
+        let conn = Connection::new_from_link(link, link_id);
+
+        // Push data into the read buffer
+        conn.push_read_data(b"hello link").await;
+
+        // Read it back
+        let mut buf = [0u8; 10];
+        let read = conn.read(&mut buf).await;
+        assert_eq!(read, 10);
+        assert_eq!(&buf, b"hello link");
+    }
+
+    #[cfg(feature = "real-reticulum")]
+    #[tokio::test]
+    async fn test_link_connection_push_read_data_multi() {
+        let (link, link_id) = make_test_link();
+        let conn = Connection::new_from_link(link, link_id);
+
+        // Push multiple data chunks
+        conn.push_read_data(b"abc").await;
+        conn.push_read_data(b"def").await;
+        conn.push_read_data(b"ghi").await;
+
+        assert_eq!(conn.available().await, 9);
+
+        // Read all at once
+        let mut buf = [0u8; 9];
+        let read = conn.read(&mut buf).await;
+        assert_eq!(read, 9);
+        assert_eq!(&buf, b"abcdefghi");
+    }
+
+    #[cfg(feature = "real-reticulum")]
+    #[tokio::test]
+    async fn test_link_connection_peek_and_available() {
+        let (link, link_id) = make_test_link();
+        let conn = Connection::new_from_link(link, link_id);
+
+        assert_eq!(conn.available().await, 0);
+
+        conn.push_read_data(b"peek test").await;
+        assert_eq!(conn.available().await, 9);
+
+        let peeked = conn.peek().await;
+        assert_eq!(peeked, b"peek test");
+
+        // Peek should not consume data
+        assert_eq!(conn.available().await, 9);
+    }
+
+    #[cfg(feature = "real-reticulum")]
+    #[tokio::test]
+    async fn test_link_connection_read_empty() {
+        let (link, link_id) = make_test_link();
+        let conn = Connection::new_from_link(link, link_id);
+
+        let mut buf = [0u8; 4];
+        let read = conn.read(&mut buf).await;
+        assert_eq!(read, 0);
+    }
+
+    #[cfg(feature = "real-reticulum")]
+    #[tokio::test]
+    async fn test_link_connection_write() {
+        // Test that write on a Link connection attempts to send via data_packet.
+        // data_packet creates a valid packet even without a transport backing,
+        // so write should return the full data length.
+        let (link, link_id) = make_test_link();
+        let conn = Connection::new_from_link(link, link_id);
+
+        let written = conn.write(b"test data").await;
+        assert_eq!(written, 9);
+    }
+
+    #[cfg(feature = "real-reticulum")]
+    #[tokio::test]
+    async fn test_link_connection_id() {
+        let (link, link_id) = make_test_link();
+        let conn = Connection::new_from_link(link, link_id);
+
+        assert!(conn.id() > 0);
+        assert_eq!(conn.link_id(), Some(link_id));
     }
 }

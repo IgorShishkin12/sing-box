@@ -148,27 +148,75 @@ pub extern "C" fn reticulum_dial(destination_hash: *const c_char) -> i32 {
     
     // Spawn the async dial operation
     runtime::block_on(async move {
-        // Try to find a listener registered for this hash
-        match store.get_listener_by_hash(&dest).await {
-            Some(listener) => {
-                // Paired connection: dial-side connection A, listener-side connection B
-                let (conn_a, conn_b) = create_pair().await;
-                // Push conn_b into the listener's accept queue
-                listener.push_connection((*conn_b).clone()).await;
-                // Insert conn_a into the store as the dial result
-                let handle = store.insert_connection((*conn_a).clone()).await;
-                registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
+        #[cfg(feature = "real-reticulum")]
+        {
+            // Real Reticulum path: attempt to establish a real link via the transport.
+            match crate::transport::get_transport() {
+                Some(_) => {
+                    match crate::transport::dial_and_wait(&dest).await {
+                        Ok((link, link_id)) => {
+                            // Create a Connection wrapping the real Link
+                            let conn = Connection::new_from_link(link, link_id);
+                            // Spawn a background data reader for inbound data on this link
+                            crate::transport::spawn_link_data_reader(conn.clone(), link_id);
+                            let handle = store.insert_connection(conn).await;
+                            registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
+                        }
+                        Err(e) => {
+                            registry.complete(
+                                task_id,
+                                TaskResult::Error {
+                                    message: format!("dial failed: {}", e),
+                                },
+                            ).await;
+                        }
+                    }
+                }
+                None => {
+                    // Transport not initialized — fall through to in-memory path below.
+                    // (The code after the #[cfg] block handles this case.)
+                    // We still complete with the in-memory path.
+                    in_memory_dial(&dest, &store, &registry, task_id).await;
+                }
             }
-            None => {
-                // No matching listener — standalone connection
-                let conn = Connection::new();
-                let handle = store.insert_connection(conn).await;
-                registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
-            }
+        }
+        
+        #[cfg(not(feature = "real-reticulum"))]
+        {
+            in_memory_dial(&dest, &store, &registry, task_id).await;
         }
     });
     
     task_id as i32
+}
+
+/// In-memory dial path: try to find a listener registered for this hash, or
+/// create a standalone connection. Used as fallback or when real-reticulum
+/// feature is disabled.
+async fn in_memory_dial(
+    dest: &str,
+    store: &'static crate::store::HandleStore,
+    registry: &'static crate::task::TaskRegistry,
+    task_id: u64,
+) {
+    // Try to find a listener registered for this hash
+    match store.get_listener_by_hash(dest).await {
+        Some(listener) => {
+            // Paired connection: dial-side connection A, listener-side connection B
+            let (conn_a, conn_b) = create_pair().await;
+            // Push conn_b into the listener's accept queue
+            listener.push_connection((*conn_b).clone()).await;
+            // Insert conn_a into the store as the dial result
+            let handle = store.insert_connection((*conn_a).clone()).await;
+            registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
+        }
+        None => {
+            // No matching listener — standalone connection
+            let conn = Connection::new();
+            let handle = store.insert_connection(conn).await;
+            registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
+        }
+    }
 }
 
 /// Listen on a hash, returning a task ID.

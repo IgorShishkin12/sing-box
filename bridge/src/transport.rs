@@ -6,7 +6,7 @@
 //! registration.
 //!
 //! It also provides helpers for registering `SingleInputDestination`s and subscribing
-//! to link events, used by the listener accept loop.
+//! to link events, used by the listener accept loop and the outbound dial helper.
 //!
 //! IMPORTANT: `reticulum_rs` re-exports `rns_core` types at the top level
 //! (e.g. `reticulum_rs::destination`, `reticulum_rs::identity`, `reticulum_rs::hash`)
@@ -18,11 +18,12 @@
 
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 use rand_core::OsRng;
-use reticulum_rs::transport::destination::link::{LinkEvent, LinkEventData};
-use reticulum_rs::transport::destination::{DestinationName, SingleInputDestination};
+use reticulum_rs::transport::destination::link::{Link, LinkEvent, LinkStatus};
+use reticulum_rs::transport::destination::{DestinationDesc, DestinationName};
 use reticulum_rs::transport::hash::AddressHash;
 use reticulum_rs::transport::identity::PrivateIdentity;
 use reticulum_rs::transport::iface::udp::UdpInterface;
@@ -33,6 +34,11 @@ use crate::config::{ReticulumConfig, ReticulumInterface};
 use crate::connection::Connection;
 use crate::listener::Listener;
 use crate::runtime;
+
+/// Maximum time to wait for a link to become active during dial.
+const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Poll interval while waiting for link activation.
+const DIAL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Global Transport singleton.
 static TRANSPORT: OnceCell<Arc<Mutex<Transport>>> = OnceCell::new();
@@ -174,7 +180,7 @@ pub fn init_transport(cfg: &ReticulumConfig) -> i32 {
 /// a `Connection` wrapping the established `Link` and pushing it into the
 /// listener's accept queue.
 ///
-/// Returns the `AddressHash` (from `rns_core`) of the registered destination.
+/// Returns the `AddressHash` of the registered destination.
 /// The caller should store this in the Listener for later reference.
 pub async fn register_listener_destination(
     listener: Arc<Listener>,
@@ -235,25 +241,8 @@ pub async fn register_listener_destination(
                                 // Create a Connection wrapping this link
                                 let conn = Connection::new_from_link(link.clone(), event.id);
 
-                                // Subscribe to data events on this link
-                                let mut data_events = {
-                                    let tp = transport.lock().await;
-                                    tp.received_data_events()
-                                };
-                                let conn_clone = conn.clone();
-                                tokio::spawn(async move {
-                                    loop {
-                                        match data_events.recv().await {
-                                            Ok(data) => {
-                                                if data.destination == event.id {
-                                                    conn_clone.push_read_data(data.data.as_slice()).await;
-                                                }
-                                            }
-                                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                                        }
-                                    }
-                                });
+                                // Spawn a data reader for this link
+                                spawn_link_data_reader(conn.clone(), event.id);
 
                                 // Push the connection into the listener's accept queue
                                 listener_clone.push_connection(conn).await;
@@ -291,4 +280,218 @@ pub async fn register_listener_destination(
     });
 
     Ok(address_hash)
+}
+
+/// Spawn a background task that subscribes to `received_data_events` and
+/// pushes inbound payload data into a connection's read buffer.
+///
+/// The task filters events by `link_id` so only data destined for this
+/// link is forwarded to the connection.
+pub fn spawn_link_data_reader(conn: Connection, link_id: AddressHash) {
+    let transport = match get_transport() {
+        Some(t) => t,
+        None => {
+            eprintln!("[bridge-tp] cannot spawn data reader: transport not initialized");
+            return;
+        }
+    };
+
+    // Subscribe to data events by locking the transport briefly to get a receiver.
+    let mut data_events = {
+        let tp = transport.blocking_lock();
+        tp.received_data_events()
+    };
+
+    tokio::spawn(async move {
+        loop {
+            match data_events.recv().await {
+                Ok(data) => {
+                    if data.destination == link_id {
+                        conn.push_read_data(data.data.as_slice()).await;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    eprintln!("[bridge-tp] data event channel closed, stopping data reader");
+                    break;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            }
+        }
+    });
+}
+
+/// Resolve a destination hash string to an `AddressHash`.
+///
+/// Accepts optional `rln://` or `0x` prefix before the hex string.
+/// The hex string must be exactly 32 hex characters (16 bytes) for an
+/// Reticulum address hash.
+fn parse_dest_hash(hex_str: &str) -> Result<AddressHash, &'static str> {
+    let clean = hex_str
+        .strip_prefix("rln://")
+        .or_else(|| hex_str.strip_prefix("0x"))
+        .unwrap_or(hex_str);
+    AddressHash::new_from_hex_string(clean).map_err(|_| "invalid destination hash hex string")
+}
+
+/// Dial a remote destination by its hash string, waiting for the link to
+/// become active.
+///
+/// Resolves the destination's identity from the transport's announce table,
+/// initiates a link request, and blocks until the link transitions to
+/// `LinkStatus::Active` (or a timeout occurs).
+///
+/// Returns a tuple of `(Arc<Mutex<Link>>, AddressHash)` on success.
+///
+/// # Errors
+///
+/// Returns `Err` if:
+/// - Transport is not initialized.
+/// - `dest_hash` is not a valid hex hash.
+/// - Destination identity is unknown (not announced).
+/// - Link does not become active within `DIAL_TIMEOUT`.
+pub async fn dial_and_wait(dest_hash: &str) -> Result<(Arc<Mutex<Link>>, AddressHash), &'static str> {
+    let transport = get_transport()
+        .ok_or("Transport not initialized")?;
+
+    let address_hash = parse_dest_hash(dest_hash)?;
+
+    // Look up the destination identity from the transport's announce table
+    let identity = {
+        let tp = transport.lock().await;
+        tp.destination_identity(&address_hash).await
+            .ok_or("unknown destination: identity not found in announce table")?
+    };
+
+    // Subscribe to out-link events before initiating the link request
+    let mut link_events = {
+        let tp = transport.lock().await;
+        tp.out_link_events()
+    };
+
+    // Create destination description and initiate link
+    let name = DestinationName::new("sing-box-reticulum", "dial");
+    let desc = DestinationDesc {
+        identity,
+        address_hash,
+        name,
+    };
+
+    let link = {
+        let tp = transport.lock().await;
+        tp.link(desc).await
+    };
+
+    eprintln!(
+        "[bridge-tp] initiated link request to {}",
+        address_hash
+    );
+
+    // Clone link for later use (to avoid borrow conflicts with the status-check lock)
+    let link_clone = link.clone();
+    let link_id = *link.lock().await.id();
+    let start = tokio::time::Instant::now();
+
+    loop {
+        if start.elapsed() >= DIAL_TIMEOUT {
+            eprintln!("[bridge-tp] dial timeout for link {}", link_id);
+            return Err("dial timed out waiting for link activation");
+        }
+
+        // Check link status directly (the guard is dropped after the match)
+        let link_status = {
+            let link_guard = link_clone.lock().await;
+            link_guard.status()
+        };
+        match link_status {
+            LinkStatus::Active => {
+                eprintln!(
+                    "[bridge-tp] link {} active, dial successful",
+                    link_id
+                );
+                return Ok((link_clone, address_hash));
+            }
+            LinkStatus::Closed | LinkStatus::Stale => {
+                eprintln!(
+                    "[bridge-tp] link {} failed with status {:?}",
+                    link_id,
+                    link_status
+                );
+                return Err("link failed before becoming active");
+            }
+            _ => {} // Still pending, check link events too
+        }
+
+        // Also check link events as a secondary path
+        tokio::time::sleep(DIAL_POLL_INTERVAL).await;
+        match link_events.try_recv() {
+            Ok(event) => {
+                if event.id == link_id && matches!(event.event, LinkEvent::Activated) {
+                    eprintln!(
+                        "[bridge-tp] link {} activated (event), dial successful",
+                        link_id
+                    );
+                    return Ok((link_clone, address_hash));
+                }
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                // No events yet, continue polling
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                eprintln!("[bridge-tp] link event channel closed while dialing");
+                return Err("link event channel closed");
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_dest_hash_with_rln_prefix() {
+        let hash = "rln://aabbccdd00112233445566778899aabb";
+        let result = parse_dest_hash(hash);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().to_hex_string(), "aabbccdd00112233445566778899aabb");
+    }
+
+    #[test]
+    fn test_parse_dest_hash_invalid_hex() {
+        let result = parse_dest_hash("not-hex-string");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "invalid destination hash hex string");
+    }
+
+    #[test]
+    fn test_parse_dest_hash_plain_hex() {
+        let hex_str = "aabbccdd00112233445566778899aabb";
+        let result = parse_dest_hash(hex_str);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().to_hex_string(), hex_str);
+    }
+
+    #[test]
+    fn test_parse_dest_hash_too_short() {
+        // 30 chars instead of 32
+        let result = parse_dest_hash("aabbccdd00112233445566778899aa");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dial_and_wait_no_transport() {
+        // Without initializing the transport, dial should fail immediately.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(dial_and_wait("rln://aabbccdd00112233445566778899aabb"));
+        assert!(result.is_err());
+        // Check the error message (can't use unwrap_err because Arc<Mutex<Link>> doesn't impl Debug)
+        match result {
+            Err(msg) => assert_eq!(msg, "Transport not initialized"),
+            Ok(_) => panic!("expected error"),
+        }
+    }
 }
