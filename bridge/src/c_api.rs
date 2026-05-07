@@ -32,7 +32,19 @@ pub extern "C" fn reticulum_init(config_json: *const c_char) -> i32 {
     } else {
         crate::set_global_config(None);
     }
-    runtime::init_runtime()
+    runtime::init_runtime();
+
+    // Initialize real Reticulum transport when the feature is active.
+    #[cfg(feature = "real-reticulum")]
+    {
+        if let Some(cfg) = crate::get_global_config() {
+            if crate::transport::init_transport(cfg) != 0 {
+                return -1;
+            }
+        }
+    }
+
+    0
 }
 
 

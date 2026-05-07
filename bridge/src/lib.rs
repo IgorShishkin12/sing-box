@@ -6,6 +6,9 @@ pub mod runtime;
 pub mod store;
 pub mod task;
 
+#[cfg(feature = "real-reticulum")]
+pub mod transport;
+
 // Re-export c_api for integration tests
 pub use c_api::*;
 
