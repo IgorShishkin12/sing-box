@@ -887,8 +887,10 @@ dependencies = [
 name = "sing-box-reticulum-bridge"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "log",
  "once_cell",
+ "rand_core",
  "reticulum-rs",
  "serde",
  "serde_json",

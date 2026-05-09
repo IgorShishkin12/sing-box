@@ -8,8 +8,6 @@ on:
       - unstable
     paths-ignore:
       - '**.md'
-      - '.github/**'
-      - '!.github/workflows/test.yml'
   pull_request:
     branches:
       - stable
@@ -53,3 +51,42 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: bash
         run: go test -v -tags "$BUILD_TAGS" -ldflags "$LDFLAGS_SHARED" ./...
+
+  build_bridge:
+    name: Build Rust bridge
+    uses: ./.github/workflows/bridge.yml
+    with:
+      target: x86_64-unknown-linux-gnu
+      profile: release
+
+  test_reticulum:
+    name: Test reticulum protocol
+    needs: build_bridge
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ~1.25
+      - name: Download bridge static library
+        uses: actions/download-artifact@v4
+        with:
+          name: libsing_box_reticulum_bridge-x86_64-unknown-linux-gnu-release
+          path: sing-box/bridge/target/x86_64-unknown-linux-gnu/release/
+      - name: Set build tags and ldflags
+        run: |
+          echo "BUILD_TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS),with_reticulum" >> "$GITHUB_ENV"
+          echo "LDFLAGS_SHARED=$(cat release/LDFLAGS)" >> "$GITHUB_ENV"
+      - name: Run reticulum tests
+        run: |
+          CGO_ENABLED=1 go test -v -count=1 -tags "$BUILD_TAGS" -ldflags "$LDFLAGS_SHARED" ./protocol/reticulum/...
+      - name: Run reticulum tests with race detector
+        run: |
+          CGO_ENABLED=1 go test -v -race -count=1 -tags "$BUILD_TAGS" -ldflags "$LDFLAGS_SHARED" ./protocol/reticulum/...
+      - name: Run reticulum tests repeatedly for reliability
+        run: |
+          for i in {1..5}; do
+            CGO_ENABLED=1 go test -v -count=1 -tags "$BUILD_TAGS" -ldflags "$LDFLAGS_SHARED" ./protocol/reticulum/... || exit 1
+          done

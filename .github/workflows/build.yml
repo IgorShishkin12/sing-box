@@ -716,6 +716,122 @@ jobs:
         with:
           name: binary-android-apks
           path: 'dist'
+  build_bridge_amd64:
+    name: Build Rust bridge (amd64)
+    uses: ./.github/workflows/bridge.yml
+    with:
+      target: x86_64-unknown-linux-gnu
+      profile: release
+
+  build_bridge_arm64:
+    name: Build Rust bridge (arm64)
+    uses: ./.github/workflows/bridge.yml
+    with:
+      target: aarch64-unknown-linux-gnu
+      profile: release
+
+  build_reticulum:
+    name: Build with reticulum (amd64)
+    if: github.event_name != 'workflow_dispatch' || inputs.build == 'All' || inputs.build == 'Binary'
+    runs-on: ubuntu-latest
+    needs:
+      - calculate_version
+      - build_bridge_amd64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 0
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ~1.25.9
+      - name: Download bridge static library (amd64)
+        uses: actions/download-artifact@v4
+        with:
+          name: libsing_box_reticulum_bridge-x86_64-unknown-linux-gnu-release
+          path: sing-box/bridge/target/x86_64-unknown-linux-gnu/release/
+      - name: Set build tags
+        run: |
+          TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS)
+          echo "BUILD_TAGS=${TAGS},with_reticulum" >> "${GITHUB_ENV}"
+      - name: Set shared ldflags
+        run: |
+          echo "LDFLAGS_SHARED=$(cat release/LDFLAGS)" >> "${GITHUB_ENV}"
+      - name: Build with reticulum (amd64)
+        run: |
+          set -xeuo pipefail
+          mkdir -p dist
+          go build -v -trimpath -o dist/sing-box -tags "${BUILD_TAGS}" \
+          -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ needs.calculate_version.outputs.version }}' ${LDFLAGS_SHARED} -s -w -buildid=" \
+          ./cmd/sing-box
+        env:
+          CGO_ENABLED: "1"
+          GOOS: linux
+          GOARCH: amd64
+      - name: Set name
+        run: |
+          DIR_NAME="sing-box-${{ needs.calculate_version.outputs.version }}-linux-amd64-reticulum"
+          echo "DIR_NAME=${DIR_NAME}" >> "${GITHUB_ENV}"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DIR_NAME }}
+          path: dist/sing-box
+          if-no-files-found: error
+          retention-days: 1
+
+  build_reticulum_arm64:
+    name: Build with reticulum (arm64)
+    if: github.event_name != 'workflow_dispatch' || inputs.build == 'All' || inputs.build == 'Binary'
+    runs-on: ubuntu-latest
+    needs:
+      - calculate_version
+      - build_bridge_arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 0
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ~1.25.9
+      - name: Download bridge static library (arm64)
+        uses: actions/download-artifact@v4
+        with:
+          name: libsing_box_reticulum_bridge-aarch64-unknown-linux-gnu-release
+          path: sing-box/bridge/target/aarch64-unknown-linux-gnu/release/
+      - name: Set build tags
+        run: |
+          TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS)
+          echo "BUILD_TAGS=${TAGS},with_reticulum" >> "${GITHUB_ENV}"
+      - name: Set shared ldflags
+        run: |
+          echo "LDFLAGS_SHARED=$(cat release/LDFLAGS)" >> "${GITHUB_ENV}"
+      - name: Build with reticulum (arm64)
+        run: |
+          set -xeuo pipefail
+          mkdir -p dist
+          go build -v -trimpath -o dist/sing-box -tags "${BUILD_TAGS}" \
+          -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ needs.calculate_version.outputs.version }}' ${LDFLAGS_SHARED} -s -w -buildid=" \
+          ./cmd/sing-box
+        env:
+          CGO_ENABLED: "1"
+          GOOS: linux
+          GOARCH: arm64
+      - name: Set name
+        run: |
+          DIR_NAME="sing-box-${{ needs.calculate_version.outputs.version }}-linux-arm64-reticulum"
+          echo "DIR_NAME=${DIR_NAME}" >> "${GITHUB_ENV}"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DIR_NAME }}
+          path: dist/sing-box
+          if-no-files-found: error
+          retention-days: 1
+
   publish_android:
     name: Publish Android
     if: github.event_name == 'workflow_dispatch' && inputs.build == 'publish-android' && github.ref != 'refs/heads/oldstable'

@@ -1,0 +1,30 @@
+{
+  "log": {
+    "level": "info",
+    "output": "/var/log/sing-box-client.log"
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 1080
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "reticulum",
+      "tag": "reticulum-out",
+      "destination": "e2e-sum-server",
+      "reticulum_config": {
+        "storage_path": "/var/lib/reticulum/client",
+        "interfaces": [
+          {"type": "AutoInterface"}
+        ]
+      }
+    }
+  ],
+  "route": {
+    "final": "reticulum-out"
+  }
+}

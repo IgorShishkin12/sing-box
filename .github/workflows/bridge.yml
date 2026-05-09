@@ -1,0 +1,170 @@
+name: Rust Bridge
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: "Rust target triple (e.g., x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu)"
+        required: true
+        type: string
+      profile:
+        description: "Build profile: debug or release"
+        required: false
+        default: "release"
+        type: string
+      os:
+        description: "Runner OS"
+        required: false
+        default: "ubuntu-latest"
+        type: string
+    outputs:
+      lib-path:
+        description: "Path to the built static library"
+        value: ${{ jobs.build.outputs.lib-path }}
+  workflow_dispatch:
+  push:
+    branches:
+      - stable
+      - testing
+      - main
+    paths:
+      - 'sing-box/bridge/**'
+      - '.github/workflows/bridge.yml'
+  pull_request:
+    paths:
+      - 'sing-box/bridge/**'
+      - '.github/workflows/bridge.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (no default features)
+    if: github.event_name != 'workflow_call'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sing-box/bridge
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Run tests (no default features)
+        run: cargo test --no-default-features -- --test-threads=1
+
+  test_reticulum:
+    name: Test (with real-reticulum)
+    if: github.event_name != 'workflow_call'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sing-box/bridge
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Run tests (with real-reticulum)
+        run: cargo test --features real-reticulum -- --test-threads=1
+
+  build:
+    name: Build bridge (${{ inputs.target || 'x86_64-unknown-linux-gnu' }}, ${{ inputs.profile || 'release' }})
+    runs-on: ${{ inputs.os || 'ubuntu-latest' }}
+    defaults:
+      run:
+        working-directory: sing-box/bridge
+    outputs:
+      lib-path: ${{ steps.set-lib-path.outputs.lib-path }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          targets: ${{ inputs.target || 'x86_64-unknown-linux-gnu' }}
+
+      - name: Build bridge (${{ inputs.profile || 'release' }})
+        run: |
+          PROFILE="${{ inputs.profile || 'release' }}"
+          if [ "$PROFILE" = "release" ]; then
+            cargo build --release --target ${{ inputs.target || 'x86_64-unknown-linux-gnu' }}
+          else
+            cargo build --target ${{ inputs.target || 'x86_64-unknown-linux-gnu' }}
+          fi
+
+      - name: Set library path output
+        id: set-lib-path
+        run: |
+          PROFILE="${{ inputs.profile || 'release' }}"
+          echo "lib-path=sing-box/bridge/target/${{ inputs.target || 'x86_64-unknown-linux-gnu' }}/${PROFILE}/libsing_box_reticulum_bridge.a" >> "$GITHUB_OUTPUT"
+
+      - name: Upload bridge static library
+        uses: actions/upload-artifact@v4
+        with:
+          name: libsing_box_reticulum_bridge-${{ inputs.target || 'x86_64-unknown-linux-gnu' }}-${{ inputs.profile || 'release' }}
+          path: sing-box/bridge/target/${{ inputs.target || 'x86_64-unknown-linux-gnu' }}/${{ inputs.profile || 'release' }}/libsing_box_reticulum_bridge.a
+          if-no-files-found: error
+          retention-days: 1
+
+  build_android:
+    name: Build Android (aarch64)
+    if: github.event_name != 'workflow_call'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sing-box/bridge
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android
+
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r28
+          local-cache: true
+
+      - name: Make linker wrapper executable
+        run: chmod +x ./scripts/android-linker.sh
+
+      - name: Build for Android (debug)
+        run: |
+          export ANDROID_NDK_HOME="${{ steps.setup-ndk.outputs.ndk-path }}"
+          export PATH="$PWD/scripts:$PATH"
+          cargo build --target aarch64-linux-android
+        env:
+          RUSTFLAGS: "-C link-arg=-fPIC"
+
+      - name: Build for Android (release)
+        run: |
+          export ANDROID_NDK_HOME="${{ steps.setup-ndk.outputs.ndk-path }}"
+          export PATH="$PWD/scripts:$PATH"
+          cargo build --target aarch64-linux-android --release
+        env:
+          RUSTFLAGS: "-C link-arg=-fPIC"
+
+      - name: List artifacts
+        run: |
+          echo "=== Debug artifacts ==="
+          ls -lh target/aarch64-linux-android/debug/ | grep -E '\.(a|so)$' || echo "No .a/.so files in debug"
+          echo "=== Release artifacts ==="
+          ls -lh target/aarch64-linux-android/release/ | grep -E '\.(a|so)$' || echo "No .a/.so files in release"

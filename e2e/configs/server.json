@@ -1,0 +1,34 @@
+{
+  "log": {
+    "level": "info",
+    "output": "/var/log/sing-box-server.log"
+  },
+  "inbounds": [
+    {
+      "type": "reticulum",
+      "tag": "reticulum-in",
+      "destination": "e2e-sum-server",
+      "reticulum_config": {
+        "storage_path": "/var/lib/reticulum/server",
+        "interfaces": [
+          {"type": "AutoInterface"}
+        ]
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "inbound": "reticulum-in",
+        "outbound": "direct"
+      }
+    ],
+    "final": "direct"
+  }
+}
