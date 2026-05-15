@@ -303,16 +303,27 @@ pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i32 {
                                 // Non-fatal — service dest is still usable.
                             }
 
-                            // Send an initial service announce so clients that are
-                            // already listening get it without having to knock first.
-                            if let Some(tp) = crate::transport::get_transport() {
-                                tp.lock()
-                                    .await
-                                    .send_announce(
-                                        &service_dest_arc,
-                                        Some(listen_name.as_bytes()),
+                            // Continuously re-announce the service destination so
+                            // clients that start later receive it within one interval.
+                            // A background task holds stop_tx alive for 10 minutes,
+                            // after which the loop exits gracefully.
+                            {
+                                let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+                                let dest_clone = service_dest_arc.clone();
+                                let name_clone = listen_name.clone();
+                                tokio::spawn(async move {
+                                    crate::transport::start_service_announce_loop(
+                                        dest_clone, name_clone, stop_rx,
                                     )
                                     .await;
+                                });
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(
+                                        std::time::Duration::from_secs(600),
+                                    )
+                                    .await;
+                                    let _ = stop_tx.send(true);
+                                });
                             }
 
                             let handle =
@@ -418,35 +429,42 @@ pub extern "C" fn reticulum_close(handle: u64) {
 
 /// Accept a pending connection from a listener.
 /// Returns a task ID. Use reticulum_poll to get the new connection handle.
+/// The task completes when a connection arrives or after a 300-second timeout.
 #[no_mangle]
 pub extern "C" fn reticulum_accept(listener_handle: u64) -> i32 {
     let registry = global_registry();
     let store = global_store();
 
-    // Create a pending task
     let task_id = runtime::block_on(async {
         registry.insert_pending().await
     });
 
-    // Spawn the async accept operation
+    // Spawn a background Tokio task that waits for a connection.
+    // block_on returns immediately after the spawn; the task runs on the thread pool.
     runtime::block_on(async move {
-        match store.get_listener(listener_handle).await {
-            Some(listener) => {
-                match listener.accept().await {
+        tokio::spawn(async move {
+            const ACCEPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+            match store.get_listener(listener_handle).await {
+                Some(listener) => match listener.accept_wait(ACCEPT_TIMEOUT).await {
                     Some(conn) => {
                         let handle = store.insert_connection(conn).await;
                         registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
                     }
                     None => {
-                        // No pending connection; treat as error for now
-                        registry.complete(task_id, TaskResult::Error { message: "no pending connection".to_string() }).await;
+                        registry.complete(
+                            task_id,
+                            TaskResult::Error { message: "accept timeout".to_string() },
+                        ).await;
                     }
+                },
+                None => {
+                    registry.complete(
+                        task_id,
+                        TaskResult::Error { message: "invalid listener handle".to_string() },
+                    ).await;
                 }
             }
-            None => {
-                registry.complete(task_id, TaskResult::Error { message: "invalid listener handle".to_string() }).await;
-            }
-        }
+        });
     });
 
     task_id as i32
@@ -592,13 +610,25 @@ pub extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
     {
         use std::time::Duration;
 
+        // Server re-announces every 5 s; 8 s gives one full cycle as margin.
+        const ANNOUNCE_WAIT: Duration = Duration::from_secs(8);
+        // Up to 3 attempts before giving up.  Backoff: 3 s → 6 s → 12 s (capped at 30 s).
+        const MAX_ATTEMPTS: u32 = 3;
+        const INITIAL_BACKOFF: Duration = Duration::from_secs(3);
+
         let hash_opt = runtime::block_on(async move {
-            for attempt in 0u32..5 {
+            let mut backoff = INITIAL_BACKOFF;
+            for attempt in 0u32..MAX_ATTEMPTS {
                 if attempt > 0 {
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    eprintln!(
+                        "[c_api] no service announce for '{}' (attempt {}/{}), retrying in {:?}",
+                        name_str, attempt, MAX_ATTEMPTS, backoff
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
                 }
 
-                // Knock in the background (small delay so subscriber is ready).
+                // Knock in the background (small delay so subscriber is ready first).
                 let knock_name = name_str.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -609,26 +639,17 @@ pub extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
                     }
                 });
 
-                // Wait for a service announce matching the name.
                 if let Some(hash) = crate::transport::wait_for_service_announce(
                     &name_str,
-                    Duration::from_secs(15),
+                    ANNOUNCE_WAIT,
                 )
                 .await
                 {
-                    eprintln!(
-                        "[c_api] resolved '{}' → service hash {}",
-                        name_str, hash
-                    );
+                    eprintln!("[c_api] resolved '{}' → {}", name_str, hash);
                     return Some(hash);
                 }
-
-                eprintln!(
-                    "[c_api] no service announce for '{}' (attempt {}), retrying...",
-                    name_str,
-                    attempt + 1
-                );
             }
+            eprintln!("[c_api] gave up resolving '{}' after {} attempts", name_str, MAX_ATTEMPTS);
             None
         });
 

@@ -1,86 +1,86 @@
-/// Test listener happy path: push a connection and accept it
-#[test]
-fn test_listener_push_and_accept() {
-    let ret = sing_box_reticulum_bridge::c_api::reticulum_init(std::ptr::null());
-    assert_eq!(ret, 0, "bridge init should succeed");
+use std::ffi::CString;
+use std::ptr;
+use std::time::Duration;
 
-    let listen_hash = std::ffi::CString::new("rln://listener-test").unwrap();
-    let task_id = sing_box_reticulum_bridge::c_api::reticulum_listen(listen_hash.as_ptr());
-    assert!(task_id > 0, "listen should return a positive task ID");
+use sing_box_reticulum_bridge::c_api::*;
 
-    // Poll for listener handle
-    let mut result_out: *mut u8 = std::ptr::null_mut();
-    let mut len_out: usize = 0;
-    let mut attempts = 0;
-    let mut listener_handle: u64 = 0;
+fn poll_task(task_id: i32, timeout: Duration) -> Result<u64, String> {
+    let start = std::time::Instant::now();
     loop {
-        let ret = sing_box_reticulum_bridge::c_api::reticulum_poll(task_id, &mut result_out, &mut len_out);
-        if ret == 1 {
-            assert!(!result_out.is_null());
-            assert_eq!(len_out, 8);
-            let handle_bytes = unsafe { std::slice::from_raw_parts(result_out, len_out) };
-            listener_handle = u64::from_le_bytes(handle_bytes.try_into().unwrap());
-            assert!(listener_handle > 0);
-            sing_box_reticulum_bridge::c_api::reticulum_free(result_out);
-            break;
+        if start.elapsed() > timeout {
+            return Err("poll timeout".to_string());
         }
-        attempts += 1;
-        if attempts > 100 {
-            panic!("poll timed out after {} attempts", attempts);
+        let mut result_out: *mut u8 = ptr::null_mut();
+        let mut len_out: usize = 0;
+        let status = reticulum_poll(task_id, &mut result_out, &mut len_out);
+        match status {
+            1 => {
+                let bytes = unsafe { std::slice::from_raw_parts(result_out, len_out) };
+                let handle = u64::from_le_bytes(bytes.try_into().unwrap());
+                reticulum_free(result_out);
+                return Ok(handle);
+            }
+            -1 => {
+                let msg = if !result_out.is_null() {
+                    let bytes = unsafe { std::slice::from_raw_parts(result_out, len_out) };
+                    let s = String::from_utf8_lossy(bytes).to_string();
+                    reticulum_free(result_out);
+                    s
+                } else {
+                    "unknown error".to_string()
+                };
+                return Err(msg);
+            }
+            _ => std::thread::sleep(Duration::from_millis(10)),
         }
     }
-
-    // Accept on empty queue should fail
-    let accept_task_id = sing_box_reticulum_bridge::c_api::reticulum_accept(listener_handle);
-    assert!(accept_task_id > 0);
-
-    let mut result_out2: *mut u8 = std::ptr::null_mut();
-    let mut len_out2: usize = 0;
-    loop {
-        let ret = sing_box_reticulum_bridge::c_api::reticulum_poll(accept_task_id, &mut result_out2, &mut len_out2);
-        if ret == -1 {
-            // Expected: no pending connection
-            assert!(len_out2 > 0, "error message should have content");
-            sing_box_reticulum_bridge::c_api::reticulum_free(result_out2);
-            break;
-        }
-        attempts += 1;
-        if attempts > 100 {
-            panic!("poll for accept timeout");
-        }
-    }
-
-    sing_box_reticulum_bridge::c_api::reticulum_close(listener_handle);
-    sing_box_reticulum_bridge::c_api::reticulum_shutdown();
 }
 
-/// Test accepting with an invalid listener handle
+/// Test listener + in-memory dial: accept waits and succeeds when a connection arrives.
 #[test]
-fn test_accept_invalid_handle() {
-    let ret = sing_box_reticulum_bridge::c_api::reticulum_init(std::ptr::null());
+fn test_listener_push_and_accept() {
+    let ret = reticulum_init(ptr::null());
     assert_eq!(ret, 0, "bridge init should succeed");
 
-    // Accept on handle 0 (invalid) — should return a task ID
-    let task_id = sing_box_reticulum_bridge::c_api::reticulum_accept(99999);
+    let listen_hash = CString::new("rln://listener-test").unwrap();
+    let listen_task_id = reticulum_listen(listen_hash.as_ptr());
+    assert!(listen_task_id > 0, "listen should return a positive task ID");
+
+    let listener_handle = poll_task(listen_task_id, Duration::from_secs(5))
+        .expect("listener task should complete quickly");
+    assert!(listener_handle > 0);
+
+    // Start accept — it blocks waiting for a connection.
+    let accept_task_id = reticulum_accept(listener_handle);
+    assert!(accept_task_id > 0);
+
+    // Dial the same hash in-memory; this pushes a connection into the listener queue.
+    let dial_hash = CString::new("rln://listener-test").unwrap();
+    let dial_task_id = reticulum_dial(dial_hash.as_ptr());
+    assert!(dial_task_id > 0);
+
+    // Both tasks should complete now.
+    let _dial_handle = poll_task(dial_task_id, Duration::from_secs(5))
+        .expect("dial task should succeed (in-memory)");
+    let _conn_handle = poll_task(accept_task_id, Duration::from_secs(5))
+        .expect("accept task should succeed after dial");
+
+    reticulum_close(listener_handle);
+    reticulum_shutdown();
+}
+
+/// Test accepting with an invalid listener handle returns an error quickly.
+#[test]
+fn test_accept_invalid_handle() {
+    let ret = reticulum_init(ptr::null());
+    assert_eq!(ret, 0, "bridge init should succeed");
+
+    // Handle 99999 doesn't exist — the spawned task should fail immediately.
+    let task_id = reticulum_accept(99999);
     assert!(task_id >= 0, "accept should return a task ID");
 
-    // Poll should return error
-    let mut result_out: *mut u8 = std::ptr::null_mut();
-    let mut len_out: usize = 0;
-    let mut attempts = 0;
-    loop {
-        let ret = sing_box_reticulum_bridge::c_api::reticulum_poll(task_id, &mut result_out, &mut len_out);
-        if ret == -1 {
-            assert!(len_out > 0, "error message should have content");
-            assert!(!result_out.is_null(), "error pointer should not be null");
-            sing_box_reticulum_bridge::c_api::reticulum_free(result_out);
-            break;
-        }
-        attempts += 1;
-        if attempts > 100 {
-            panic!("timeout waiting for accept error");
-        }
-    }
+    let result = poll_task(task_id, Duration::from_secs(2));
+    assert!(result.is_err(), "accept on invalid handle should fail");
 
-    sing_box_reticulum_bridge::c_api::reticulum_shutdown();
+    reticulum_shutdown();
 }

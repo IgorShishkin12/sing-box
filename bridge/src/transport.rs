@@ -39,10 +39,8 @@ const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Poll interval while waiting for link activation.
 const DIAL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Interval between service re-announces triggered by a discovery knock.
+/// Interval between service re-announces.
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(5);
-/// Maximum number of announce iterations per knock (5s × 6 = 30 s).
-const ANNOUNCE_ITERATIONS: u32 = 6;
 
 /// Global Transport singleton.
 static TRANSPORT: OnceCell<Arc<Mutex<Transport>>> = OnceCell::new();
@@ -341,14 +339,15 @@ pub async fn register_listener_destination(
 
 /// Send service destination announcements in a loop.
 ///
-/// Announces every `ANNOUNCE_INTERVAL` seconds for at most `ANNOUNCE_ITERATIONS`
-/// cycles, or until `stop_rx` fires — whichever comes first.
+/// Announces every `ANNOUNCE_INTERVAL` seconds until `stop_rx` receives `true`
+/// or the sender is explicitly dropped with a stop signal. There is no iteration
+/// cap — the caller controls lifetime via the watch channel.
 pub async fn start_service_announce_loop(
     service_dest: Arc<Mutex<SingleInputDestination>>,
     name: String,
     mut stop_rx: watch::Receiver<bool>,
 ) {
-    for _ in 0..ANNOUNCE_ITERATIONS {
+    loop {
         if *stop_rx.borrow() {
             break;
         }
@@ -360,8 +359,15 @@ pub async fn start_service_announce_loop(
             eprintln!("[bridge-tp] announced service dest for name='{}'", name);
         }
         tokio::select! {
-            _ = stop_rx.changed() => break,
-            _ = tokio::time::sleep(ANNOUNCE_INTERVAL) => {},
+            result = stop_rx.changed() => {
+                // Stop if signaled true; ignore sender-dropped errors (keep running).
+                if result.is_ok() && *stop_rx.borrow() {
+                    break;
+                }
+                // Sender dropped without sending true — sleep to avoid busy loop.
+                tokio::time::sleep(ANNOUNCE_INTERVAL).await;
+            }
+            _ = tokio::time::sleep(ANNOUNCE_INTERVAL) => {}
         }
     }
     eprintln!("[bridge-tp] service announce loop finished for name='{}'", name);
@@ -658,7 +664,7 @@ pub async fn dial_and_wait(
         match link_status {
             LinkStatus::Active => {
                 eprintln!("[bridge-tp] link {} active, dial successful", link_id);
-                return Ok((link_clone, address_hash));
+                return Ok((link_clone, link_id));
             }
             LinkStatus::Closed | LinkStatus::Stale => {
                 eprintln!(
@@ -678,7 +684,7 @@ pub async fn dial_and_wait(
                         "[bridge-tp] link {} activated (event), dial successful",
                         link_id
                     );
-                    return Ok((link_clone, address_hash));
+                    return Ok((link_clone, link_id));
                 }
             }
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}

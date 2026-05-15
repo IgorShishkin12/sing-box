@@ -157,6 +157,24 @@ impl Listener {
         }
     }
 
+    /// Block until a connection is available or the timeout elapses.
+    pub async fn accept_wait(&self, timeout: std::time::Duration) -> Option<Connection> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            {
+                let mut queue = self.accept_queue.write().await;
+                if !queue.is_empty() {
+                    return Some(queue.remove(0));
+                }
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            tokio::time::sleep(remaining.min(std::time::Duration::from_millis(50))).await;
+        }
+    }
+
     /// Add a new connection to the accept queue (simulating an incoming connection).
     pub async fn push_connection(&self, conn: Connection) {
         let mut queue = self.accept_queue.write().await;

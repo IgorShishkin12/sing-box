@@ -41,7 +41,7 @@ func main() {
 	configJSON := `{
 		"identity_name": "e2e-server",
 		"storage_path": "/tmp/reticulum-server",
-		"interfaces": [{"type": "udp 0.0.0.0 4242"}]
+		"interfaces": [{"type": "udp 0.0.0.0 4242 e2e-client 4242"}]
 	}`
 
 	if err := reticulum.BridgeInit(configJSON); err != nil {
@@ -75,7 +75,9 @@ func main() {
 			continue
 		}
 
-		connHdl, err := reticulum.BridgePollTask(acceptTaskID, 30*time.Second)
+		// 310s > the Rust accept_wait timeout (300s), so we always see the
+		// task complete rather than timing out on the Go side first.
+		connHdl, err := reticulum.BridgePollTask(acceptTaskID, 310*time.Second)
 		if err != nil {
 			log.Printf("accept poll failed: %v", err)
 			continue

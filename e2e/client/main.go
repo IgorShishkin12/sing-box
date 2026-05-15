@@ -54,13 +54,19 @@ func main() {
 	configJSON := fmt.Sprintf(`{
 		"identity_name": "e2e-client",
 		"storage_path": %q,
-		"interfaces": [{"type": "udp 0.0.0.0 4243 e2e-server 4242"}]
+		"interfaces": [{"type": "udp 0.0.0.0 4242 e2e-server 4242"}]
 	}`, configDir)
 
 	if err := reticulum.BridgeInit(configJSON); err != nil {
 		log.Fatalf("BridgeInit failed: %v", err)
 	}
 	defer reticulum.BridgeShutdown()
+
+	// Give the server container time to initialize, register destinations,
+	// and start its first announce cycle.  podman-compose 1.0.6 starts both
+	// containers simultaneously without waiting for the server healthcheck.
+	log.Printf("waiting 5s for server to initialize...")
+	time.Sleep(5 * time.Second)
 
 	serverName := "e2e-sum-server"
 
