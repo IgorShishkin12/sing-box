@@ -1,0 +1,32 @@
+FROM golang:1.24-alpine AS builder
+
+RUN apk add --no-cache rust cargo build-base git
+
+COPY . /workspace/sing-box
+WORKDIR /workspace/sing-box
+
+# Build Rust bridge (release for static linking)
+RUN cd bridge && cargo build --release
+
+# Build the sum server
+RUN go build -o /usr/local/bin/sum-server ./e2e/sumserver/
+
+# Build the E2E server (bridge listener + forwarder)
+RUN export COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown") && \
+    export VERSION=$(go run ./cmd/internal/read_tag 2>/dev/null || echo "dev") && \
+    export TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS) && \
+    export LDFLAGS_SHARED=$(cat release/LDFLAGS) && \
+    CGO_ENABLED=1 \
+    go build -v -trimpath -tags "$TAGS,with_reticulum" \
+        -o /usr/local/bin/e2e-server \
+        -ldflags "-X \"github.com/sagernet/sing-box/constant.Version=$VERSION\" $LDFLAGS_SHARED -s -w -buildid=" \
+        ./e2e/server/
+
+FROM alpine:3.20
+
+RUN apk add --no-cache bash curl ca-certificates libgcc libstdc++
+
+COPY --from=builder /usr/local/bin/sum-server /usr/local/bin/sum-server
+COPY --from=builder /usr/local/bin/e2e-server /usr/local/bin/e2e-server
+
+ENTRYPOINT ["/bin/sh"]

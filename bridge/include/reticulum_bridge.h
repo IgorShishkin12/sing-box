@@ -61,6 +61,13 @@ int32_t reticulum_listen(const char* listen_hash);
 int32_t reticulum_accept(uint64_t listener_handle);
 
 /*
+ * Get the address hash of a listener as a hex string.
+ * The caller must free the returned string with reticulum_free.
+ * Returns NULL if the listener is not found or has no hash.
+ */
+char* reticulum_get_listener_hash(uint64_t listener_handle);
+
+/*
  * Close a connection or listener handle.
  */
 void reticulum_close(uint64_t handle);
@@ -87,6 +94,15 @@ int reticulum_poll(int task_id, void** result_out, size_t* len_out);
  * Free memory allocated by the bridge.
  */
 void reticulum_free(void* ptr);
+
+/*
+ * Resolve a human-readable name to a deterministic address hash.
+ * Both listener and dialer can call this independently to get the same
+ * 32-char hex address hash from the same name, without any shared state.
+ * The caller must free the returned string with reticulum_free.
+ * Returns NULL if real-reticulum is not available or the name is empty.
+ */
+char* reticulum_resolve_name(const char* name);
 
 #ifdef __cplusplus
 }

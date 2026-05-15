@@ -68,6 +68,17 @@ func BridgeAccept(listenerHandle uint64) (int, error) {
 }
 
 
+// BridgeGetListenerHash gets the address hash of a listener as a hex string.
+// Returns the hash string, or an error if the listener is not found.
+func BridgeGetListenerHash(listenerHandle uint64) (string, error) {
+	hashStr := C.reticulum_get_listener_hash(C.uint64_t(listenerHandle))
+	if hashStr == nil {
+		return "", ErrBridgeGetHashFailed
+	}
+	defer C.reticulum_free(unsafe.Pointer(hashStr))
+	return C.GoString(hashStr), nil
+}
+
 // BridgeClose closes a handle.
 func BridgeClose(handle uint64) {
 	C.reticulum_close(C.uint64_t(handle))
@@ -154,13 +165,30 @@ func BridgeShutdown() {
 	C.reticulum_shutdown()
 }
 
+// BridgeResolveName resolves a human-readable name to a deterministic address hash.
+// Both listener and dialer can call this independently to get the same hash
+// from the same name, without any shared state or network communication.
+// Returns the 32-char hex address hash, or an error if resolution fails.
+func BridgeResolveName(name string) (string, error) {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+
+	hashStr := C.reticulum_resolve_name(cname)
+	if hashStr == nil {
+		return "", ErrBridgeResolveNameFailed
+	}
+	defer C.reticulum_free(unsafe.Pointer(hashStr))
+	return C.GoString(hashStr), nil
+}
+
 // Errors
 var (
-	ErrBridgeInitFailed       = errors.New("bridge init failed")
-	ErrBridgeDialFailed       = errors.New("bridge dial failed")
-	ErrBridgeListenFailed     = errors.New("bridge listen failed")
-	ErrBridgeAcceptFailed     = errors.New("bridge accept failed")
-	ErrBridgePollFailed       = errors.New("bridge poll failed")
-	ErrBridgeGetHashFailed    = errors.New("bridge get hash failed")
-	ErrBridgeRegisterNameFailed = errors.New("bridge register name failed")
+	ErrBridgeInitFailed          = errors.New("bridge init failed")
+	ErrBridgeDialFailed          = errors.New("bridge dial failed")
+	ErrBridgeListenFailed        = errors.New("bridge listen failed")
+	ErrBridgeAcceptFailed        = errors.New("bridge accept failed")
+	ErrBridgePollFailed          = errors.New("bridge poll failed")
+	ErrBridgeGetHashFailed       = errors.New("bridge get hash failed")
+	ErrBridgeRegisterNameFailed  = errors.New("bridge register name failed")
+	ErrBridgeResolveNameFailed   = errors.New("bridge resolve name failed")
 )

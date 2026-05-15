@@ -24,6 +24,11 @@ func BridgeAccept(listenerHandle uint64) (int, error) {
 	return -1, ErrBridgeNotAvailable
 }
 
+// BridgeGetListenerHash is a stub that returns an error when the with_reticulum build tag is not set.
+func BridgeGetListenerHash(listenerHandle uint64) (string, error) {
+	return "", ErrBridgeNotAvailable
+}
+
 // BridgeClose is a no-op stub.
 func BridgeClose(handle uint64) {}
 
@@ -55,6 +60,11 @@ func BridgeRegisterName(name string, hash string) error {
 // BridgeShutdown is a no-op stub.
 func BridgeShutdown() {}
 
+// BridgeResolveName is a stub that returns an error when the with_reticulum build tag is not set.
+func BridgeResolveName(name string) (string, error) {
+	return "", ErrBridgeNotAvailable
+}
+
 // Errors
 var (
 	ErrBridgeInitFailed          = errors.New("bridge init failed")
@@ -64,5 +74,6 @@ var (
 	ErrBridgePollFailed          = errors.New("bridge poll failed")
 	ErrBridgeGetHashFailed       = errors.New("bridge get hash failed")
 	ErrBridgeRegisterNameFailed  = errors.New("bridge register name failed")
+	ErrBridgeResolveNameFailed   = errors.New("bridge resolve name failed")
 	ErrBridgeNotAvailable        = errors.New("reticulum bridge not available: build with -tags with_reticulum")
 )

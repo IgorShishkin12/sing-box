@@ -1,6 +1,7 @@
 #[cfg(feature = "real-reticulum")]
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
     use std::ffi::CString;
     use std::ptr;
     use std::time::Duration;
@@ -67,6 +68,7 @@ mod tests {
 
     /// Test: bridge init and listen with real-reticulum (no interfaces).
     #[test]
+    #[serial]
     fn test_bridge_init_and_listen() {
         let config_json = r#"{
             "identity_name": "bridge-test",
@@ -97,6 +99,7 @@ mod tests {
 
     /// Test: dial to an unknown hash returns an error.
     #[test]
+    #[serial]
     fn test_dial_unknown_hash() {
         let config_json = r#"{
             "identity_name": "dial-unknown-test",
@@ -119,6 +122,7 @@ mod tests {
 
     /// Test: bridge works with real-reticulum (no interfaces).
     #[test]
+    #[serial]
     fn test_bridge_listen_and_dial() {
         let config_json = r#"{
             "identity_name": "listen-dial-test",
