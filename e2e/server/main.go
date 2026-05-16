@@ -17,11 +17,18 @@ type bridgeConn struct {
 }
 
 func (c bridgeConn) Read(p []byte) (int, error) {
-	n := reticulum.BridgeRead(c.handle, p)
-	if n < 0 {
-		return 0, io.EOF
+	// BridgeRead is non-blocking (returns 0 when no data). We poll with a short
+	// sleep so callers that expect blocking reads (e.g. bufio.Reader) work correctly.
+	for {
+		n := reticulum.BridgeRead(c.handle, p)
+		if n < 0 {
+			return 0, io.EOF
+		}
+		if n > 0 {
+			return n, nil
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	return n, nil
 }
 
 func (c bridgeConn) Write(p []byte) (int, error) {
@@ -41,7 +48,11 @@ func main() {
 	configJSON := `{
 		"identity_name": "e2e-server",
 		"storage_path": "/tmp/reticulum-server",
-		"interfaces": [{"type": "udp 0.0.0.0 4242 e2e-client 4242"}]
+		"interfaces": [
+			{"name": "E2E UDP", "type": "UDPInterface",
+			 "listen_ip": "0.0.0.0", "listen_port": 4242,
+			 "forward_ip": "e2e-client", "forward_port": 4242}
+		]
 	}`
 
 	if err := reticulum.BridgeInit(configJSON); err != nil {
@@ -108,8 +119,8 @@ func handleConnection(connHdl uint64, forwardAddr, password string) {
 	go func() {
 		buf := make([]byte, 65536)
 		for {
-			n := reticulum.BridgeRead(connHdl, buf)
-			if n <= 0 {
+			n, err := conn.Read(buf)
+			if err != nil {
 				return
 			}
 			if _, err := target.Write(buf[:n]); err != nil {

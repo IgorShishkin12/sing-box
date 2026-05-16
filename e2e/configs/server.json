@@ -11,7 +11,8 @@
       "reticulum_config": {
         "storage_path": "/var/lib/reticulum/server",
         "interfaces": [
-          {"type": "AutoInterface"}
+          {"name": "Reticulum TCP Server", "type": "TCPServerInterface",
+           "listen_ip": "0.0.0.0", "listen_port": 7788}
         ]
       }
     }

@@ -19,7 +19,8 @@
       "reticulum_config": {
         "storage_path": "/var/lib/reticulum/client",
         "interfaces": [
-          {"type": "AutoInterface"}
+          {"name": "Reticulum TCP Client", "type": "TCPClientInterface",
+           "target_host": "e2e-server", "target_port": 7788}
         ]
       }
     }

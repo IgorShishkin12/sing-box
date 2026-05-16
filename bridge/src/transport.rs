@@ -25,6 +25,8 @@ use reticulum_rs::transport::destination::link::{Link, LinkEvent, LinkStatus};
 use reticulum_rs::transport::destination::{DestinationDesc, DestinationName, SingleInputDestination};
 use reticulum_rs::transport::hash::AddressHash;
 use reticulum_rs::transport::identity::{Identity, PrivateIdentity};
+use reticulum_rs::transport::iface::tcp_client::TcpClient;
+use reticulum_rs::transport::iface::tcp_server::TcpServer;
 use reticulum_rs::transport::iface::udp::UdpInterface;
 use reticulum_rs::transport::iface::InterfaceManager;
 use reticulum_rs::transport::transport::{Transport, TransportConfig};
@@ -147,36 +149,68 @@ pub fn config_dir_path(cfg: &ReticulumConfig) -> String {
 // Interface spawning
 // ---------------------------------------------------------------------------
 
-/// Parse an interface spec string and spawn the corresponding interface.
+fn default_interfaces() -> Vec<ReticulumInterface> {
+    vec![ReticulumInterface {
+        name: Some("Default Interface".to_string()),
+        iface_type: "AutoInterface".to_string(),
+        ..Default::default()
+    }]
+}
+
+/// Spawn network interfaces from the config list.
 ///
-/// Supported formats:
-/// - `udp <bind_host> <bind_port>`
-/// - `udp <bind_host> <bind_port> <peer_host> <peer_port>`
-async fn spawn_interfaces(iface_mgr: &mut InterfaceManager, interfaces: &[ReticulumInterface]) {
-    for iface_spec in interfaces {
-        let parts: Vec<&str> = iface_spec.r#type.split_whitespace().collect();
-        if parts.is_empty() {
-            eprintln!("[bridge-tp] empty interface spec, skipping");
-            continue;
-        }
-        match parts[0] {
-            "udp" => {
-                if parts.len() < 3 {
-                    eprintln!("[bridge-tp] udp interface requires at least <bind_host> <bind_port>");
-                    continue;
-                }
-                let bind_addr = format!("{}:{}", parts[1], parts[2]);
-                let forward_addr = if parts.len() >= 5 {
-                    Some(format!("{}:{}", parts[3], parts[4]))
-                } else {
-                    None
-                };
-                let udp_iface = UdpInterface::new(&bind_addr, forward_addr.as_ref());
-                let addr = iface_mgr.spawn(udp_iface, |ctx| UdpInterface::spawn(ctx));
-                eprintln!(
-                    "[bridge-tp] spawned UDP interface bind={} forward={:?} addr={}",
-                    bind_addr, forward_addr, addr
-                );
+/// If `interfaces` is empty, falls back to a single AutoInterface (UDP broadcast).
+/// Supported types: AutoInterface, UDPInterface, TCPServerInterface, TCPClientInterface.
+async fn spawn_interfaces(
+    iface_mgr: &mut InterfaceManager,
+    interfaces: &[ReticulumInterface],
+    iface_mgr_arc: Arc<tokio::sync::Mutex<InterfaceManager>>,
+) {
+    let defaults = default_interfaces();
+    let ifaces = if interfaces.is_empty() {
+        eprintln!("[bridge-tp] no interfaces configured, using AutoInterface default");
+        defaults.as_slice()
+    } else {
+        interfaces
+    };
+
+    for iface in ifaces {
+        let label = iface.name.as_deref().unwrap_or(&iface.iface_type);
+        match iface.iface_type.as_str() {
+            "AutoInterface" => {
+                let port = iface.data_port.unwrap_or(49555);
+                let bind = format!("0.0.0.0:{port}");
+                let bcast = format!("255.255.255.255:{port}");
+                let ui = UdpInterface::new(&bind, Some(&bcast));
+                let addr = iface_mgr.spawn(ui, |ctx| UdpInterface::spawn(ctx));
+                eprintln!("[bridge-tp] spawned AutoInterface (UDP broadcast) port={} addr={}", port, addr);
+            }
+            "UDPInterface" => {
+                let lip = iface.listen_ip.as_deref().unwrap_or("0.0.0.0");
+                let lport = iface.listen_port.unwrap_or(4242);
+                let bind = format!("{lip}:{lport}");
+                let fwd = iface.forward_ip.as_ref().map(|ip| {
+                    format!("{}:{}", ip, iface.forward_port.unwrap_or(lport))
+                });
+                let ui = UdpInterface::new(&bind, fwd.as_ref());
+                let addr = iface_mgr.spawn(ui, |ctx| UdpInterface::spawn(ctx));
+                eprintln!("[bridge-tp] spawned UDPInterface '{}' bind={} forward={:?} addr={}", label, bind, fwd, addr);
+            }
+            "TCPServerInterface" => {
+                let lip = iface.listen_ip.as_deref().unwrap_or("0.0.0.0");
+                let lport = iface.listen_port.unwrap_or(7788);
+                let bind = format!("{lip}:{lport}");
+                let ts = TcpServer::new(&bind, iface_mgr_arc.clone());
+                let addr = iface_mgr.spawn(ts, |ctx| TcpServer::spawn(ctx));
+                eprintln!("[bridge-tp] spawned TCPServerInterface '{}' bind={} addr={}", label, bind, addr);
+            }
+            "TCPClientInterface" => {
+                let host = iface.target_host.as_deref().unwrap_or("");
+                let port = iface.target_port.unwrap_or(7788);
+                let target = format!("{host}:{port}");
+                let tc = TcpClient::new(&target);
+                let addr = iface_mgr.spawn(tc, |ctx| TcpClient::spawn(ctx));
+                eprintln!("[bridge-tp] spawned TCPClientInterface '{}' target={} addr={}", label, target, addr);
             }
             other => {
                 eprintln!("[bridge-tp] unknown interface type '{}', skipping", other);
@@ -236,7 +270,7 @@ pub fn init_transport(cfg: &ReticulumConfig) -> i32 {
 
         let iface_mgr = transport.iface_manager();
         let mut mgr = iface_mgr.lock().await;
-        spawn_interfaces(&mut *mgr, &interfaces).await;
+        spawn_interfaces(&mut *mgr, &interfaces, iface_mgr.clone()).await;
         eprintln!("[bridge-tp] interfaces spawned");
 
         transport
@@ -572,6 +606,9 @@ pub async fn dial_discovery_and_wait(name: &str) -> Result<(), &'static str> {
 
 /// Spawn a background task that subscribes to `received_data_events` and
 /// pushes inbound payload data into a connection's read buffer.
+///
+/// The transport lock is acquired *inside* the spawned async task so this
+/// function is safe to call from both sync and async contexts.
 pub fn spawn_link_data_reader(conn: Connection, link_id: AddressHash) {
     let transport = match get_transport() {
         Some(t) => t,
@@ -581,12 +618,13 @@ pub fn spawn_link_data_reader(conn: Connection, link_id: AddressHash) {
         }
     };
 
-    let mut data_events = {
-        let tp = transport.blocking_lock();
-        tp.received_data_events()
-    };
-
+    let transport = transport.clone();
     tokio::spawn(async move {
+        let mut data_events = {
+            let tp = transport.lock().await;
+            tp.received_data_events()
+        };
+
         loop {
             match data_events.recv().await {
                 Ok(data) => {
