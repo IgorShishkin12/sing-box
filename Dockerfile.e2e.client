@@ -2,11 +2,17 @@ FROM golang:1.24-alpine AS builder
 
 RUN apk add --no-cache rust cargo build-base git
 
-COPY . /workspace/sing-box
+COPY ./go.mod ./go.sum /workspace/sing-box
+
 WORKDIR /workspace/sing-box
+RUN go mod download
+
+COPY ./bridge /workspace/sing-box/bridge
 
 # Build Rust bridge (release for static linking)
 RUN cd bridge && cargo build --release
+
+COPY . /workspace/sing-box
 
 # Build the E2E client (bridge dialer + HTTP test)
 RUN export COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown") && \
@@ -25,4 +31,6 @@ RUN apk add --no-cache bash curl ca-certificates libgcc libstdc++
 
 COPY --from=builder /usr/local/bin/e2e-client /usr/local/bin/e2e-client
 
-ENTRYPOINT ["/bin/sh"]
+EXPOSE 7788
+
+ENTRYPOINT ["/usr/bin/timeout","90","/bin/sh"]

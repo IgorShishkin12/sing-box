@@ -3,3 +3,4 @@ bridge/target/
 *.md
 test/
 e2e/configs/
+Dockerfile.*
