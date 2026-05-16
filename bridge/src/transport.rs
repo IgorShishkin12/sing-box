@@ -17,7 +17,7 @@ use once_cell::sync::OnceCell;
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tokio::sync::Mutex;
 
 use rand_core::OsRng;
@@ -30,6 +30,7 @@ use reticulum_rs::transport::iface::tcp_server::TcpServer;
 use reticulum_rs::transport::iface::udp::UdpInterface;
 use reticulum_rs::transport::iface::InterfaceManager;
 use reticulum_rs::transport::transport::{Transport, TransportConfig};
+use reticulum_rs::runtime::ReceivedData;
 
 use crate::config::{ReticulumConfig, ReticulumInterface};
 use crate::connection::Connection;
@@ -345,8 +346,14 @@ pub async fn register_listener_destination(
                                 "[bridge-tp] service link activated: id={} peer={}",
                                 event.id, event.address_hash
                             );
+                            // Subscribe BEFORE push_connection so no data sent by the
+                            // client immediately after link setup is missed.
+                            let data_rx = {
+                                let tp = transport.lock().await;
+                                tp.received_data_events()
+                            };
                             let conn = Connection::new_from_link(link.clone(), event.id);
-                            spawn_link_data_reader(conn.clone(), event.id);
+                            spawn_link_data_reader(conn.clone(), event.id, data_rx);
                             listener_clone.push_connection(conn).await;
                         }
                         // Links for the discovery dest or other dests are ignored here.
@@ -604,39 +611,31 @@ pub async fn dial_discovery_and_wait(name: &str) -> Result<(), &'static str> {
 // Data reader
 // ---------------------------------------------------------------------------
 
-/// Spawn a background task that subscribes to `received_data_events` and
-/// pushes inbound payload data into a connection's read buffer.
+/// Spawn a background task that forwards inbound link data into a connection's
+/// read buffer.
 ///
-/// The transport lock is acquired *inside* the spawned async task so this
-/// function is safe to call from both sync and async contexts.
-pub fn spawn_link_data_reader(conn: Connection, link_id: AddressHash) {
-    let transport = match get_transport() {
-        Some(t) => t,
-        None => {
-            eprintln!("[bridge-tp] cannot spawn data reader: transport not initialized");
-            return;
-        }
-    };
-
-    let transport = transport.clone();
+/// `data_rx` must already be subscribed to the transport's `received_data_events`
+/// channel **before** this function is called — typically before the link request
+/// is sent — so that no data packets are lost to the broadcast-channel race where
+/// the server starts writing before the reader has subscribed.
+pub fn spawn_link_data_reader(
+    conn: Connection,
+    link_id: AddressHash,
+    mut data_rx: broadcast::Receiver<ReceivedData>,
+) {
     tokio::spawn(async move {
-        let mut data_events = {
-            let tp = transport.lock().await;
-            tp.received_data_events()
-        };
-
         loop {
-            match data_events.recv().await {
+            match data_rx.recv().await {
                 Ok(data) => {
                     if data.destination == link_id {
                         conn.push_read_data(data.data.as_slice()).await;
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                Err(broadcast::error::RecvError::Closed) => {
                     eprintln!("[bridge-tp] data event channel closed");
                     break;
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
             }
         }
     });

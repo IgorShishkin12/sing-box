@@ -156,13 +156,19 @@ pub extern "C" fn reticulum_dial(destination_hash: *const c_char) -> i32 {
         {
             // Real Reticulum path: attempt to establish a real link via the transport.
             match crate::transport::get_transport() {
-                Some(_) => {
+                Some(transport) => {
+                    // Subscribe to data events BEFORE dialing. The server can start
+                    // sending data (e.g. auth header) the instant the link activates on
+                    // its side — which can be before dial_and_wait returns on ours.
+                    // Subscribing now ensures those packets are captured by the reader.
+                    let data_rx = {
+                        let tp = transport.lock().await;
+                        tp.received_data_events()
+                    };
                     match crate::transport::dial_and_wait(&dest).await {
                         Ok((link, link_id)) => {
-                            // Create a Connection wrapping the real Link
                             let conn = Connection::new_from_link(link, link_id);
-                            // Spawn a background data reader for inbound data on this link
-                            crate::transport::spawn_link_data_reader(conn.clone(), link_id);
+                            crate::transport::spawn_link_data_reader(conn.clone(), link_id, data_rx);
                             let handle = store.insert_connection(conn).await;
                             registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
                         }
