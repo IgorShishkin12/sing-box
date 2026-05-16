@@ -1,0 +1,46 @@
+name: retv2run
+
+services:
+  e2e-server:
+    image: reticulum-v2-e2e_e2e-server:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e.server
+    command: >
+      -c "
+        sum-server &
+        sleep 1 &&
+        e2e-server
+      "
+    environment:
+      - RETICULUM_PASSWORD=e2e-test-password
+    networks:
+      - e2e-net
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x e2e-server > /dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    # No ports exposed — the sum-server is only accessible via reticulum tunnel
+
+  e2e-client:
+    image: reticulum-v2-e2e_e2e-client:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e.client
+    command: >
+      -c "
+        e2e-client
+      "
+    environment:
+      - RETICULUM_PASSWORD=e2e-test-password
+    networks:
+      - e2e-net
+    depends_on:
+      e2e-server:
+        condition: service_healthy
+
+networks:
+  e2e-net:
+    driver: bridge

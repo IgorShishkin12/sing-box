@@ -140,7 +140,7 @@ bridge/
 The E2E test setup uses Docker Compose to create two containers:
 
 ```bash
-docker compose -f docker-compose.e2e.yml up --build
+docker compose -f sing-box/docker-compose.e2e.yml up --build
 ```
 
 - **Server container**: Runs a sum HTTP server on localhost:8080 and a bridge listener that forwards reticulum connections to it.
