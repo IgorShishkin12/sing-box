@@ -7,7 +7,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/sagernet/sing-box/e2e/auth"
 	reticulum "github.com/sagernet/sing-box/protocol/reticulum"
 )
 
@@ -103,7 +102,7 @@ func handleConnection(connHdl uint64, forwardAddr, password string) {
 	defer reticulum.BridgeClose(connHdl)
 
 	conn := bridgeConn{handle: connHdl}
-	if err := auth.ServerAuth(conn, password); err != nil {
+	if err := reticulum.ServerAuth(conn, password); err != nil {
 		log.Printf("auth failed (handle=%d): %v", connHdl, err)
 		return
 	}
