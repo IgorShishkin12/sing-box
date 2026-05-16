@@ -15,6 +15,7 @@ SING_FFI ?= sing-ffi
 LIBBOX_FFI_CONFIG ?= ./experimental/libbox/ffi.json
 
 ANDROID_TARGETS = aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+ANDROID_NDK_BIN = $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/linux-x86_64/bin
 
 .PHONY: test release docs build bridge build_with_bridge bridge_android
 
@@ -29,9 +30,13 @@ bridge:
 # Cross-compile Rust bridge for all Android ABIs.
 # Requires ANDROID_NDK_HOME set and rustup Android targets installed.
 bridge_android:
-	$(foreach target,$(ANDROID_TARGETS), \
-	  PATH="$(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/linux-x86_64/bin:$(PATH)" \
-	  cargo build --manifest-path bridge/Cargo.toml --target $(target) --release;)
+	export PATH="$(ANDROID_NDK_BIN):$$PATH" && \
+	export CC_aarch64_linux_android="$(ANDROID_NDK_BIN)/aarch64-linux-android23-clang" && \
+	export CC_armv7_linux_androideabi="$(ANDROID_NDK_BIN)/armv7a-linux-androideabi23-clang" && \
+	export CC_i686_linux_android="$(ANDROID_NDK_BIN)/i686-linux-android23-clang" && \
+	export CC_x86_64_linux_android="$(ANDROID_NDK_BIN)/x86_64-linux-android23-clang" && \
+	cd bridge && \
+	$(foreach target,$(ANDROID_TARGETS),cargo build --target $(target) --release &&) true
 
 # Build the Rust bridge static library (debug mode)
 bridge_debug:
