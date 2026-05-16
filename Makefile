@@ -14,7 +14,9 @@ PREFIX ?= $(shell go env GOPATH)
 SING_FFI ?= sing-ffi
 LIBBOX_FFI_CONFIG ?= ./experimental/libbox/ffi.json
 
-.PHONY: test release docs build bridge build_with_bridge
+ANDROID_TARGETS = aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+
+.PHONY: test release docs build bridge build_with_bridge bridge_android
 
 build:
 	export GOTOOLCHAIN=local && \
@@ -23,6 +25,13 @@ build:
 # Build the Rust bridge static library (release mode)
 bridge:
 	cd bridge && cargo build --release
+
+# Cross-compile Rust bridge for all Android ABIs.
+# Requires ANDROID_NDK_HOME set and rustup Android targets installed.
+bridge_android:
+	$(foreach target,$(ANDROID_TARGETS), \
+	  PATH="$(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/linux-x86_64/bin:$(PATH)" \
+	  cargo build --manifest-path bridge/Cargo.toml --target $(target) --release;)
 
 # Build the Rust bridge static library (debug mode)
 bridge_debug:
