@@ -14,11 +14,35 @@ PREFIX ?= $(shell go env GOPATH)
 SING_FFI ?= sing-ffi
 LIBBOX_FFI_CONFIG ?= ./experimental/libbox/ffi.json
 
-.PHONY: test release docs build
+.PHONY: test release docs build bridge build_with_bridge
 
 build:
 	export GOTOOLCHAIN=local && \
 	go build $(MAIN_PARAMS) $(MAIN)
+
+# Build the Rust bridge static library (release mode)
+bridge:
+	cd bridge && cargo build --release
+
+# Build the Rust bridge static library (debug mode)
+bridge_debug:
+	cd bridge && cargo build
+
+# Build sing-box with the Rust bridge statically linked (native platform)
+build_with_bridge: bridge
+	export CGO_ENABLED=1 && \
+	export GOTOOLCHAIN=local && \
+	go build -v -trimpath -tags "$(TAGS),with_reticulum" \
+		-ldflags "-X 'github.com/sagernet/sing-box/constant.Version=$(VERSION)' $(LDFLAGS_SHARED) -s -w -buildid=" \
+		$(MAIN)
+
+# Build sing-box with the Rust bridge statically linked (debug bridge)
+build_with_bridge_debug: bridge_debug
+	export CGO_ENABLED=1 && \
+	export GOTOOLCHAIN=local && \
+	go build -v -trimpath -tags "$(TAGS),with_reticulum" \
+		-ldflags "-X 'github.com/sagernet/sing-box/constant.Version=$(VERSION)' $(LDFLAGS_SHARED) -s -w -buildid=" \
+		$(MAIN)
 
 race:
 	export GOTOOLCHAIN=local && \

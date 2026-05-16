@@ -1,0 +1,35 @@
+{
+  "log": {
+    "level": "info",
+    "output": "/var/log/sing-box-server.log"
+  },
+  "inbounds": [
+    {
+      "type": "reticulum",
+      "tag": "reticulum-in",
+      "destination": "e2e-sum-server",
+      "reticulum_config": {
+        "storage_path": "/var/lib/reticulum/server",
+        "interfaces": [
+          {"name": "Reticulum TCP Server", "type": "TCPServerInterface",
+           "listen_ip": "0.0.0.0", "listen_port": 7788}
+        ]
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "inbound": "reticulum-in",
+        "outbound": "direct"
+      }
+    ],
+    "final": "direct"
+  }
+}

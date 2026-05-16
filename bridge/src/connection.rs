@@ -117,12 +117,25 @@ impl Connection {
             }
             #[cfg(feature = "real-reticulum")]
             ConnectionInner::Link { link, .. } => {
-                let link = link.lock().await;
-                if link.data_packet(data).is_ok() {
-                    data.len()
+                let (packet, iface) = {
+                    let link_guard = link.lock().await;
+                    let packet = match link_guard.data_packet(data) {
+                        Ok(p) => p,
+                        Err(_) => return 0,
+                    };
+                    (packet, link_guard.ingress_iface())
+                };
+                let transport = match crate::transport::get_transport() {
+                    Some(t) => t,
+                    None => return 0,
+                };
+                let tp = transport.lock().await;
+                if let Some(iface) = iface {
+                    tp.send_direct(iface, packet).await;
                 } else {
-                    0
+                    tp.send_broadcast(packet, None).await;
                 }
+                data.len()
             }
         }
     }

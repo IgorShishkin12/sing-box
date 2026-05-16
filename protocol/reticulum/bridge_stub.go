@@ -1,165 +1,79 @@
+//go:build !with_reticulum
+
 package reticulum
 
-/*
-#cgo CFLAGS: -I${SRCDIR}/../../bridge/include
-#cgo LDFLAGS: -L${SRCDIR}/../../bridge/target/debug -lsing_box_reticulum_bridge -lpthread -ldl -lm
-#include "reticulum_bridge.h"
-*/
-import "C"
-import (
-	"errors"
-	"unsafe"
-)
+import "errors"
 
-// BridgeInit initializes the Rust bridge with a JSON config string.
-// Returns nil on success, or an error string.
-// Passes NULL to reticulum_init when configJSON is empty (default config).
+// BridgeInit is a stub that returns an error when the with_reticulum build tag is not set.
 func BridgeInit(configJSON string) error {
-	if configJSON == "" {
-		ret := C.reticulum_init(nil)
-		if ret != 0 {
-			return ErrBridgeInitFailed
-		}
-		return nil
-	}
-	cstr := C.CString(configJSON)
-	defer C.free(unsafe.Pointer(cstr))
-	ret := C.reticulum_init(cstr)
-	if ret != 0 {
-		return ErrBridgeInitFailed
-	}
-	return nil
+	return ErrBridgeNotAvailable
 }
 
-// BridgeDial calls reticulum_dial and returns a task ID.
-// Use BridgePollTask to wait for completion and get the connection handle.
+// BridgeDial is a stub that returns an error when the with_reticulum build tag is not set.
 func BridgeDial(destinationHash string) (int, error) {
-	cstr := C.CString(destinationHash)
-	defer C.free(unsafe.Pointer(cstr))
-	taskID := int(C.reticulum_dial(cstr))
-	if taskID < 0 {
-		return -1, ErrBridgeDialFailed
-	}
-	return taskID, nil
+	return -1, ErrBridgeNotAvailable
 }
 
-// BridgeListen calls reticulum_listen and returns a task ID.
-// Use BridgePollTask to wait for completion and get the listener handle.
+// BridgeListen is a stub that returns an error when the with_reticulum build tag is not set.
 func BridgeListen(listenHash string) (int, error) {
-	cstr := C.CString(listenHash)
-	defer C.free(unsafe.Pointer(cstr))
-	taskID := int(C.reticulum_listen(cstr))
-	if taskID < 0 {
-		return -1, ErrBridgeListenFailed
-	}
-	return taskID, nil
+	return -1, ErrBridgeNotAvailable
 }
 
-// BridgeAccept calls reticulum_accept and returns a task ID.
-// Use BridgePollTask to wait for completion and get the new connection handle.
+// BridgeAccept is a stub that returns an error when the with_reticulum build tag is not set.
 func BridgeAccept(listenerHandle uint64) (int, error) {
-	taskID := int(C.reticulum_accept(C.uint64_t(listenerHandle)))
-	if taskID < 0 {
-		return -1, ErrBridgeAcceptFailed
-	}
-	return taskID, nil
+	return -1, ErrBridgeNotAvailable
 }
 
-
-// BridgeClose closes a handle.
-func BridgeClose(handle uint64) {
-	C.reticulum_close(C.uint64_t(handle))
+// BridgeGetListenerHash is a stub that returns an error when the with_reticulum build tag is not set.
+func BridgeGetListenerHash(listenerHandle uint64) (string, error) {
+	return "", ErrBridgeNotAvailable
 }
 
-// BridgeWrite writes data to a connection.
+// BridgeClose is a no-op stub.
+func BridgeClose(handle uint64) {}
+
+// BridgeWrite is a stub that returns -1 when the with_reticulum build tag is not set.
 func BridgeWrite(connHandle uint64, data []byte) int {
-	if len(data) == 0 {
-		return 0
-	}
-	n := C.reticulum_write(C.uint64_t(connHandle), (*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data)))
-	return int(n)
+	return -1
 }
 
-// BridgeRead reads data from a connection.
+// BridgeRead is a stub that returns -1 when the with_reticulum build tag is not set.
 func BridgeRead(connHandle uint64, buffer []byte) int {
-	if len(buffer) == 0 {
-		return 0
-	}
-	n := C.reticulum_read(C.uint64_t(connHandle), (*C.uint8_t)(unsafe.Pointer(&buffer[0])), C.size_t(len(buffer)))
-	return int(n)
+	return -1
 }
 
-// BridgePoll polls for task completion.
+// BridgePoll is a stub that returns an error when the with_reticulum build tag is not set.
 func BridgePoll(taskID int) (done bool, result []byte, err error) {
-	var resultOut *C.uchar
-	var lenOut C.size_t
-	ret := C.reticulum_poll(C.int(taskID), (*unsafe.Pointer)(unsafe.Pointer(&resultOut)), &lenOut)
-	switch ret {
-	case 0:
-		return false, nil, nil
-	case 1:
-		if lenOut > 0 {
-			result = C.GoBytes(unsafe.Pointer(resultOut), C.int(lenOut))
-			C.reticulum_free(unsafe.Pointer(resultOut))
-		}
-		return true, result, nil
-	default:
-		// Error: read the error message from C
-		if lenOut > 0 && resultOut != nil {
-			errMsg := string(C.GoBytes(unsafe.Pointer(resultOut), C.int(lenOut)))
-			C.reticulum_free(unsafe.Pointer(resultOut))
-			return false, nil, errors.New(errMsg)
-		}
-		return false, nil, ErrBridgePollFailed
-	}
+	return false, nil, ErrBridgeNotAvailable
 }
 
-// BridgeGetHash gets the destination hash for a given name.
-// Returns the hash string, or an error if the name is unknown.
+// BridgeGetHash is a stub that returns an error when the with_reticulum build tag is not set.
 func BridgeGetHash(name string) (string, error) {
-	cname := C.CString(name)
-	defer C.free(unsafe.Pointer(cname))
-
-	var hashOut *C.char
-	ret := C.get_hash(&hashOut, cname)
-	if ret != 0 {
-		return "", ErrBridgeGetHashFailed
-	}
-	if hashOut == nil {
-		return "", ErrBridgeGetHashFailed
-	}
-	hashStr := C.GoString(hashOut)
-	C.reticulum_free(unsafe.Pointer(hashOut))
-	return hashStr, nil
+	return "", ErrBridgeNotAvailable
 }
 
-// BridgeRegisterName registers a name→hash mapping for later lookup via BridgeGetHash.
+// BridgeRegisterName is a stub that returns an error when the with_reticulum build tag is not set.
 func BridgeRegisterName(name string, hash string) error {
-	cname := C.CString(name)
-	defer C.free(unsafe.Pointer(cname))
-	chash := C.CString(hash)
-	defer C.free(unsafe.Pointer(chash))
-
-	ret := C.reticulum_register_name(cname, chash)
-	if ret != 0 {
-		return ErrBridgeRegisterNameFailed
-	}
-	return nil
+	return ErrBridgeNotAvailable
 }
 
-// BridgeShutdown shuts down the bridge.
-func BridgeShutdown() {
-	C.reticulum_shutdown()
+// BridgeShutdown is a no-op stub.
+func BridgeShutdown() {}
+
+// BridgeResolveName is a stub that returns an error when the with_reticulum build tag is not set.
+func BridgeResolveName(name string) (string, error) {
+	return "", ErrBridgeNotAvailable
 }
 
 // Errors
 var (
-	ErrBridgeInitFailed       = errors.New("bridge init failed")
-	ErrBridgeDialFailed       = errors.New("bridge dial failed")
-	ErrBridgeListenFailed     = errors.New("bridge listen failed")
-	ErrBridgeAcceptFailed     = errors.New("bridge accept failed")
-	ErrBridgePollFailed       = errors.New("bridge poll failed")
-	ErrBridgeGetHashFailed    = errors.New("bridge get hash failed")
-	ErrBridgeRegisterNameFailed = errors.New("bridge register name failed")
+	ErrBridgeInitFailed          = errors.New("bridge init failed")
+	ErrBridgeDialFailed          = errors.New("bridge dial failed")
+	ErrBridgeListenFailed        = errors.New("bridge listen failed")
+	ErrBridgeAcceptFailed        = errors.New("bridge accept failed")
+	ErrBridgePollFailed          = errors.New("bridge poll failed")
+	ErrBridgeGetHashFailed       = errors.New("bridge get hash failed")
+	ErrBridgeRegisterNameFailed  = errors.New("bridge register name failed")
+	ErrBridgeResolveNameFailed   = errors.New("bridge resolve name failed")
+	ErrBridgeNotAvailable        = errors.New("reticulum bridge not available: build with -tags with_reticulum")
 )
-

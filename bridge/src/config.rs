@@ -21,10 +21,22 @@ pub struct ReticulumConfig {
     pub reticulum_config_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ReticulumInterface {
-    pub r#type: String,
-    pub port: Option<u16>,
+    /// Free-form label (e.g. "My UDP Interface").
+    pub name: Option<String>,
+    #[serde(rename = "type")]
+    pub iface_type: String,
+    // UDPInterface
+    pub listen_ip: Option<String>,
+    pub listen_port: Option<u16>,
+    pub forward_ip: Option<String>,
+    pub forward_port: Option<u16>,
+    // TCPClientInterface
+    pub target_host: Option<String>,
+    pub target_port: Option<u16>,
+    // AutoInterface
+    pub data_port: Option<u16>,
 }
 
 pub fn parse_config(json_str: &str) -> Result<ReticulumConfig, serde_json::Error> {

@@ -5,7 +5,9 @@ fn test_config_valid_json() {
         "identity_path": "/tmp/test",
         "storage_path": "/tmp/test",
         "interfaces": [
-            {"type": "udp", "port": 4242}
+            {"name": "Test UDP", "type": "UDPInterface",
+             "listen_ip": "0.0.0.0", "listen_port": 4242,
+             "forward_ip": "peer", "forward_port": 4242}
         ]
     }"#;
     let cfg = sing_box_reticulum_bridge::config::parse_config(valid_json);
@@ -15,8 +17,9 @@ fn test_config_valid_json() {
     assert_eq!(config.identity_path, Some("/tmp/test".to_string()));
     assert_eq!(config.storage_path, Some("/tmp/test".to_string()));
     assert_eq!(config.interfaces.len(), 1);
-    assert_eq!(config.interfaces[0].r#type, "udp");
-    assert_eq!(config.interfaces[0].port, Some(4242));
+    assert_eq!(config.interfaces[0].iface_type, "UDPInterface");
+    assert_eq!(config.interfaces[0].listen_port, Some(4242));
+    assert_eq!(config.interfaces[0].forward_ip, Some("peer".to_string()));
 }
 
 #[test]

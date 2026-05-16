@@ -1,3 +1,5 @@
+//go:build with_reticulum
+
 package e2e
 
 import (

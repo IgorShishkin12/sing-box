@@ -1,0 +1,6 @@
+bridge/target/
+.git/
+*.md
+test/
+e2e/configs/
+Dockerfile.*
