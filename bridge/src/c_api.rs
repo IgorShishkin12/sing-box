@@ -49,14 +49,17 @@ pub extern "C" fn reticulum_init(config_json: *const c_char) -> i32 {
     } else {
         crate::set_global_config(None);
     }
-    runtime::init_runtime();
+    if let Err(e) = runtime::init_runtime() {
+        log::error!("[bridge] runtime init failed: {}", e);
+        return -1;
+    }
 
     // Initialize real Reticulum transport when the feature is active.
     #[cfg(feature = "real-reticulum")]
     {
         if let Some(cfg) = crate::get_global_config() {
-            if crate::transport::init_transport(cfg) != 0 {
-                log::error!("[bridge] init_transport returned -1");
+            if let Err(e) = crate::transport::init_transport(cfg) {
+                log::error!("[bridge] init_transport failed: {}", e);
                 return -1;
             }
         }
@@ -401,7 +404,7 @@ pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i32 {
 #[no_mangle]
 pub extern "C" fn reticulum_get_listener_hash(listener_handle: u64) -> *mut c_char {
     let store = global_store();
-    let result = runtime::block_on(async move {
+    let result: Option<String> = runtime::block_on(async move {
         match store.get_listener(listener_handle).await {
             Some(listener) => {
                 #[cfg(feature = "real-reticulum")]
@@ -502,13 +505,18 @@ pub extern "C" fn reticulum_write(conn_handle: u64, data: *const u8, len: usize)
     let store = global_store();
     let data_slice = unsafe { std::slice::from_raw_parts(data, len) };
     
-    let result = runtime::block_on(async move {
+    runtime::block_on(async move {
         match store.get_connection(conn_handle).await {
-            Some(conn) => conn.write(data_slice).await as i32,
+            Some(conn) => match conn.write(data_slice).await {
+                Ok(n) => n as i32,
+                Err(e) => {
+                    log::warn!("[c_api] write on handle {}: {}", conn_handle, e);
+                    -1
+                }
+            },
             None => -1,
         }
-    });
-    result
+    })
 }
 
 /// Read data from a connection.

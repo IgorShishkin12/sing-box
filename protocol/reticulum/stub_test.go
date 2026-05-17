@@ -24,7 +24,7 @@ func TestReticulumInboundOptionsJSON(t *testing.T) {
 			"identity_path": "/path/to/identity",
 			"storage_path": "/path/to/storage",
 			"interfaces": [
-				{"type": "udp", "port": 4242}
+				{"type": "udp", "listen_port": 4242}
 			]
 		}
 	}`
@@ -37,7 +37,7 @@ func TestReticulumInboundOptionsJSON(t *testing.T) {
 	require.Equal(t, "/path/to/storage", opts.ReticulumConfig.StoragePath)
 	require.Len(t, opts.ReticulumConfig.Interfaces, 1)
 	require.Equal(t, "udp", opts.ReticulumConfig.Interfaces[0].Type)
-	require.Equal(t, 4242, opts.ReticulumConfig.Interfaces[0].Port)
+	require.Equal(t, uint16(4242), opts.ReticulumConfig.Interfaces[0].ListenPort)
 }
 
 func TestReticulumOutboundOptionsJSON(t *testing.T) {

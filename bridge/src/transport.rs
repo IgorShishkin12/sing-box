@@ -225,18 +225,18 @@ async fn spawn_interfaces(
 // ---------------------------------------------------------------------------
 
 /// Initialize the global Transport singleton with the given config.
-/// Must be called once during `reticulum_init`. Returns 0 on success, -1 on error.
-pub fn init_transport(cfg: &ReticulumConfig) -> i32 {
+/// Must be called once during `reticulum_init`.
+pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
     if TRANSPORT.get().is_some() {
         log::debug!("[bridge-tp] Transport already initialized");
-        return 0;
+        return Ok(());
     }
 
     // 1. Determine config directory and create it
     let cfg_dir = config_dir_path(cfg);
     if let Err(e) = std::fs::create_dir_all(&cfg_dir) {
         log::error!("[bridge-tp] failed to create config dir '{}': {}", cfg_dir, e);
-        return -1;
+        return Err(e.to_string());
     }
     log::info!("[bridge-tp] config dir: {}", cfg_dir);
 
@@ -245,7 +245,7 @@ pub fn init_transport(cfg: &ReticulumConfig) -> i32 {
         Ok(id) => id,
         Err(e) => {
             log::error!("[bridge-tp] identity resolution failed: {}", e);
-            return -1;
+            return Err(e);
         }
     };
     log::info!("[bridge-tp] identity resolved: addr={}", identity.address_hash());
@@ -279,7 +279,7 @@ pub fn init_transport(cfg: &ReticulumConfig) -> i32 {
     log::info!("[bridge-tp] Transport initialized successfully");
 
     let _ = TRANSPORT.set(Arc::new(Mutex::new(transport)));
-    0
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

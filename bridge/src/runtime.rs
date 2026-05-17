@@ -13,17 +13,19 @@ fn get_runtime_lock() -> &'static Mutex<Option<Arc<Runtime>>> {
 fn lock_runtime() -> std::sync::MutexGuard<'static, Option<Arc<Runtime>>> {
     get_runtime_lock()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| {
+            log::warn!("[bridge] runtime mutex was poisoned, recovering");
+            poisoned.into_inner()
+        })
 }
 
 /// Initialize the Tokio runtime if not already initialized.
-/// Returns 0 on success, -1 on error.
-pub fn init_runtime() -> i32 {
+pub fn init_runtime() -> Result<(), String> {
     log::debug!("init_runtime called");
     let mut guard = lock_runtime();
     if guard.is_some() {
         log::debug!("Runtime already initialized");
-        return 0;
+        return Ok(());
     }
     log::debug!("Building runtime (multi-thread)");
     match Builder::new_multi_thread()
@@ -33,11 +35,11 @@ pub fn init_runtime() -> i32 {
         Ok(rt) => {
             *guard = Some(Arc::new(rt));
             log::info!("Runtime created successfully");
-            0
+            Ok(())
         }
         Err(e) => {
             log::error!("Failed to create Tokio runtime: {}", e);
-            -1
+            Err(e.to_string())
         }
     }
 }
@@ -89,7 +91,10 @@ where
         Some(
             get_block_on_lock()
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                .unwrap_or_else(|poisoned| {
+                    log::warn!("[bridge] block_on mutex was poisoned, recovering");
+                    poisoned.into_inner()
+                }),
         )
     } else {
         None
@@ -106,8 +111,8 @@ where
             return result;
         }
     }
-    // Runtime was shut down — re-initialize
-    init_runtime();
+    // Runtime was shut down — re-initialize; error already logged inside.
+    let _ = init_runtime();
     let guard = lock_runtime();
     let rt = guard.as_ref().expect("Runtime not initialized after re-init");
     let result = rt.block_on(f);

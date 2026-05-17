@@ -108,12 +108,12 @@ impl Connection {
     /// Write data to the connection.
     /// For in-memory: writes to write_buf.
     /// For link: sends via Link::data_packet.
-    pub async fn write(&self, data: &[u8]) -> usize {
+    pub async fn write(&self, data: &[u8]) -> Result<usize, String> {
         match &self.inner {
             ConnectionInner::Memory { write_buf, .. } => {
                 let mut buf = write_buf.write().await;
                 buf.extend_from_slice(data);
-                data.len()
+                Ok(data.len())
             }
             #[cfg(feature = "real-reticulum")]
             ConnectionInner::Link { link, .. } => {
@@ -121,21 +121,20 @@ impl Connection {
                     let link_guard = link.lock().await;
                     let packet = match link_guard.data_packet(data) {
                         Ok(p) => p,
-                        Err(_) => return 0,
+                        Err(e) => return Err(format!("{:?}", e)),
                     };
                     (packet, link_guard.ingress_iface())
                 };
-                let transport = match crate::transport::get_transport() {
-                    Some(t) => t,
-                    None => return 0,
-                };
-                let tp = transport.lock().await;
-                if let Some(iface) = iface {
-                    tp.send_direct(iface, packet).await;
-                } else {
-                    tp.send_broadcast(packet, None).await;
+                // Fire-and-forget: packet is dropped if transport isn't up yet.
+                if let Some(transport) = crate::transport::get_transport() {
+                    let tp = transport.lock().await;
+                    if let Some(iface) = iface {
+                        tp.send_direct(iface, packet).await;
+                    } else {
+                        tp.send_broadcast(packet, None).await;
+                    }
                 }
-                data.len()
+                Ok(data.len())
             }
         }
     }
@@ -248,7 +247,7 @@ mod tests {
     async fn test_connection_write_read() {
         let conn = Connection::new();
         let data = b"hello world";
-        let written = conn.write(data).await;
+        let written = conn.write(data).await.unwrap();
         assert_eq!(written, data.len());
 
         let mut buf = [0u8; 11];
@@ -268,7 +267,7 @@ mod tests {
     #[tokio::test]
     async fn test_connection_peek() {
         let conn = Connection::new();
-        conn.write(b"test").await;
+        conn.write(b"test").await.unwrap();
         let peeked = conn.peek().await;
         assert_eq!(peeked, b"test");
         let mut buf = [0u8; 4];
@@ -280,7 +279,7 @@ mod tests {
     async fn test_connection_available() {
         let conn = Connection::new();
         assert_eq!(conn.available().await, 0);
-        conn.write(b"abc").await;
+        conn.write(b"abc").await.unwrap();
         assert_eq!(conn.available().await, 3);
         let mut buf = [0u8; 2];
         conn.read(&mut buf).await;
@@ -291,7 +290,7 @@ mod tests {
     async fn test_create_pair_roundtrip() {
         let (a, b) = create_pair().await;
 
-        let written = a.write(b"hello").await;
+        let written = a.write(b"hello").await.unwrap();
         assert_eq!(written, 5);
         assert_eq!(b.available().await, 5);
         let mut buf = [0u8; 5];
@@ -299,7 +298,7 @@ mod tests {
         assert_eq!(read, 5);
         assert_eq!(&buf, b"hello");
 
-        b.write(b"world").await;
+        b.write(b"world").await.unwrap();
         assert_eq!(a.available().await, 5);
         let mut buf = [0u8; 5];
         let read = a.read(&mut buf).await;
@@ -411,7 +410,7 @@ mod tests {
         let (link, link_id) = make_test_link();
         let conn = Connection::new_from_link(link, link_id);
 
-        let written = conn.write(b"test data").await;
+        let written = conn.write(b"test data").await.unwrap();
         assert_eq!(written, 9);
     }
 
