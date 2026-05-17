@@ -1,17 +1,10 @@
 //! Global Transport singleton backed by `reticulum-rs` real networking.
 //!
-//! This module is only compiled when the `real-reticulum` feature is active.
-//! It manages a lazily-initialized `reticulum_rs::transport::Transport` instance
-//! that owns the Reticulum runtime, interface manager, link tables, and destination
-//! registration.
-//!
 //! IMPORTANT: `reticulum_rs` re-exports `rns_core` types at the top level
 //! (e.g. `reticulum_rs::destination`, `reticulum_rs::identity`, `reticulum_rs::hash`)
 //! and `rns_transport` types under `reticulum_rs::transport::*`. These are *distinct
 //! types* even when they have the same name. The `Transport` API uses `rns_transport`
 //! types, so all imports here must reference `reticulum_rs::transport::*` sub-modules.
-
-#![cfg(feature = "real-reticulum")]
 
 use once_cell::sync::OnceCell;
 use std::io::{Read, Write};
@@ -117,7 +110,7 @@ pub fn load_or_create_service_identity(config_dir: &str, name: &str) -> Result<P
 /// Priority:
 /// 1. `identity_key` → load directly from hex string.
 /// 2. `identity_name` → load or create a persisted random identity in `config_dir`.
-/// 3. Otherwise → error.
+/// 3. Neither → generate an ephemeral random identity (not persisted).
 fn resolve_identity(cfg: &ReticulumConfig, config_dir: &str) -> Result<PrivateIdentity, String> {
     if let Some(ref key) = cfg.identity_key {
         PrivateIdentity::new_from_hex_string(key)
@@ -125,7 +118,8 @@ fn resolve_identity(cfg: &ReticulumConfig, config_dir: &str) -> Result<PrivateId
     } else if let Some(ref name) = cfg.identity_name {
         load_or_create_service_identity(config_dir, name)
     } else {
-        Err("config must contain either 'identity_key' (128-char hex) or 'identity_name'".to_string())
+        log::warn!("[bridge-tp] no identity specified; using ephemeral random identity");
+        Ok(PrivateIdentity::new_from_rand(OsRng))
     }
 }
 

@@ -2,10 +2,8 @@ package reticulum
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
-	"os"
 	"sync"
 	"time"
 
@@ -17,7 +15,6 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
-
 
 func RegisterOutbound(registry *outbound.Registry) {
 	outbound.Register[option.ReticulumOutboundOptions](registry, C.TypeReticulum, NewOutbound)
@@ -44,38 +41,23 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 }
 
 func (h *Outbound) Start(stage adapter.StartStage) error {
-	if stage == adapter.StartStateInitialize {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		if h.bridgeInited {
-			return nil
-		}
-		// If config path is provided, load and init bridge with it.
-		if h.options.ReticulumConfigPath != "" {
-			data, err := os.ReadFile(h.options.ReticulumConfigPath)
-			if err != nil {
-				return fmt.Errorf("failed to read reticulum config: %w", err)
-			}
-			if err := BridgeInit(string(data)); err != nil {
-				return fmt.Errorf("bridge init failed: %w", err)
-			}
-		} else if h.options.ReticulumConfig != nil {
-			// Marshal inline config
-			b, err := json.Marshal(h.options.ReticulumConfig)
-			if err != nil {
-				return fmt.Errorf("failed to marshal config: %w", err)
-			}
-			if err := BridgeInit(string(b)); err != nil {
-				return fmt.Errorf("bridge init failed: %w", err)
-			}
-		} else {
-			// Default init
-			if err := BridgeInit(""); err != nil {
-				return fmt.Errorf("bridge init failed: %w", err)
-			}
-		}
-		h.bridgeInited = true
+	if stage != adapter.StartStateInitialize {
+		return nil
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.bridgeInited {
+		return nil
+	}
+
+	configJSON, err := buildConfigJSON(h.options.ReticulumConfig, h.options.ReticulumConfigPath)
+	if err != nil {
+		return err
+	}
+	if err := BridgeInit(configJSON); err != nil {
+		return fmt.Errorf("bridge init failed: %w", err)
+	}
+	h.bridgeInited = true
 	return nil
 }
 
@@ -102,14 +84,12 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 		}
 	}
 
-	// Use destination string as the hash to dial
 	dest := destination.String()
 	taskID, err := BridgeDial(dest)
 	if err != nil {
 		return nil, err
 	}
 
-	// Poll with context deadline
 	deadline, ok := ctx.Deadline()
 	timeout := 30 * time.Second
 	if ok {
@@ -128,13 +108,18 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 	if h.options.Name != "" {
 		localName = h.options.Name
 	}
-	remoteName := dest
-	return newReticulumConn(handle, localName, remoteName), nil
+	conn := newReticulumConn(handle, localName, dest)
+
+	if h.options.Password != "" {
+		if err := ClientAuth(conn, h.options.Password); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("reticulum auth failed: %w", err)
+		}
+	}
+
+	return conn, nil
 }
 
 func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 	return nil, N.ErrUnknownNetwork
 }
-
-
-

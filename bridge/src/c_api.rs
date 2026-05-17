@@ -1,11 +1,8 @@
 use std::ffi::CStr;
 use std::os::raw::c_char;
-
-#[cfg(feature = "real-reticulum")]
 use std::sync::Arc;
 
 use crate::config;
-use crate::connection::{create_pair, Connection};
 use crate::listener::Listener;
 use crate::runtime;
 use crate::store::global_store;
@@ -13,7 +10,7 @@ use crate::task::{TaskResult, global_registry};
 
 /// Initialize the reticulum bridge with a JSON config string.
 /// Returns 0 on success, -1 on error.
-/// If config_json is NULL, uses default configuration.
+/// config_json must not be NULL; always provide at least "{}" for defaults.
 #[no_mangle]
 pub extern "C" fn reticulum_init(config_json: *const c_char) -> i32 {
     #[cfg(target_os = "android")]
@@ -27,41 +24,33 @@ pub extern "C" fn reticulum_init(config_json: *const c_char) -> i32 {
         env_logger::Env::default().default_filter_or("info"),
     ).try_init();
 
-    if !config_json.is_null() {
-        let c_str = match unsafe { CStr::from_ptr(config_json).to_str() } {
-            Ok(s) => s,
-            Err(_) => return -1,
-        };
-        // Treat empty string as NULL (use default config)
-        if c_str.is_empty() {
-            crate::set_global_config(None);
-        } else {
-            match config::parse_config(c_str) {
-                Ok(cfg) => {
-                    crate::set_global_config(Some(cfg));
-                }
-                Err(e) => {
-                    log::error!("[bridge] config parse error: {}", e);
-                    return -1;
-                }
-            }
-        }
-    } else {
-        crate::set_global_config(None);
+    if config_json.is_null() {
+        log::error!("[bridge] config_json must not be null; pass at least {{}} for defaults");
+        return -1;
     }
+    let c_str = match unsafe { CStr::from_ptr(config_json).to_str() } {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    match config::parse_config(c_str) {
+        Ok(cfg) => {
+            crate::set_global_config(Some(cfg));
+        }
+        Err(e) => {
+            log::error!("[bridge] config parse error: {}", e);
+            return -1;
+        }
+    }
+
     if let Err(e) = runtime::init_runtime() {
         log::error!("[bridge] runtime init failed: {}", e);
         return -1;
     }
 
-    // Initialize real Reticulum transport when the feature is active.
-    #[cfg(feature = "real-reticulum")]
-    {
-        if let Some(cfg) = crate::get_global_config() {
-            if let Err(e) = crate::transport::init_transport(cfg) {
-                log::error!("[bridge] init_transport failed: {}", e);
-                return -1;
-            }
+    if let Some(cfg) = crate::get_global_config() {
+        if let Err(e) = crate::transport::init_transport(cfg) {
+            log::error!("[bridge] init_transport failed: {}", e);
+            return -1;
         }
     }
 
@@ -89,16 +78,15 @@ pub extern "C" fn get_hash(hash: *mut *mut c_char, name: *const c_char) -> i32 {
 
     match result {
         Some(hash_str) => {
-            // Allocate with libc so libc::free in reticulum_free works correctly.
             let bytes = hash_str.as_bytes();
-            let len = bytes.len() + 1; // NUL terminator
+            let len = bytes.len() + 1;
             unsafe {
                 let ptr = libc::malloc(len) as *mut c_char;
                 if ptr.is_null() {
                     return -1;
                 }
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
-                *ptr.add(bytes.len()) = 0; // NUL terminator
+                *ptr.add(bytes.len()) = 0;
                 *hash = ptr;
             }
             0
@@ -135,10 +123,9 @@ pub extern "C" fn reticulum_register_name(name: *const c_char, hash: *const c_ch
 /// Clears the store so that old handles become invalid.
 /// The Tokio runtime itself is kept alive to avoid thread-local
 /// state corruption from dropping and recreating it.
+/// Note: the Android logger (init_once) is process-wide and has no shutdown API.
 #[no_mangle]
 pub extern "C" fn reticulum_shutdown() {
-    // Only try to clear the store if we have a runtime — tests may call
-    // shutdown without having called init first (e.g. null-param tests).
     if runtime::has_runtime() {
         let store = global_store();
         runtime::block_on(async move {
@@ -159,101 +146,56 @@ pub extern "C" fn reticulum_dial(destination_hash: *const c_char) -> i32 {
         Ok(s) => s.to_string(),
         Err(_) => return -1,
     };
-    
+
     let registry = global_registry();
     let store = global_store();
-    
-    // Create a pending task
+
     let task_id = runtime::block_on(async {
         registry.insert_pending().await
     });
-    
-    // Spawn the async dial operation
+
     runtime::block_on(async move {
-        #[cfg(feature = "real-reticulum")]
-        {
-            // Real Reticulum path: attempt to establish a real link via the transport.
-            match crate::transport::get_transport() {
-                Some(transport) => {
-                    // Subscribe to data events BEFORE dialing. The server can start
-                    // sending data (e.g. auth header) the instant the link activates on
-                    // its side — which can be before dial_and_wait returns on ours.
-                    // Subscribing now ensures those packets are captured by the reader.
-                    let data_rx = {
-                        let tp = transport.lock().await;
-                        tp.received_data_events()
-                    };
-                    match crate::transport::dial_and_wait(&dest).await {
-                        Ok((link, link_id)) => {
-                            let conn = Connection::new_from_link(link, link_id);
-                            crate::transport::spawn_link_data_reader(conn.clone(), link_id, data_rx);
-                            let handle = store.insert_connection(conn).await;
-                            registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
-                        }
-                        Err(e) => {
-                            registry.complete(
-                                task_id,
-                                TaskResult::Error {
-                                    message: format!("dial failed: {}", e),
-                                },
-                            ).await;
-                        }
+        match crate::transport::get_transport() {
+            Some(transport) => {
+                // Subscribe to data events BEFORE dialing so we capture packets
+                // that arrive the instant the link activates on the server side.
+                let data_rx = {
+                    let tp = transport.lock().await;
+                    tp.received_data_events()
+                };
+                match crate::transport::dial_and_wait(&dest).await {
+                    Ok((link, link_id)) => {
+                        let conn = crate::connection::Connection::new_from_link(link, link_id);
+                        crate::transport::spawn_link_data_reader(conn.clone(), link_id, data_rx);
+                        let handle = store.insert_connection(conn).await;
+                        registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
+                    }
+                    Err(e) => {
+                        registry.complete(
+                            task_id,
+                            TaskResult::Error {
+                                message: format!("dial failed: {}", e),
+                            },
+                        ).await;
                     }
                 }
-                None => {
-                    // Transport not initialized — fall through to in-memory path below.
-                    // (The code after the #[cfg] block handles this case.)
-                    // We still complete with the in-memory path.
-                    in_memory_dial(&dest, &store, &registry, task_id).await;
-                }
+            }
+            None => {
+                registry.complete(
+                    task_id,
+                    TaskResult::Error {
+                        message: "reticulum transport not initialized; call reticulum_init first".to_string(),
+                    },
+                ).await;
             }
         }
-        
-        #[cfg(not(feature = "real-reticulum"))]
-        {
-            in_memory_dial(&dest, &store, &registry, task_id).await;
-        }
     });
-    
-    task_id as i32
-}
 
-/// In-memory dial path: try to find a listener registered for this hash, or
-/// create a standalone connection. Used as fallback or when real-reticulum
-/// feature is disabled.
-async fn in_memory_dial(
-    dest: &str,
-    store: &'static crate::store::HandleStore,
-    registry: &'static crate::task::TaskRegistry,
-    task_id: u64,
-) {
-    // Try to find a listener registered for this hash
-    match store.get_listener_by_hash(dest).await {
-        Some(listener) => {
-            // Paired connection: dial-side connection A, listener-side connection B
-            let (conn_a, conn_b) = create_pair().await;
-            // Push conn_b into the listener's accept queue
-            listener.push_connection((*conn_b).clone()).await;
-            // Insert conn_a into the store as the dial result
-            let handle = store.insert_connection((*conn_a).clone()).await;
-            registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
-        }
-        None => {
-            // No matching listener — standalone connection
-            let conn = Connection::new();
-            let handle = store.insert_connection(conn).await;
-            registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
-        }
-    }
+    task_id as i32
 }
 
 /// Listen on a name, returning a task ID.
 /// Use reticulum_poll to check for completion and get the listener handle.
-///
-/// Registers a service destination (random, persisted identity) and a
-/// discovery destination (deterministic). When a client knocks on the
-/// discovery dest, the service dest is announced so the client can find
-/// the real hash.
 #[no_mangle]
 pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i32 {
     if listen_hash.is_null() {
@@ -272,126 +214,94 @@ pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i32 {
     });
 
     runtime::block_on(async move {
-        #[cfg(feature = "real-reticulum")]
-        {
-            let listen_name = dest;
-            match crate::transport::get_transport() {
-                Some(_) => {
-                    // Determine config dir for identity persistence.
-                    let cfg_dir = match crate::get_global_config() {
-                        Some(cfg) => crate::transport::config_dir_path(&cfg),
-                        None => std::env::var("HOME")
-                            .map(|h| format!("{}/.reticulum", h))
-                            .unwrap_or_else(|_| "/etc/reticulum".to_string()),
-                    };
+        let listen_name = dest;
+        match crate::transport::get_transport() {
+            Some(_) => {
+                let cfg_dir = match crate::get_global_config() {
+                    Some(cfg) => crate::transport::config_dir_path(cfg),
+                    None => {
+                        registry.complete(
+                            task_id,
+                            TaskResult::Error {
+                                message: "reticulum transport not initialized; call reticulum_init first".to_string(),
+                            },
+                        ).await;
+                        return;
+                    }
+                };
 
-                    // Load or create the persistent random service identity.
-                    let service_identity = match crate::transport::load_or_create_service_identity(
-                        &cfg_dir,
-                        &listen_name,
-                    ) {
-                        Ok(id) => id,
-                        Err(e) => {
-                            registry
-                                .complete(task_id, TaskResult::Error { message: e })
-                                .await;
-                            return;
+                let service_identity = match crate::transport::load_or_create_service_identity(
+                    &cfg_dir,
+                    &listen_name,
+                ) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        registry.complete(task_id, TaskResult::Error { message: e }).await;
+                        return;
+                    }
+                };
+
+                let listener = Listener::with_hash(listen_name.clone());
+                let listener_arc = Arc::new(listener);
+
+                match crate::transport::register_listener_destination(
+                    listener_arc.clone(),
+                    service_identity,
+                    "sing-box-reticulum".to_string(),
+                    format!("service.{}", listen_name),
+                )
+                .await
+                {
+                    Ok((service_hash, service_dest_arc)) => {
+                        listener_arc.set_destination_hash(service_hash).await;
+
+                        if let Err(e) = crate::transport::register_discovery_destination(
+                            listen_name.clone(),
+                            service_dest_arc.clone(),
+                            service_hash,
+                        )
+                        .await
+                        {
+                            log::warn!("[c_api] discovery dest registration failed: {}", e);
                         }
-                    };
 
-                    // Create the listener.
-                    let listener = Listener::with_hash(listen_name.clone());
-                    let listener_arc = Arc::new(listener);
-
-                    // Register the service destination (random identity).
-                    match crate::transport::register_listener_destination(
-                        listener_arc.clone(),
-                        service_identity,
-                        "sing-box-reticulum".to_string(),
-                        format!("service.{}", listen_name),
-                    )
-                    .await
-                    {
-                        Ok((service_hash, service_dest_arc)) => {
-                            listener_arc.set_destination_hash(service_hash).await;
-
-                            // Register discovery destination and spawn the knock handler.
-                            if let Err(e) = crate::transport::register_discovery_destination(
-                                listen_name.clone(),
-                                service_dest_arc.clone(),
-                                service_hash,
-                            )
-                            .await
-                            {
-                                log::warn!("[c_api] discovery dest registration failed: {}", e);
-                                // Non-fatal — service dest is still usable.
-                            }
-
-                            // Continuously re-announce the service destination so
-                            // clients that start later receive it within one interval.
-                            // A background task holds stop_tx alive for 10 minutes,
-                            // after which the loop exits gracefully.
-                            {
-                                let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-                                let dest_clone = service_dest_arc.clone();
-                                let name_clone = listen_name.clone();
-                                tokio::spawn(async move {
-                                    crate::transport::start_service_announce_loop(
-                                        dest_clone, name_clone, stop_rx,
-                                    )
-                                    .await;
-                                });
-                                tokio::spawn(async move {
-                                    tokio::time::sleep(
-                                        std::time::Duration::from_secs(600),
-                                    )
-                                    .await;
-                                    let _ = stop_tx.send(true);
-                                });
-                            }
-
-                            let handle =
-                                store.insert_listener((*listener_arc).clone()).await;
-                            registry
-                                .complete(
-                                    task_id,
-                                    TaskResult::Done { handle, data: vec![] },
+                        {
+                            let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+                            let dest_clone = service_dest_arc.clone();
+                            let name_clone = listen_name.clone();
+                            tokio::spawn(async move {
+                                crate::transport::start_service_announce_loop(
+                                    dest_clone, name_clone, stop_rx,
                                 )
                                 .await;
+                            });
+                            tokio::spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                                let _ = stop_tx.send(true);
+                            });
                         }
-                        Err(e) => {
-                            registry
-                                .complete(
-                                    task_id,
-                                    TaskResult::Error {
-                                        message: format!(
-                                            "failed to register service destination: {}",
-                                            e
-                                        ),
-                                    },
-                                )
-                                .await;
-                        }
+
+                        let handle = store.insert_listener((*listener_arc).clone()).await;
+                        registry.complete(task_id, TaskResult::Done { handle, data: vec![] }).await;
+                    }
+                    Err(e) => {
+                        registry.complete(
+                            task_id,
+                            TaskResult::Error {
+                                message: format!("failed to register service destination: {}", e),
+                            },
+                        ).await;
                     }
                 }
-                None => {
-                    // Transport not initialized — fall back to in-memory mode.
-                    let listener = Listener::with_hash(listen_name);
-                    let handle = store.insert_listener(listener).await;
-                    registry
-                        .complete(task_id, TaskResult::Done { handle, data: vec![] })
-                        .await;
-                }
             }
-        }
-
-        #[cfg(not(feature = "real-reticulum"))]
-        {
-            let listener = Listener::with_hash(dest);
-            let handle = store.insert_listener(listener).await;
-            registry
-                .complete(task_id, TaskResult::Done { handle, data: vec![] })
-                .await;
+            None => {
+                registry.complete(
+                    task_id,
+                    TaskResult::Error {
+                        message: "reticulum transport not initialized; call reticulum_init first".to_string(),
+                    },
+                ).await;
+            }
         }
     });
 
@@ -407,18 +317,10 @@ pub extern "C" fn reticulum_get_listener_hash(listener_handle: u64) -> *mut c_ch
     let result: Option<String> = runtime::block_on(async move {
         match store.get_listener(listener_handle).await {
             Some(listener) => {
-                #[cfg(feature = "real-reticulum")]
-                {
-                    let hash = listener.destination_hash().await;
-                    match hash {
-                        Some(h) => Some(h.to_hex_string()),
-                        None => None,
-                    }
-                }
-                #[cfg(not(feature = "real-reticulum"))]
-                {
-                    let _ = listener;
-                    None
+                let hash = listener.destination_hash().await;
+                match hash {
+                    Some(h) => Some(h.to_hex_string()),
+                    None => None,
                 }
             }
             None => None,
@@ -463,8 +365,6 @@ pub extern "C" fn reticulum_accept(listener_handle: u64) -> i32 {
         registry.insert_pending().await
     });
 
-    // Spawn a background Tokio task that waits for a connection.
-    // block_on returns immediately after the spawn; the task runs on the thread pool.
     runtime::block_on(async move {
         tokio::spawn(async move {
             const ACCEPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
@@ -504,7 +404,7 @@ pub extern "C" fn reticulum_write(conn_handle: u64, data: *const u8, len: usize)
     }
     let store = global_store();
     let data_slice = unsafe { std::slice::from_raw_parts(data, len) };
-    
+
     runtime::block_on(async move {
         match store.get_connection(conn_handle).await {
             Some(conn) => match conn.write(data_slice).await {
@@ -528,18 +428,16 @@ pub extern "C" fn reticulum_read(conn_handle: u64, buffer: *mut u8, max_len: usi
     }
     let store = global_store();
     let buffer_slice = unsafe { std::slice::from_raw_parts_mut(buffer, max_len) };
-    
-    let result = runtime::block_on(async move {
+
+    runtime::block_on(async move {
         match store.get_connection(conn_handle).await {
             Some(conn) => conn.read(buffer_slice).await as i32,
             None => -1,
         }
-    });
-    result
+    })
 }
 
 /// Allocate a buffer with libc::malloc and copy bytes into it.
-/// Returns a pointer suitable for freeing with reticulum_free.
 unsafe fn alloc_with_libc(data: &[u8]) -> *mut u8 {
     let len = data.len();
     let ptr = libc::malloc(len) as *mut u8;
@@ -564,9 +462,8 @@ pub extern "C" fn reticulum_poll(task_id: i32, result_out: *mut *mut u8, len_out
         registry.get_and_remove(task_id as u64).await
     });
     match result {
-        None => 0, // pending
+        None => 0,
         Some(TaskResult::Done { handle, data: _ }) => {
-            // Return the handle as bytes, allocated with libc so reticulum_free works.
             let handle_bytes = handle.to_le_bytes();
             let len = handle_bytes.len();
             unsafe {
@@ -605,7 +502,6 @@ pub extern "C" fn reticulum_poll(task_id: i32, result_out: *mut *mut u8, len_out
 
 
 /// Free memory allocated by the bridge.
-/// Safe to call on memory allocated by any bridge function (get_hash, reticulum_poll).
 #[no_mangle]
 pub extern "C" fn reticulum_free(ptr: *mut u8) {
     if !ptr.is_null() {
@@ -615,16 +511,13 @@ pub extern "C" fn reticulum_free(ptr: *mut u8) {
     }
 }
 
-/// Resolve a human-readable service name to its address hash via the Reticulum
-/// network.
+/// Resolve a human-readable service name to its address hash via the Reticulum network.
 ///
-/// The client repeatedly "knocks" on the discovery destination (whose hash is
-/// deterministic from the name) and waits for the server to announce the real
-/// service hash. Up to 5 attempts are made with a 3-second cooldown between
-/// them; each attempt waits up to 15 seconds for the service announce.
+/// Repeatedly knocks on the discovery destination and waits for the server to announce
+/// the real service hash. Up to 3 attempts with exponential backoff (3s → 6s → 12s).
 ///
 /// The caller must free the returned string with reticulum_free.
-/// Returns NULL on timeout or if real-reticulum is not available.
+/// Returns NULL on timeout or if transport is not initialized.
 #[no_mangle]
 pub extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
     if name.is_null() {
@@ -635,74 +528,61 @@ pub extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
         _ => return std::ptr::null_mut(),
     };
 
-    #[cfg(feature = "real-reticulum")]
-    {
-        use std::time::Duration;
+    use std::time::Duration;
 
-        // Server re-announces every 5 s; 8 s gives one full cycle as margin.
-        const ANNOUNCE_WAIT: Duration = Duration::from_secs(8);
-        // Up to 3 attempts before giving up.  Backoff: 3 s → 6 s → 12 s (capped at 30 s).
-        const MAX_ATTEMPTS: u32 = 3;
-        const INITIAL_BACKOFF: Duration = Duration::from_secs(3);
+    // Server re-announces every 5s; 8s gives one full cycle as margin.
+    const ANNOUNCE_WAIT: Duration = Duration::from_secs(8);
+    const MAX_ATTEMPTS: u32 = 3;
+    const INITIAL_BACKOFF: Duration = Duration::from_secs(3);
 
-        let hash_opt = runtime::block_on(async move {
-            let mut backoff = INITIAL_BACKOFF;
-            for attempt in 0u32..MAX_ATTEMPTS {
-                if attempt > 0 {
-                    log::info!(
-                        "[c_api] no service announce for '{}' (attempt {}/{}), retrying in {:?}",
-                        name_str, attempt, MAX_ATTEMPTS, backoff
-                    );
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
-                }
-
-                // Knock in the background (small delay so subscriber is ready first).
-                let knock_name = name_str.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    if let Err(e) =
-                        crate::transport::dial_discovery_and_wait(&knock_name).await
-                    {
-                        log::warn!("[c_api] discovery knock failed: {}", e);
-                    }
-                });
-
-                if let Some(hash) = crate::transport::wait_for_service_announce(
-                    &name_str,
-                    ANNOUNCE_WAIT,
-                )
-                .await
-                {
-                    log::info!("[c_api] resolved '{}' → {}", name_str, hash);
-                    return Some(hash);
-                }
+    let hash_opt = runtime::block_on(async move {
+        let mut backoff = INITIAL_BACKOFF;
+        for attempt in 0u32..MAX_ATTEMPTS {
+            if attempt > 0 {
+                log::info!(
+                    "[c_api] no service announce for '{}' (attempt {}/{}), retrying in {:?}",
+                    name_str, attempt, MAX_ATTEMPTS, backoff
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(30));
             }
-            log::warn!("[c_api] gave up resolving '{}' after {} attempts", name_str, MAX_ATTEMPTS);
-            None
-        });
 
-        match hash_opt {
-            Some(hash_str) => {
-                let bytes = hash_str.as_bytes();
-                let len = bytes.len() + 1;
-                unsafe {
-                    let ptr = libc::malloc(len) as *mut c_char;
-                    if ptr.is_null() {
-                        return std::ptr::null_mut();
-                    }
-                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
-                    *ptr.add(bytes.len()) = 0;
-                    ptr
+            let knock_name = name_str.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if let Err(e) = crate::transport::dial_discovery_and_wait(&knock_name).await {
+                    log::warn!("[c_api] discovery knock failed: {}", e);
                 }
+            });
+
+            if let Some(hash) = crate::transport::wait_for_service_announce(
+                &name_str,
+                ANNOUNCE_WAIT,
+            )
+            .await
+            {
+                log::info!("[c_api] resolved '{}' → {}", name_str, hash);
+                return Some(hash);
             }
-            None => std::ptr::null_mut(),
         }
-    }
+        log::warn!("[c_api] gave up resolving '{}' after {} attempts", name_str, MAX_ATTEMPTS);
+        None
+    });
 
-    #[cfg(not(feature = "real-reticulum"))]
-    {
-        let _ = name_str;
-        std::ptr::null_mut()
+    match hash_opt {
+        Some(hash_str) => {
+            let bytes = hash_str.as_bytes();
+            let len = bytes.len() + 1;
+            unsafe {
+                let ptr = libc::malloc(len) as *mut c_char;
+                if ptr.is_null() {
+                    return std::ptr::null_mut();
+                }
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
+                *ptr.add(bytes.len()) = 0;
+                ptr
+            }
+        }
+        None => std::ptr::null_mut(),
     }
 }

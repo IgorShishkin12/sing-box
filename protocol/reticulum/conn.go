@@ -74,6 +74,7 @@ func (c *reticulumConn) Write(b []byte) (int, error) {
 	if c.handle == 0 {
 		return 0, io.ErrClosedPipe
 	}
+	// reticulum_write always writes all bytes or returns -1; partial writes cannot occur.
 	n := BridgeWrite(c.handle, b)
 	if n < 0 {
 		return 0, errors.New("write error")

@@ -36,43 +36,11 @@ fn poll_task(task_id: i32, timeout: Duration) -> Result<u64, String> {
     }
 }
 
-/// Test listener + in-memory dial: accept waits and succeeds when a connection arrives.
-#[test]
-fn test_listener_push_and_accept() {
-    let ret = reticulum_init(ptr::null());
-    assert_eq!(ret, 0, "bridge init should succeed");
-
-    let listen_hash = CString::new("rln://listener-test").unwrap();
-    let listen_task_id = reticulum_listen(listen_hash.as_ptr());
-    assert!(listen_task_id > 0, "listen should return a positive task ID");
-
-    let listener_handle = poll_task(listen_task_id, Duration::from_secs(5))
-        .expect("listener task should complete quickly");
-    assert!(listener_handle > 0);
-
-    // Start accept — it blocks waiting for a connection.
-    let accept_task_id = reticulum_accept(listener_handle);
-    assert!(accept_task_id > 0);
-
-    // Dial the same hash in-memory; this pushes a connection into the listener queue.
-    let dial_hash = CString::new("rln://listener-test").unwrap();
-    let dial_task_id = reticulum_dial(dial_hash.as_ptr());
-    assert!(dial_task_id > 0);
-
-    // Both tasks should complete now.
-    let _dial_handle = poll_task(dial_task_id, Duration::from_secs(5))
-        .expect("dial task should succeed (in-memory)");
-    let _conn_handle = poll_task(accept_task_id, Duration::from_secs(5))
-        .expect("accept task should succeed after dial");
-
-    reticulum_close(listener_handle);
-    reticulum_shutdown();
-}
-
 /// Test accepting with an invalid listener handle returns an error quickly.
 #[test]
 fn test_accept_invalid_handle() {
-    let ret = reticulum_init(ptr::null());
+    let config = CString::new("{}").unwrap();
+    let ret = reticulum_init(config.as_ptr());
     assert_eq!(ret, 0, "bridge init should succeed");
 
     // Handle 99999 doesn't exist — the spawned task should fail immediately.
