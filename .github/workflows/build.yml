@@ -691,6 +691,16 @@ jobs:
         with:
           path: ~/.gradle
           key: gradle-${{ hashFiles('**/*.gradle') }}
+      - name: Restore keystore from secret
+        env:
+          RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE }}
+        run: |-
+          if [[ -n "$RELEASE_KEYSTORE" ]]; then
+            echo "$RELEASE_KEYSTORE" | base64 -d > clients/android/app/release.keystore
+            echo "Keystore restored from RELEASE_KEYSTORE secret."
+          else
+            echo "No RELEASE_KEYSTORE secret — using keystore from submodule."
+          fi
       - name: Update version
         run: |-
           if [[ "${{ github.event_name != 'workflow_dispatch' || inputs.nightly }}" == "true" ]]; then
@@ -788,6 +798,16 @@ jobs:
         with:
           path: ~/.gradle
           key: gradle-${{ hashFiles('**/*.gradle') }}
+      - name: Restore keystore from secret
+        env:
+          RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE }}
+        run: |-
+          if [[ -n "$RELEASE_KEYSTORE" ]]; then
+            echo "$RELEASE_KEYSTORE" | base64 -d > clients/android/app/release.keystore
+            echo "Keystore restored from RELEASE_KEYSTORE secret."
+          else
+            echo "No RELEASE_KEYSTORE secret — using keystore from submodule."
+          fi
       - name: Build
         run: |-
           if [[ "${{ inputs.nightly }}" == "true" ]]; then
