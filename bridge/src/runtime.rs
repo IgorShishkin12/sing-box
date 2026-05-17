@@ -19,24 +19,24 @@ fn lock_runtime() -> std::sync::MutexGuard<'static, Option<Arc<Runtime>>> {
 /// Initialize the Tokio runtime if not already initialized.
 /// Returns 0 on success, -1 on error.
 pub fn init_runtime() -> i32 {
-    eprintln!("init_runtime called");
+    log::debug!("init_runtime called");
     let mut guard = lock_runtime();
     if guard.is_some() {
-        eprintln!("Runtime already initialized");
+        log::debug!("Runtime already initialized");
         return 0;
     }
-    eprintln!("Building runtime (multi-thread)");
+    log::debug!("Building runtime (multi-thread)");
     match Builder::new_multi_thread()
         .enable_all()
         .build()
     {
         Ok(rt) => {
             *guard = Some(Arc::new(rt));
-            eprintln!("Runtime created successfully");
+            log::info!("Runtime created successfully");
             0
         }
         Err(e) => {
-            eprintln!("Failed to create Tokio runtime: {}", e);
+            log::error!("Failed to create Tokio runtime: {}", e);
             -1
         }
     }
@@ -127,13 +127,13 @@ where
 ///
 /// The store and registry are cleared by the caller (reticulum_shutdown).
 pub fn shutdown() {
-    eprintln!("shutdown called");
+    log::debug!("shutdown called");
     // Keep the runtime alive — don't drop it.
     // The Mutex will always hold Some(Arc<Runtime>) after first init.
     let guard = lock_runtime();
     if guard.is_some() {
-        eprintln!("Runtime shut down (logical)");
+        log::debug!("Runtime shut down (logical)");
     } else {
-        eprintln!("Runtime was not initialized, nothing to shut down");
+        log::warn!("Runtime was not initialized, nothing to shut down");
     }
 }

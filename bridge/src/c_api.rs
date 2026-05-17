@@ -16,6 +16,17 @@ use crate::task::{TaskResult, global_registry};
 /// If config_json is NULL, uses default configuration.
 #[no_mangle]
 pub extern "C" fn reticulum_init(config_json: *const c_char) -> i32 {
+    #[cfg(target_os = "android")]
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Trace)
+            .with_tag("reticulum_bridge"),
+    );
+    #[cfg(not(target_os = "android"))]
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    ).try_init();
+
     if !config_json.is_null() {
         let c_str = match unsafe { CStr::from_ptr(config_json).to_str() } {
             Ok(s) => s,
@@ -29,7 +40,10 @@ pub extern "C" fn reticulum_init(config_json: *const c_char) -> i32 {
                 Ok(cfg) => {
                     crate::set_global_config(Some(cfg));
                 }
-                Err(_) => return -1,
+                Err(e) => {
+                    log::error!("[bridge] config parse error: {}", e);
+                    return -1;
+                }
             }
         }
     } else {
@@ -42,6 +56,7 @@ pub extern "C" fn reticulum_init(config_json: *const c_char) -> i32 {
     {
         if let Some(cfg) = crate::get_global_config() {
             if crate::transport::init_transport(cfg) != 0 {
+                log::error!("[bridge] init_transport returned -1");
                 return -1;
             }
         }
@@ -305,7 +320,7 @@ pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i32 {
                             )
                             .await
                             {
-                                eprintln!("[c_api] discovery dest registration failed: {}", e);
+                                log::warn!("[c_api] discovery dest registration failed: {}", e);
                                 // Non-fatal — service dest is still usable.
                             }
 
@@ -626,7 +641,7 @@ pub extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
             let mut backoff = INITIAL_BACKOFF;
             for attempt in 0u32..MAX_ATTEMPTS {
                 if attempt > 0 {
-                    eprintln!(
+                    log::info!(
                         "[c_api] no service announce for '{}' (attempt {}/{}), retrying in {:?}",
                         name_str, attempt, MAX_ATTEMPTS, backoff
                     );
@@ -641,7 +656,7 @@ pub extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
                     if let Err(e) =
                         crate::transport::dial_discovery_and_wait(&knock_name).await
                     {
-                        eprintln!("[c_api] discovery knock failed: {}", e);
+                        log::warn!("[c_api] discovery knock failed: {}", e);
                     }
                 });
 
@@ -651,11 +666,11 @@ pub extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
                 )
                 .await
                 {
-                    eprintln!("[c_api] resolved '{}' → {}", name_str, hash);
+                    log::info!("[c_api] resolved '{}' → {}", name_str, hash);
                     return Some(hash);
                 }
             }
-            eprintln!("[c_api] gave up resolving '{}' after {} attempts", name_str, MAX_ATTEMPTS);
+            log::warn!("[c_api] gave up resolving '{}' after {} attempts", name_str, MAX_ATTEMPTS);
             None
         });
 

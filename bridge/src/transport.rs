@@ -103,7 +103,7 @@ pub fn load_or_create_service_identity(config_dir: &str, name: &str) -> Result<P
             .map_err(|e| format!("failed to create identity key '{}': {}", key_path.display(), e))?;
         file.write_all(hex.as_bytes())
             .map_err(|e| format!("failed to write identity key '{}': {}", key_path.display(), e))?;
-        eprintln!(
+        log::info!(
             "[bridge-tp] created new service identity for '{}': addr={}",
             name,
             identity.address_hash()
@@ -169,7 +169,7 @@ async fn spawn_interfaces(
 ) {
     let defaults = default_interfaces();
     let ifaces = if interfaces.is_empty() {
-        eprintln!("[bridge-tp] no interfaces configured, using AutoInterface default");
+        log::info!("[bridge-tp] no interfaces configured, using AutoInterface default");
         defaults.as_slice()
     } else {
         interfaces
@@ -184,7 +184,7 @@ async fn spawn_interfaces(
                 let bcast = format!("255.255.255.255:{port}");
                 let ui = UdpInterface::new(&bind, Some(&bcast));
                 let addr = iface_mgr.spawn(ui, |ctx| UdpInterface::spawn(ctx));
-                eprintln!("[bridge-tp] spawned AutoInterface (UDP broadcast) port={} addr={}", port, addr);
+                log::info!("[bridge-tp] spawned AutoInterface (UDP broadcast) port={} addr={}", port, addr);
             }
             "UDPInterface" => {
                 let lip = iface.listen_ip.as_deref().unwrap_or("0.0.0.0");
@@ -195,7 +195,7 @@ async fn spawn_interfaces(
                 });
                 let ui = UdpInterface::new(&bind, fwd.as_ref());
                 let addr = iface_mgr.spawn(ui, |ctx| UdpInterface::spawn(ctx));
-                eprintln!("[bridge-tp] spawned UDPInterface '{}' bind={} forward={:?} addr={}", label, bind, fwd, addr);
+                log::info!("[bridge-tp] spawned UDPInterface '{}' bind={} forward={:?} addr={}", label, bind, fwd, addr);
             }
             "TCPServerInterface" => {
                 let lip = iface.listen_ip.as_deref().unwrap_or("0.0.0.0");
@@ -203,7 +203,7 @@ async fn spawn_interfaces(
                 let bind = format!("{lip}:{lport}");
                 let ts = TcpServer::new(&bind, iface_mgr_arc.clone());
                 let addr = iface_mgr.spawn(ts, |ctx| TcpServer::spawn(ctx));
-                eprintln!("[bridge-tp] spawned TCPServerInterface '{}' bind={} addr={}", label, bind, addr);
+                log::info!("[bridge-tp] spawned TCPServerInterface '{}' bind={} addr={}", label, bind, addr);
             }
             "TCPClientInterface" => {
                 let host = iface.target_host.as_deref().unwrap_or("");
@@ -211,10 +211,10 @@ async fn spawn_interfaces(
                 let target = format!("{host}:{port}");
                 let tc = TcpClient::new(&target);
                 let addr = iface_mgr.spawn(tc, |ctx| TcpClient::spawn(ctx));
-                eprintln!("[bridge-tp] spawned TCPClientInterface '{}' target={} addr={}", label, target, addr);
+                log::info!("[bridge-tp] spawned TCPClientInterface '{}' target={} addr={}", label, target, addr);
             }
             other => {
-                eprintln!("[bridge-tp] unknown interface type '{}', skipping", other);
+                log::warn!("[bridge-tp] unknown interface type '{}', skipping", other);
             }
         }
     }
@@ -228,27 +228,27 @@ async fn spawn_interfaces(
 /// Must be called once during `reticulum_init`. Returns 0 on success, -1 on error.
 pub fn init_transport(cfg: &ReticulumConfig) -> i32 {
     if TRANSPORT.get().is_some() {
-        eprintln!("[bridge-tp] Transport already initialized");
+        log::debug!("[bridge-tp] Transport already initialized");
         return 0;
     }
 
     // 1. Determine config directory and create it
     let cfg_dir = config_dir_path(cfg);
     if let Err(e) = std::fs::create_dir_all(&cfg_dir) {
-        eprintln!("[bridge-tp] failed to create config dir '{}': {}", cfg_dir, e);
+        log::error!("[bridge-tp] failed to create config dir '{}': {}", cfg_dir, e);
         return -1;
     }
-    eprintln!("[bridge-tp] config dir: {}", cfg_dir);
+    log::info!("[bridge-tp] config dir: {}", cfg_dir);
 
     // 2. Resolve transport-level identity (persisted)
     let identity = match resolve_identity(cfg, &cfg_dir) {
         Ok(id) => id,
         Err(e) => {
-            eprintln!("[bridge-tp] identity resolution failed: {}", e);
+            log::error!("[bridge-tp] identity resolution failed: {}", e);
             return -1;
         }
     };
-    eprintln!("[bridge-tp] identity resolved: addr={}", identity.address_hash());
+    log::info!("[bridge-tp] identity resolved: addr={}", identity.address_hash());
 
     // 3. Build ratchet store path
     let ratchet_store = Some(std::path::PathBuf::from(&cfg_dir).join("ratchet_store.db"));
@@ -263,20 +263,20 @@ pub fn init_transport(cfg: &ReticulumConfig) -> i32 {
 
     // 5. Create Transport and spawn interfaces
     let interfaces = cfg.interfaces.clone();
-    eprintln!("[bridge-tp] about to block_on for Transport::new");
+    log::debug!("[bridge-tp] about to block_on for Transport::new");
     let transport = runtime::block_on(async move {
-        eprintln!("[bridge-tp] inside block_on, creating Transport");
+        log::debug!("[bridge-tp] inside block_on, creating Transport");
         let transport = Transport::new(tp_config);
-        eprintln!("[bridge-tp] Transport created, spawning interfaces");
+        log::debug!("[bridge-tp] Transport created, spawning interfaces");
 
         let iface_mgr = transport.iface_manager();
         let mut mgr = iface_mgr.lock().await;
         spawn_interfaces(&mut *mgr, &interfaces, iface_mgr.clone()).await;
-        eprintln!("[bridge-tp] interfaces spawned");
+        log::debug!("[bridge-tp] interfaces spawned");
 
         transport
     });
-    eprintln!("[bridge-tp] Transport initialized successfully");
+    log::info!("[bridge-tp] Transport initialized successfully");
 
     let _ = TRANSPORT.set(Arc::new(Mutex::new(transport)));
     0
@@ -310,7 +310,7 @@ pub async fn register_listener_destination(
         (hash, dest, events)
     };
 
-    eprintln!(
+    log::info!(
         "[bridge-tp] registered service destination: addr={} app={} aspect={}",
         address_hash, app_name, aspect
     );
@@ -342,7 +342,7 @@ pub async fn register_listener_destination(
                         };
 
                         if link_dest_hash == service_hash {
-                            eprintln!(
+                            log::info!(
                                 "[bridge-tp] service link activated: id={} peer={}",
                                 event.id, event.address_hash
                             );
@@ -360,11 +360,11 @@ pub async fn register_listener_destination(
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    eprintln!("[bridge-tp] service link event channel closed");
+                    log::warn!("[bridge-tp] service link event channel closed");
                     break;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    eprintln!("[bridge-tp] service link event channel lagged by {}", n);
+                    log::warn!("[bridge-tp] service link event channel lagged by {}", n);
                     continue;
                 }
             }
@@ -397,7 +397,7 @@ pub async fn start_service_announce_loop(
                 .await
                 .send_announce(&service_dest, Some(name.as_bytes()))
                 .await;
-            eprintln!("[bridge-tp] announced service dest for name='{}'", name);
+            log::debug!("[bridge-tp] announced service dest for name='{}'", name);
         }
         tokio::select! {
             result = stop_rx.changed() => {
@@ -411,7 +411,7 @@ pub async fn start_service_announce_loop(
             _ = tokio::time::sleep(ANNOUNCE_INTERVAL) => {}
         }
     }
-    eprintln!("[bridge-tp] service announce loop finished for name='{}'", name);
+    log::info!("[bridge-tp] service announce loop finished for name='{}'", name);
 }
 
 /// Register a discovery destination for `name` and spawn a background task
@@ -439,7 +439,7 @@ pub async fn register_discovery_destination(
         (hash, events)
     };
 
-    eprintln!(
+    log::info!(
         "[bridge-tp] registered discovery destination: addr={} name='{}'",
         disc_hash, name
     );
@@ -473,7 +473,7 @@ pub async fn register_discovery_destination(
 
                     if link_dest == disc_hash {
                         // Client knocked — (re)start the service announce loop.
-                        eprintln!("[bridge-tp] discovery knock received for name='{}'", name);
+                        log::info!("[bridge-tp] discovery knock received for name='{}'", name);
                         if let Some(tx) = stop_tx.take() {
                             let _ = tx.send(true);
                         }
@@ -486,7 +486,7 @@ pub async fn register_discovery_destination(
                         });
                     } else if link_dest == service_hash {
                         // Real service connection established — stop announcing.
-                        eprintln!(
+                        log::info!(
                             "[bridge-tp] service link established, stopping announce for name='{}'",
                             name
                         );
@@ -496,11 +496,11 @@ pub async fn register_discovery_destination(
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    eprintln!("[bridge-tp] discovery link event channel closed");
+                    log::warn!("[bridge-tp] discovery link event channel closed");
                     break;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    eprintln!("[bridge-tp] discovery link event lagged by {}", n);
+                    log::warn!("[bridge-tp] discovery link event lagged by {}", n);
                     continue;
                 }
             }
@@ -538,7 +538,7 @@ pub async fn wait_for_service_announce(name: &str, timeout: Duration) -> Option<
                     Ok(event) if event.app_data.as_slice() == name.as_bytes() => {
                         let dest = event.destination.lock().await;
                         let hash = dest.desc.address_hash.to_hex_string();
-                        eprintln!(
+                        log::info!(
                             "[bridge-tp] received service announce for '{}': hash={}",
                             name, hash
                         );
@@ -576,7 +576,7 @@ pub async fn dial_discovery_and_wait(name: &str) -> Result<(), &'static str> {
         name: disc_dest_name,
     };
 
-    eprintln!("[bridge-tp] sending discovery knock for name='{}'", name);
+    log::info!("[bridge-tp] sending discovery knock for name='{}'", name);
 
     let link = {
         let tp = transport.lock().await;
@@ -589,13 +589,13 @@ pub async fn dial_discovery_and_wait(name: &str) -> Result<(), &'static str> {
 
     loop {
         if start.elapsed() >= knock_timeout {
-            eprintln!("[bridge-tp] discovery knock timed out for name='{}'", name);
+            log::warn!("[bridge-tp] discovery knock timed out for name='{}'", name);
             return Ok(());
         }
         let status = { link.lock().await.status() };
         match status {
             LinkStatus::Active | LinkStatus::Closed | LinkStatus::Stale => {
-                eprintln!(
+                log::info!(
                     "[bridge-tp] discovery knock completed (status={:?}) for name='{}'",
                     status, name
                 );
@@ -632,7 +632,7 @@ pub fn spawn_link_data_reader(
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => {
-                    eprintln!("[bridge-tp] data event channel closed");
+                    log::warn!("[bridge-tp] data event channel closed");
                     break;
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -685,7 +685,7 @@ pub async fn dial_and_wait(
         tp.link(desc).await
     };
 
-    eprintln!("[bridge-tp] initiated link request to {}", address_hash);
+    log::info!("[bridge-tp] initiated link request to {}", address_hash);
 
     let link_clone = link.clone();
     let link_id = *link.lock().await.id();
@@ -693,18 +693,18 @@ pub async fn dial_and_wait(
 
     loop {
         if start.elapsed() >= DIAL_TIMEOUT {
-            eprintln!("[bridge-tp] dial timeout for link {}", link_id);
+            log::warn!("[bridge-tp] dial timeout for link {}", link_id);
             return Err("dial timed out waiting for link activation");
         }
 
         let link_status = { link_clone.lock().await.status() };
         match link_status {
             LinkStatus::Active => {
-                eprintln!("[bridge-tp] link {} active, dial successful", link_id);
+                log::info!("[bridge-tp] link {} active, dial successful", link_id);
                 return Ok((link_clone, link_id));
             }
             LinkStatus::Closed | LinkStatus::Stale => {
-                eprintln!(
+                log::error!(
                     "[bridge-tp] link {} failed with status {:?}",
                     link_id, link_status
                 );
@@ -717,7 +717,7 @@ pub async fn dial_and_wait(
         match link_events.try_recv() {
             Ok(event) => {
                 if event.id == link_id && matches!(event.event, LinkEvent::Activated) {
-                    eprintln!(
+                    log::info!(
                         "[bridge-tp] link {} activated (event), dial successful",
                         link_id
                     );
@@ -726,7 +726,7 @@ pub async fn dial_and_wait(
             }
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
             Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
-                eprintln!("[bridge-tp] link event channel closed while dialing");
+                log::error!("[bridge-tp] link event channel closed while dialing");
                 return Err("link event channel closed");
             }
             Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
