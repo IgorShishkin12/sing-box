@@ -23,6 +23,11 @@ on:
           - tvOS
           - macOS-standalone
           - publish-android
+      nightly:
+        description: "Auto-update version (nightly). Uncheck only if you pre-committed the version bump in clients/android."
+        required: false
+        type: boolean
+        default: true
   push:
     branches:
       - stable
@@ -687,13 +692,12 @@ jobs:
           path: ~/.gradle
           key: gradle-${{ hashFiles('**/*.gradle') }}
       - name: Update version
-        if: github.event_name == 'workflow_dispatch'
         run: |-
-          go run -v ./cmd/internal/update_android_version --ci
-      - name: Update nightly version
-        if: github.event_name != 'workflow_dispatch'
-        run: |-
-          go run -v ./cmd/internal/update_android_version --ci --nightly
+          if [[ "${{ github.event_name != 'workflow_dispatch' || inputs.nightly }}" == "true" ]]; then
+            go run -v ./cmd/internal/update_android_version --ci --nightly
+          else
+            go run -v ./cmd/internal/update_android_version --ci
+          fi
       - name: Build
         run: |-
           mkdir clients/android/app/libs
@@ -786,7 +790,11 @@ jobs:
           key: gradle-${{ hashFiles('**/*.gradle') }}
       - name: Build
         run: |-
-          go run -v ./cmd/internal/update_android_version --ci
+          if [[ "${{ inputs.nightly }}" == "true" ]]; then
+            go run -v ./cmd/internal/update_android_version --ci --nightly
+          else
+            go run -v ./cmd/internal/update_android_version --ci
+          fi
           mkdir clients/android/app/libs
           cp *.aar clients/android/app/libs
           cd clients/android
