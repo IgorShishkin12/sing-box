@@ -13,27 +13,28 @@ package reticulum
 */
 import "C"
 import (
+	"errors"
+	"sync"
 	"unsafe"
 )
 
+var (
+	bridgeInitOnce sync.Once
+	bridgeInitErr  error
+)
+
 // BridgeInit initializes the Rust bridge with a JSON config string.
-// Returns nil on success, or an error string.
-// Passes NULL to reticulum_init when configJSON is empty (default config).
+// Only the first call crosses the CGO boundary; subsequent callers get the
+// same result immediately. The first caller's config wins.
 func BridgeInit(configJSON string) error {
-	if configJSON == "" {
-		ret := C.reticulum_init(nil)
-		if ret != 0 {
-			return ErrBridgeInitFailed
+	bridgeInitOnce.Do(func() {
+		cstr := C.CString(configJSON)
+		defer C.free(unsafe.Pointer(cstr))
+		if C.reticulum_init(cstr) != 0 {
+			bridgeInitErr = ErrBridgeInitFailed
 		}
-		return nil
-	}
-	cstr := C.CString(configJSON)
-	defer C.free(unsafe.Pointer(cstr))
-	ret := C.reticulum_init(cstr)
-	if ret != 0 {
-		return ErrBridgeInitFailed
-	}
-	return nil
+	})
+	return bridgeInitErr
 }
 
 // BridgeDial calls reticulum_dial and returns a task ID.
