@@ -42,6 +42,40 @@ services:
       e2e-server:
         condition: service_healthy
 
+
+# you need to enable podman socket
+# # # optional, if other fail:
+# # rm -rf ${XDG_RUNTIME_DIR}/podman/podman.sock
+# # systemctl --user daemon-reload
+# systemctl --user start podman.socket
+# systemctl --user enable podman.socket
+# # you may found that your podman and podman.sock searching in different dirs for contaienrs
+  watcher:
+    build: 
+      context: .
+      dockerfile: Dockerfile.e2e.watcher
+    container_name: watcher
+    volumes:
+      - ${XDG_RUNTIME_DIR}/podman/podman.sock:/run/podman/podman.sock:rw
+    # entrypoint: ["/bin/sh","-c"]
+    command: |
+      sh -c 'while true; do \
+        client_id=$(curl -s --unix-socket /run/podman/podman.sock http://d/v1.0.0/libpod/containers/json?all=false | jq -r '.[] | select(.Names[] | test("retv2run_e2e-client_1")) | .Id' ); \
+        if [ -z "$client_id" ]; then \
+          echo "client not running — stopping pod"; \
+          podman --url unix:///run/podman/podman.sock stop retv2run_e2e-server_1; \
+          podman --url unix:///run/podman/podman.sock rm retv2run_e2e-server_1 retv2run_e2e-server_1; \
+          break; \
+        fi; \
+        sleep 1; \
+      done'
+
+    depends_on:
+      e2e-server:
+        condition: service_healthy
+      e2e-client:
+        condition: service_healthy
+
 networks:
   e2e-net:
     driver: bridge

@@ -1,0 +1,11 @@
+FROM docker.io/alpine:3.18
+
+# Cache this layer — only rebuilds if you change the Dockerfile
+RUN apk add --no-cache curl jq podman
+
+# # Copy the script into the image
+# COPY watcher.sh /usr/local/bin/watcher.sh
+# RUN chmod +x /usr/local/bin/watcher.sh
+
+# ENTRYPOINT ["/bin/sh", "-c"]
+# CMD ["/usr/local/bin/watcher.sh"]
