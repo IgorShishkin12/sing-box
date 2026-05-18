@@ -2,7 +2,7 @@ FROM golang:1.24-alpine AS builder
 
 RUN apk add --no-cache rust cargo build-base git
 
-COPY ./go.mod ./go.sum /workspace/sing-box
+COPY ./go.mod ./go.sum /workspace/sing-box/
 
 WORKDIR /workspace/sing-box
 RUN go mod download
@@ -14,23 +14,24 @@ RUN cd bridge && cargo build --release
 
 COPY . /workspace/sing-box
 
-# Build the E2E client (bridge dialer + HTTP test)
+# Build sing-box with reticulum support
 RUN export COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown") && \
     export VERSION=$(go run ./cmd/internal/read_tag 2>/dev/null || echo "dev") && \
     export TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS) && \
     export LDFLAGS_SHARED=$(cat release/LDFLAGS) && \
     CGO_ENABLED=1 \
     go build -v -trimpath -tags "$TAGS,with_reticulum" \
-        -o /usr/local/bin/e2e-client \
+        -o /usr/local/bin/sing-box \
         -ldflags "-X \"github.com/sagernet/sing-box/constant.Version=$VERSION\" $LDFLAGS_SHARED -s -w -buildid=" \
-        ./e2e/client/
+        ./cmd/sing-box/
 
 FROM alpine:3.20
 
 RUN apk add --no-cache bash curl ca-certificates libgcc libstdc++
 
-COPY --from=builder /usr/local/bin/e2e-client /usr/local/bin/e2e-client
+COPY --from=builder /usr/local/bin/sing-box /usr/local/bin/sing-box
+COPY ./e2e/configs/client.json /etc/sing-box/config.json
 
-EXPOSE 7788
+EXPOSE 1080
 
-ENTRYPOINT ["/usr/bin/timeout","90","/bin/sh"]
+ENTRYPOINT ["/usr/bin/timeout", "90", "/bin/sh"]

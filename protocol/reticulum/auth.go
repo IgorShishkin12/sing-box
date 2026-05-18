@@ -1,4 +1,4 @@
-// Package auth implements a mutual password authentication handshake for
+// Package reticulum implements a mutual password authentication handshake for
 // Reticulum bridge connections.
 //
 // Protocol (server speaks first):
@@ -8,7 +8,7 @@
 //	Server verifies; if wrong → returns error (caller should close the connection).
 //	Server → Client: "OK\n" + hex(HMAC-SHA256(password, salt_c)) + "\n"
 //	Client verifies; if wrong → returns error.
-package auth
+package reticulum
 
 import (
 	"bufio"

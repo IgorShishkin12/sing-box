@@ -9,7 +9,7 @@ import (
 )
 
 func TestBridgeGetHashUnknownName(t *testing.T) {
-	err := BridgeInit("")
+	err := BridgeInit("{}")
 	require.NoError(t, err)
 
 	// Look up an unregistered name — should fail
@@ -22,7 +22,7 @@ func TestBridgeGetHashUnknownName(t *testing.T) {
 }
 
 func TestBridgeGetHashAfterRegister(t *testing.T) {
-	err := BridgeInit("")
+	err := BridgeInit("{}")
 	require.NoError(t, err)
 
 	// Register a name
@@ -38,7 +38,7 @@ func TestBridgeGetHashAfterRegister(t *testing.T) {
 }
 
 func TestBridgeGetHashDeterministic(t *testing.T) {
-	err := BridgeInit("")
+	err := BridgeInit("{}")
 	require.NoError(t, err)
 
 	// Register
@@ -58,7 +58,7 @@ func TestBridgeGetHashDeterministic(t *testing.T) {
 }
 
 func TestBridgeRegisterNameTwice(t *testing.T) {
-	err := BridgeInit("")
+	err := BridgeInit("{}")
 	require.NoError(t, err)
 
 	// Register twice — should not error

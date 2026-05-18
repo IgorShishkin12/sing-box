@@ -4,33 +4,37 @@ package reticulum
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../bridge/include
-#cgo LDFLAGS: ${SRCDIR}/../../bridge/target/release/libsing_box_reticulum_bridge.a -lpthread -ldl -lm
+#cgo !android LDFLAGS: ${SRCDIR}/../../bridge/target/release/libsing_box_reticulum_bridge.a -lpthread -ldl -lm
+#cgo android,arm64 LDFLAGS: ${SRCDIR}/../../bridge/target/aarch64-linux-android/release/libsing_box_reticulum_bridge.a
+#cgo android,arm   LDFLAGS: ${SRCDIR}/../../bridge/target/armv7-linux-androideabi/release/libsing_box_reticulum_bridge.a
+#cgo android,386   LDFLAGS: ${SRCDIR}/../../bridge/target/i686-linux-android/release/libsing_box_reticulum_bridge.a
+#cgo android,amd64 LDFLAGS: ${SRCDIR}/../../bridge/target/x86_64-linux-android/release/libsing_box_reticulum_bridge.a
 #include "reticulum_bridge.h"
 */
 import "C"
 import (
 	"errors"
+	"sync"
 	"unsafe"
 )
 
+var (
+	bridgeInitOnce sync.Once
+	bridgeInitErr  error
+)
+
 // BridgeInit initializes the Rust bridge with a JSON config string.
-// Returns nil on success, or an error string.
-// Passes NULL to reticulum_init when configJSON is empty (default config).
+// Only the first call crosses the CGO boundary; subsequent callers get the
+// same result immediately. The first caller's config wins.
 func BridgeInit(configJSON string) error {
-	if configJSON == "" {
-		ret := C.reticulum_init(nil)
-		if ret != 0 {
-			return ErrBridgeInitFailed
+	bridgeInitOnce.Do(func() {
+		cstr := C.CString(configJSON)
+		defer C.free(unsafe.Pointer(cstr))
+		if C.reticulum_init(cstr) != 0 {
+			bridgeInitErr = ErrBridgeInitFailed
 		}
-		return nil
-	}
-	cstr := C.CString(configJSON)
-	defer C.free(unsafe.Pointer(cstr))
-	ret := C.reticulum_init(cstr)
-	if ret != 0 {
-		return ErrBridgeInitFailed
-	}
-	return nil
+	})
+	return bridgeInitErr
 }
 
 // BridgeDial calls reticulum_dial and returns a task ID.
@@ -181,14 +185,3 @@ func BridgeResolveName(name string) (string, error) {
 	return C.GoString(hashStr), nil
 }
 
-// Errors
-var (
-	ErrBridgeInitFailed          = errors.New("bridge init failed")
-	ErrBridgeDialFailed          = errors.New("bridge dial failed")
-	ErrBridgeListenFailed        = errors.New("bridge listen failed")
-	ErrBridgeAcceptFailed        = errors.New("bridge accept failed")
-	ErrBridgePollFailed          = errors.New("bridge poll failed")
-	ErrBridgeGetHashFailed       = errors.New("bridge get hash failed")
-	ErrBridgeRegisterNameFailed  = errors.New("bridge register name failed")
-	ErrBridgeResolveNameFailed   = errors.New("bridge resolve name failed")
-)

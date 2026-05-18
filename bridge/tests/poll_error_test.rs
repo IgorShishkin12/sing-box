@@ -4,7 +4,8 @@ use std::time::{Duration, Instant};
 /// when a task fails (e.g., accept on a non-existent listener handle).
 #[test]
 fn test_poll_error_returns_message() {
-    let ret = sing_box_reticulum_bridge::c_api::reticulum_init(std::ptr::null());
+    let config = std::ffi::CString::new("{}").unwrap();
+    let ret = sing_box_reticulum_bridge::c_api::reticulum_init(config.as_ptr());
     assert_eq!(ret, 0, "bridge init should succeed");
 
     // Accept on an invalid listener handle (0) — this should fail.

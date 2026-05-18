@@ -1,0 +1,11 @@
+FROM eclipse-temurin:17-jdk-alpine
+
+ENV KEYSTORE_PASS=changeme \
+    ALIAS_NAME=myapp \
+    ALIAS_PASS=changeme
+
+COPY .github/gen_android_signing.sh /gen.sh
+RUN chmod +x /gen.sh
+
+ENTRYPOINT ["/gen.sh"]
+# usage: mkdir /tmp/android_keys && run --volume /tmp/android_keys:/output
