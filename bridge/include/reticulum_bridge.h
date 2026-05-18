@@ -1,8 +1,10 @@
 /*
  * Reticulum Bridge C API for sing-box
  *
- * This header defines the C interface between Go (sing-box) and Rust.
- * All functions are thread-safe and may be called from any goroutine.
+ * Callback-based, non-blocking API. Rust fires the four callbacks when events
+ * occur; Go registers exported functions as those callbacks at init time.
+ *
+ * Thread-safety: all functions are safe to call from any goroutine / C thread.
  */
 
 #ifndef RETICULUM_BRIDGE_H
@@ -15,98 +17,101 @@
 extern "C" {
 #endif
 
+/* -------------------------------------------------------------------------
+ * Callback types (Rust → Go)
+ * ------------------------------------------------------------------------- */
+
+/* New inbound connection on a listener. peer_hash is a hex-encoded Reticulum
+ * identity address hash; the string is valid only for the duration of the call. */
+typedef void (*reticulum_on_accept_fn)(uint64_t listener_id, uint64_t conn_id,
+                                       char *peer_hash);
+
+/* Outbound dial completed. conn_id == 0 means failure. */
+typedef void (*reticulum_on_connect_fn)(uint64_t task_id, uint64_t conn_id);
+
+/* Data arrived on a connection. data/len are valid only for the duration of
+ * the call — the callback must copy the bytes if it needs them afterwards. */
+typedef void (*reticulum_on_data_fn)(uint64_t conn_id, uint8_t *data,
+                                     size_t len);
+
+/* Connection has been closed (by either side). */
+typedef void (*reticulum_on_close_fn)(uint64_t conn_id);
+
+/* -------------------------------------------------------------------------
+ * Lifecycle
+ * ------------------------------------------------------------------------- */
+
 /*
- * Initialize the reticulum bridge with a JSON configuration string.
+ * Initialize the bridge. Must be called before any other function.
+ * config_json: JSON configuration string (at least "{}").
+ * The four callbacks are called from tokio worker threads; they must not block.
  * Returns 0 on success, -1 on error.
  */
-int reticulum_init(const char* config_json);
+int reticulum_init(const char *config_json,
+                   reticulum_on_accept_fn  on_accept,
+                   reticulum_on_connect_fn on_connect,
+                   reticulum_on_data_fn    on_data,
+                   reticulum_on_close_fn   on_close);
 
 /*
- * Get the destination hash for a given name.
- * The caller must free `*hash` with reticulum_free after use.
- * Returns 0 on success, -1 if the name is unknown.
- */
-int get_hash(char** hash, const char* name);
-
-/*
- * Register a name→hash mapping for later lookup via get_hash.
- * Returns 0 on success, -1 on error.
- */
-int reticulum_register_name(const char* name, const char* hash);
-
-/*
- * Shutdown the bridge and release all resources.
+ * Shut down the bridge and release all resources.
  */
 void reticulum_shutdown(void);
 
-/*
- * Dial a destination hash, returning a task ID.
- * Use reticulum_poll to check for completion and get the connection handle.
- * Returns -1 on error, otherwise a positive task ID.
- */
-int32_t reticulum_dial(const char* destination_hash);
+/* -------------------------------------------------------------------------
+ * Server side
+ * ------------------------------------------------------------------------- */
 
 /*
- * Listen on a hash, returning a task ID.
- * Use reticulum_poll to check for completion and get the listener handle.
- * Returns -1 on error, otherwise a positive task ID.
+ * Register a named service listener. Blocks until the listener is announced
+ * on the network (up to ~30 s). Returns the listener_id (> 0) on success,
+ * or -1 on error. on_accept is called for each incoming connection.
  */
-int32_t reticulum_listen(const char* listen_hash);
+int64_t reticulum_listen(const char *name);
+
+/* -------------------------------------------------------------------------
+ * Client side
+ * ------------------------------------------------------------------------- */
 
 /*
- * Accept a pending connection from a listener.
- * Returns a task ID. Use reticulum_poll to get the new connection handle.
- * Returns -1 on error, otherwise a positive task ID.
+ * Initiate a connection to dest_hash. Non-blocking: returns immediately.
+ * on_connect is called with task_id and the new conn_id when the link is
+ * established, or with conn_id == 0 on failure.
  */
-int32_t reticulum_accept(uint64_t listener_handle);
+void reticulum_dial(uint64_t task_id, const char *dest_hash);
 
 /*
- * Get the address hash of a listener as a hex string.
- * The caller must free the returned string with reticulum_free.
- * Returns NULL if the listener is not found or has no hash.
+ * Resolve a human-readable service name to its Reticulum address hash.
+ * Blocks up to ~30 s (3 retries). Returns a malloc'd hex string on success,
+ * or NULL on timeout. Caller must free with reticulum_free.
  */
-char* reticulum_get_listener_hash(uint64_t listener_handle);
+char *reticulum_resolve_name(const char *name);
+
+/* -------------------------------------------------------------------------
+ * Data transfer
+ * ------------------------------------------------------------------------- */
 
 /*
- * Close a connection or listener handle.
+ * Write data to a connection. Returns bytes written, or -1 on error.
+ */
+int reticulum_write(uint64_t conn_id, const uint8_t *data, size_t len); /* data not modified */
+
+/*
+ * Close a connection or listener handle. Triggers on_close for connections.
  */
 void reticulum_close(uint64_t handle);
 
-/*
- * Write data to a connection.
- * Returns number of bytes written, or -1 on error.
- */
-int reticulum_write(uint64_t conn_handle, const uint8_t* data, size_t len);
+/* -------------------------------------------------------------------------
+ * Memory
+ * ------------------------------------------------------------------------- */
 
 /*
- * Read data from a connection.
- * Returns number of bytes read, or -1 on error.
+ * Free a string returned by reticulum_resolve_name.
  */
-int reticulum_read(uint64_t conn_handle, uint8_t* buffer, size_t max_len);
-
-/*
- * Poll for completion of a task.
- * Returns 0=pending, 1=done, -1=error.
- */
-int reticulum_poll(int task_id, void** result_out, size_t* len_out);
-
-/*
- * Free memory allocated by the bridge.
- */
-void reticulum_free(void* ptr);
-
-/*
- * Resolve a human-readable name to a deterministic address hash.
- * Both listener and dialer can call this independently to get the same
- * 32-char hex address hash from the same name, without any shared state.
- * The caller must free the returned string with reticulum_free.
- * Returns NULL if real-reticulum is not available or the name is empty.
- */
-char* reticulum_resolve_name(const char* name);
+void reticulum_free(void *ptr);
 
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* RETICULUM_BRIDGE_H */
-

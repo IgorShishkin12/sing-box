@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
@@ -16,9 +16,6 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 )
 
-// buildConfigJSON returns the JSON string to pass to BridgeInit.
-// Priority: inline config > path config > minimal default "{}".
-// Rust requires a non-null, non-empty config string.
 func buildConfigJSON(inlineConfig *option.ReticulumConfig, configPath string) (string, error) {
 	if inlineConfig != nil {
 		b, err := json.Marshal(inlineConfig)
@@ -46,11 +43,16 @@ type Inbound struct {
 	router      adapter.Router
 	logger      log.ContextLogger
 	options     option.ReticulumInboundOptions
-	listenerTask int
-	listenerHdl  uint64
-	accepting   bool
-	mu          sync.Mutex
-	closed      bool
+	listenerHdl uint64
+	doneCh      chan struct{}
+
+	// Auth state: cache authenticated peer identities so we only challenge
+	// each identity once; serialize the challenge itself with a mutex.
+	authedPeers sync.Map   // peerHash(string) → struct{}
+	authMu      sync.Mutex
+
+	mu     sync.Mutex
+	closed bool
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ReticulumInboundOptions) (adapter.Inbound, error) {
@@ -59,6 +61,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		router:  router,
 		logger:  logger,
 		options: options,
+		doneCh:  make(chan struct{}),
 	}, nil
 }
 
@@ -88,18 +91,11 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 		return fmt.Errorf("reticulum inbound: destination or name must be set")
 	}
 
-	taskID, err := BridgeListen(listenHash)
+	handle, err := BridgeListen(listenHash)
 	if err != nil {
 		return fmt.Errorf("bridge listen failed: %w", err)
 	}
-	h.listenerTask = taskID
-
-	handle, err := BridgePollTask(taskID, 30*time.Second)
-	if err != nil {
-		return fmt.Errorf("listener poll failed: %w", err)
-	}
 	h.listenerHdl = handle
-	h.accepting = true
 
 	go h.acceptLoop()
 	return nil
@@ -107,48 +103,52 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 
 func (h *Inbound) acceptLoop() {
 	for {
-		h.mu.Lock()
-		if h.closed || !h.accepting {
-			h.mu.Unlock()
-			return
-		}
-		h.mu.Unlock()
-
-		taskID, err := BridgeAccept(h.listenerHdl)
-		if err != nil {
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		handle, err := BridgePollTask(taskID, 30*time.Second)
-		if err != nil {
-			continue
-		}
-
-		conn := newReticulumConn(handle, "inbound", fmt.Sprintf("listener-%d", h.listenerHdl))
-
-		if h.options.Password != "" {
-			if err := ServerAuth(conn, h.options.Password); err != nil {
-				h.logger.Error("reticulum auth failed: ", err)
-				conn.Close()
+		select {
+		case ev := <-globalAcceptCh:
+			if ev.listenerID != h.listenerHdl {
+				// Not for this listener — put it back for other inbounds.
+				// (In practice there is only one inbound, but be correct.)
+				globalAcceptCh <- ev
 				continue
 			}
+			go h.handleConn(ev.connID, ev.peerHash)
+		case <-h.doneCh:
+			return
 		}
+	}
+}
 
-		destAddr, err := readDestHeader(conn)
-		if err != nil {
-			h.logger.Error("reticulum: read dest header: ", err)
-			conn.Close()
-			continue
-		}
+func (h *Inbound) handleConn(connID uint64, peerHash string) {
+	conn := newReticulumConn(connID, "inbound", peerHash)
 
-		if h.router != nil {
-			metadata := adapter.InboundContext{
-				Network:     "tcp",
-				Destination: M.ParseSocksaddr(destAddr),
+	if h.options.Password != "" {
+		if _, cached := h.authedPeers.Load(peerHash); !cached {
+			// Serialize auth challenges so at most one HMAC exchange runs at a time.
+			h.authMu.Lock()
+			err := ServerAuth(conn, h.options.Password)
+			h.authMu.Unlock()
+			if err != nil {
+				h.logger.Error("reticulum auth failed: ", err)
+				conn.Close()
+				return
 			}
-			h.router.RouteConnectionEx(context.Background(), conn, metadata, nil)
+			h.authedPeers.Store(peerHash, struct{}{})
 		}
+	}
+
+	destAddr, err := readDestHeader(conn)
+	if err != nil {
+		h.logger.Error("reticulum: read dest header: ", err)
+		conn.Close()
+		return
+	}
+
+	if h.router != nil {
+		metadata := adapter.InboundContext{
+			Network:     "tcp",
+			Destination: M.ParseSocksaddr(destAddr),
+		}
+		h.router.RouteConnectionEx(context.Background(), conn, metadata, nil)
 	}
 }
 
@@ -159,10 +159,13 @@ func (h *Inbound) Close() error {
 		return nil
 	}
 	h.closed = true
-	h.accepting = false
+	close(h.doneCh)
 	if h.listenerHdl != 0 {
 		BridgeClose(h.listenerHdl)
 	}
 	BridgeShutdown()
 	return nil
 }
+
+// Ensure *reticulumConn satisfies net.Conn (compile-time check).
+var _ net.Conn = (*reticulumConn)(nil)

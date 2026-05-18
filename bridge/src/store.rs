@@ -13,36 +13,27 @@ pub enum StoreEntry {
 }
 
 pub struct HandleStore {
-    entries: RwLock<HashMap<u64, StoreEntry>>,
+    entries:     RwLock<HashMap<u64, StoreEntry>>,
     next_handle: AtomicU64,
-    /// Stores name → address-hash-hex mappings registered via `register_name`.
-    name_to_hash: RwLock<HashMap<String, String>>,
 }
 
 impl HandleStore {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            entries: RwLock::new(HashMap::new()),
+            entries:     RwLock::new(HashMap::new()),
             next_handle: AtomicU64::new(1),
-            name_to_hash: RwLock::new(HashMap::new()),
         })
     }
 
     pub async fn insert_connection(&self, conn: Connection) -> u64 {
         let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
-        self.entries
-            .write()
-            .await
-            .insert(handle, StoreEntry::Connection(Arc::new(conn)));
+        self.entries.write().await.insert(handle, StoreEntry::Connection(Arc::new(conn)));
         handle
     }
 
     pub async fn insert_listener(&self, listener: Listener) -> u64 {
         let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
-        self.entries
-            .write()
-            .await
-            .insert(handle, StoreEntry::Listener(Arc::new(listener)));
+        self.entries.write().await.insert(handle, StoreEntry::Listener(Arc::new(listener)));
         handle
     }
 
@@ -54,32 +45,12 @@ impl HandleStore {
         }
     }
 
-    pub async fn get_listener(&self, handle: u64) -> Option<Arc<Listener>> {
-        let entries = self.entries.read().await;
-        match entries.get(&handle)? {
-            StoreEntry::Listener(l) => Some(Arc::clone(l)),
-            _ => None,
-        }
-    }
-
     pub async fn remove(&self, handle: u64) -> Option<StoreEntry> {
         self.entries.write().await.remove(&handle)
     }
 
     pub async fn clear_all(&self) {
         self.entries.write().await.clear();
-        self.name_to_hash.write().await.clear();
-    }
-
-    pub async fn register_name(&self, name: &str, hash: &str) {
-        self.name_to_hash
-            .write()
-            .await
-            .insert(name.to_string(), hash.to_string());
-    }
-
-    pub async fn get_hash_for_name(&self, name: &str) -> Option<String> {
-        self.name_to_hash.read().await.get(name).cloned()
     }
 }
 

@@ -1,35 +1,55 @@
 package reticulum
 
 import (
-	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 )
 
-// BridgePollTask polls for task completion with a timeout.
-// Returns the handle (8 bytes LE) on success, or an error.
-func BridgePollTask(taskID int, timeout time.Duration) (uint64, error) {
-	deadline := time.Now().Add(timeout)
-	for {
-		done, result, err := BridgePoll(taskID)
-		if err != nil {
-			return 0, err
-		}
-		if done {
-			if len(result) != 8 {
-				return 0, fmt.Errorf("unexpected result length: %d", len(result))
-			}
-			return uint64(result[0]) | uint64(result[1])<<8 | uint64(result[2])<<16 | uint64(result[3])<<24 |
-				uint64(result[4])<<32 | uint64(result[5])<<40 | uint64(result[6])<<48 | uint64(result[7])<<56, nil
-		}
-		if time.Now().After(deadline) {
-			return 0, context.DeadlineExceeded
-		}
-		time.Sleep(10 * time.Millisecond)
+// connDataChans maps connID (uint64) → chan []byte.
+// Populated by newReticulumConn; written by goOnData; closed by goOnClose.
+var connDataChans sync.Map
+
+// globalAcceptCh receives new inbound connection events delivered by the
+// Rust bridge's on_accept callback (bridge_stub_reticulum.go → goOnAccept).
+// In stub builds (no with_reticulum) it is never written to.
+var globalAcceptCh = make(chan acceptEvent, 256)
+
+type acceptEvent struct {
+	listenerID uint64
+	connID     uint64
+	peerHash   string
+}
+
+// reticulumConn implements net.Conn using the Reticulum bridge.
+//
+// Inbound data is delivered via the goOnData callback registered at
+// BridgeInit time: the callback pushes bytes into dataCh, which Read
+// drains.  Writes go directly to BridgeWrite.
+type reticulumConn struct {
+	id        uint64
+	dataCh    chan []byte // receives data from goOnData
+	pending   []byte     // leftover bytes from a partial Read
+	closeOnce sync.Once
+	closed    chan struct{}
+
+	// synthetic addresses
+	localAddr  net.Addr
+	remoteAddr net.Addr
+}
+
+func newReticulumConn(id uint64, localName, remoteName string) *reticulumConn {
+	ch := make(chan []byte, 256)
+	connDataChans.Store(id, ch)
+	return &reticulumConn{
+		id:         id,
+		dataCh:     ch,
+		closed:     make(chan struct{}),
+		localAddr:  reticulumAddr{network: "reticulum", str: localName},
+		remoteAddr: reticulumAddr{network: "reticulum", str: remoteName},
 	}
 }
 
@@ -41,40 +61,62 @@ type reticulumAddr struct {
 func (a reticulumAddr) Network() string { return a.network }
 func (a reticulumAddr) String() string  { return a.str }
 
-// reticulumConn implements net.Conn using the Reticulum bridge.
-type reticulumConn struct {
-	handle uint64
-	// local/remote addresses are synthetic since Reticulum is destination-based
-	localAddr  net.Addr
-	remoteAddr net.Addr
-}
-
-func newReticulumConn(handle uint64, localName, remoteName string) net.Conn {
-	return &reticulumConn{
-		handle:     handle,
-		localAddr:  reticulumAddr{network: "reticulum", str: localName},
-		remoteAddr: reticulumAddr{network: "reticulum", str: remoteName},
-	}
-}
-
+// Read blocks until data arrives (or the connection closes).
 func (c *reticulumConn) Read(b []byte) (int, error) {
-	if c.handle == 0 {
-		return 0, io.ErrClosedPipe
-	}
 	for {
-		n := BridgeRead(c.handle, b)
-		if n < 0 {
-			return 0, io.EOF // connection closed
-		}
-		if n > 0 {
+		if len(c.pending) > 0 {
+			n := copy(b, c.pending)
+			c.pending = c.pending[n:]
 			return n, nil
 		}
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case chunk, ok := <-c.dataCh:
+			if !ok {
+				return 0, io.EOF
+			}
+			n := copy(b, chunk)
+			if n < len(chunk) {
+				c.pending = chunk[n:]
+			}
+			return n, nil
+		case <-c.closed:
+			return 0, io.EOF
+		}
 	}
 }
 
+func (c *reticulumConn) Write(b []byte) (int, error) {
+	if len(b) == 0 {
+		return 0, nil
+	}
+	n := BridgeWrite(c.id, b)
+	if n < 0 {
+		return 0, errors.New("write error")
+	}
+	return n, nil
+}
+
+func (c *reticulumConn) Close() error {
+	c.closeOnce.Do(func() {
+		connDataChans.Delete(c.id)
+		BridgeClose(c.id)
+		close(c.closed)
+	})
+	return nil
+}
+
+func (c *reticulumConn) LocalAddr() net.Addr  { return c.localAddr }
+func (c *reticulumConn) RemoteAddr() net.Addr { return c.remoteAddr }
+
+func (c *reticulumConn) SetDeadline(_ time.Time) error      { return nil }
+func (c *reticulumConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (c *reticulumConn) SetWriteDeadline(_ time.Time) error { return nil }
+
+// ---------------------------------------------------------------------------
+// Destination header (length-prefixed address written before proxied data)
+// ---------------------------------------------------------------------------
+
 // writeDestHeader writes a 2-byte big-endian length followed by the address string.
-// Format: uint16 length + UTF-8 "host:port".
 func writeDestHeader(w io.Writer, addr string) error {
 	b := []byte(addr)
 	hdr := make([]byte, 2)
@@ -101,41 +143,4 @@ func readDestHeader(r io.Reader) (string, error) {
 		return "", err
 	}
 	return string(buf), nil
-}
-
-func (c *reticulumConn) Write(b []byte) (int, error) {
-	if c.handle == 0 {
-		return 0, io.ErrClosedPipe
-	}
-	// reticulum_write always writes all bytes or returns -1; partial writes cannot occur.
-	n := BridgeWrite(c.handle, b)
-	if n < 0 {
-		return 0, errors.New("write error")
-	}
-	return n, nil
-}
-
-func (c *reticulumConn) Close() error {
-	if c.handle == 0 {
-		return nil
-	}
-	BridgeClose(c.handle)
-	c.handle = 0
-	return nil
-}
-
-func (c *reticulumConn) LocalAddr() net.Addr  { return c.localAddr }
-func (c *reticulumConn) RemoteAddr() net.Addr { return c.remoteAddr }
-
-func (c *reticulumConn) SetDeadline(t time.Time) error {
-	// Not implemented in the stub; return nil to avoid breaking callers.
-	return nil
-}
-
-func (c *reticulumConn) SetReadDeadline(t time.Time) error {
-	return nil
-}
-
-func (c *reticulumConn) SetWriteDeadline(t time.Time) error {
-	return nil
 }

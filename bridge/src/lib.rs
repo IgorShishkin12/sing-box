@@ -4,7 +4,6 @@ pub mod c_api;
 pub mod listener;
 pub mod runtime;
 pub mod store;
-pub mod task;
 
 pub mod transport;
 

@@ -4,65 +4,23 @@ package reticulum
 
 import "errors"
 
-// BridgeInit is a stub that returns an error when the with_reticulum build tag is not set.
-func BridgeInit(configJSON string) error {
-	return ErrBridgeNotAvailable
+var ErrBridgeNotAvailable = errors.New("reticulum bridge not available: build with -tags with_reticulum")
+
+func BridgeInit(_ string) error { return ErrBridgeNotAvailable }
+
+func BridgeListen(_ string) (uint64, error) { return 0, ErrBridgeNotAvailable }
+
+// BridgeDial returns a task ID, a result channel, and an error.
+// The channel will never receive in stub mode.
+func BridgeDial(_ string) (uint64, <-chan uint64, error) {
+	ch := make(chan uint64, 1)
+	return 0, ch, ErrBridgeNotAvailable
 }
 
-// BridgeDial is a stub that returns an error when the with_reticulum build tag is not set.
-func BridgeDial(destinationHash string) (int, error) {
-	return -1, ErrBridgeNotAvailable
-}
+func BridgeWrite(_ uint64, _ []byte) int { return -1 }
 
-// BridgeListen is a stub that returns an error when the with_reticulum build tag is not set.
-func BridgeListen(listenHash string) (int, error) {
-	return -1, ErrBridgeNotAvailable
-}
+func BridgeClose(_ uint64) {}
 
-// BridgeAccept is a stub that returns an error when the with_reticulum build tag is not set.
-func BridgeAccept(listenerHandle uint64) (int, error) {
-	return -1, ErrBridgeNotAvailable
-}
-
-// BridgeGetListenerHash is a stub that returns an error when the with_reticulum build tag is not set.
-func BridgeGetListenerHash(listenerHandle uint64) (string, error) {
-	return "", ErrBridgeNotAvailable
-}
-
-// BridgeClose is a no-op stub.
-func BridgeClose(handle uint64) {}
-
-// BridgeWrite is a stub that returns -1 when the with_reticulum build tag is not set.
-func BridgeWrite(connHandle uint64, data []byte) int {
-	return -1
-}
-
-// BridgeRead is a stub that returns -1 when the with_reticulum build tag is not set.
-func BridgeRead(connHandle uint64, buffer []byte) int {
-	return -1
-}
-
-// BridgePoll is a stub that returns an error when the with_reticulum build tag is not set.
-func BridgePoll(taskID int) (done bool, result []byte, err error) {
-	return false, nil, ErrBridgeNotAvailable
-}
-
-// BridgeGetHash is a stub that returns an error when the with_reticulum build tag is not set.
-func BridgeGetHash(name string) (string, error) {
-	return "", ErrBridgeNotAvailable
-}
-
-// BridgeRegisterName is a stub that returns an error when the with_reticulum build tag is not set.
-func BridgeRegisterName(name string, hash string) error {
-	return ErrBridgeNotAvailable
-}
-
-// BridgeShutdown is a no-op stub.
 func BridgeShutdown() {}
 
-// BridgeResolveName is a stub that returns an error when the with_reticulum build tag is not set.
-func BridgeResolveName(name string) (string, error) {
-	return "", ErrBridgeNotAvailable
-}
-
-var ErrBridgeNotAvailable = errors.New("reticulum bridge not available: build with -tags with_reticulum")
+func BridgeResolveName(_ string) (string, error) { return "", ErrBridgeNotAvailable }

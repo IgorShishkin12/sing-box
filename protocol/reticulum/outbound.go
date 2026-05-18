@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"sync"
-	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -27,7 +26,7 @@ type Outbound struct {
 	logger       log.ContextLogger
 	options      option.ReticulumOutboundOptions
 	bridgeInited bool
-	resolvedHash string // Reticulum destination hash, cached after first resolution
+	resolvedHash string
 	mu           sync.Mutex
 }
 
@@ -73,13 +72,9 @@ func (h *Outbound) Close() error {
 	return nil
 }
 
-func (h *Outbound) Network() []string {
-	return h.network
-}
+func (h *Outbound) Network() []string { return h.network }
 
-func (h *Outbound) Dependencies() []string {
-	return nil
-}
+func (h *Outbound) Dependencies() []string { return nil }
 
 func (h *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	h.mu.Lock()
@@ -106,30 +101,26 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 		destHash = hash
 	}
 
-	taskID, err := BridgeDial(destHash)
+	_, resultCh, err := BridgeDial(destHash)
 	if err != nil {
 		return nil, err
 	}
 
-	deadline, ok := ctx.Deadline()
-	timeout := 30 * time.Second
-	if ok {
-		timeout = time.Until(deadline)
-		if timeout <= 0 {
-			return nil, context.DeadlineExceeded
-		}
+	var connID uint64
+	select {
+	case connID = <-resultCh:
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-
-	handle, err := BridgePollTask(taskID, timeout)
-	if err != nil {
-		return nil, err
+	if connID == 0 {
+		return nil, ErrBridgeDialFailed
 	}
 
 	localName := "outbound"
 	if h.options.Name != "" {
 		localName = h.options.Name
 	}
-	conn := newReticulumConn(handle, localName, destHash)
+	conn := newReticulumConn(connID, localName, destHash)
 
 	if h.options.Password != "" {
 		if err := ClientAuth(conn, h.options.Password); err != nil {
@@ -146,6 +137,6 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 	return conn, nil
 }
 
-func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+func (h *Outbound) ListenPacket(_ context.Context, _ M.Socksaddr) (net.PacketConn, error) {
 	return nil, N.ErrUnknownNetwork
 }
