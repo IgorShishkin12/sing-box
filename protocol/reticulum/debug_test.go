@@ -8,7 +8,7 @@ import (
 )
 
 func TestDebug(t *testing.T) {
-	err := BridgeInit("")
+	err := BridgeInit("{}")
 	fmt.Printf("BridgeInit error: %v\n", err)
 	if err != nil {
 		t.Fatalf("BridgeInit failed: %v", err)
