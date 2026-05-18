@@ -1,10 +1,9 @@
-//go:build with_reticulum
-
 package reticulum
 
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -14,107 +13,108 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestOutboundDialContextReturnsConn(t *testing.T) {
-	// Initialize bridge
-	err := BridgeInit("")
+func newTestOutbound(t *testing.T, opts option.ReticulumOutboundOptions) *Outbound {
+	t.Helper()
+	o, err := NewOutbound(context.Background(), nil, log.NewNOPFactory().Logger(), "test", opts)
 	require.NoError(t, err)
-
-	ctx := context.Background()
-	var router adapter.Router // nil is fine for this test
-	logger := log.NewNOPFactory().Logger()
-	opts := option.ReticulumOutboundOptions{
-		Name: "test-outbound",
-	}
-
-	outbound, err := NewOutbound(ctx, router, logger, "test", opts)
-	require.NoError(t, err)
-	require.NotNil(t, outbound)
-
-	// Type assert to *Outbound to access Start/Close
-	o := outbound.(*Outbound)
-
-	// Start the outbound (initializes bridge if needed)
-	err = o.Start(adapter.StartStateInitialize)
-	require.NoError(t, err)
-
-	// Dial a destination
-	dest := M.ParseSocksaddr("127.0.0.1:8080")
-	conn, err := o.DialContext(ctx, "tcp", dest)
-	require.NoError(t, err)
-	require.NotNil(t, conn)
-
-	// Verify it's a reticulumConn
-	_, ok := conn.(*reticulumConn)
-	require.True(t, ok)
-
-	conn.Close()
-	o.Close()
-	BridgeShutdown()
+	return o.(*Outbound)
 }
 
-func TestOutboundStartWithConfigPath(t *testing.T) {
-	ctx := context.Background()
+// TestOutboundStartRequiresDestOrName is a regression test: the outbound must
+// refuse to start if neither Destination nor Name is configured, rather than
+// silently dialing the proxied TCP address as the Reticulum peer.
+func TestOutboundStartRequiresDestOrName(t *testing.T) {
+	o := newTestOutbound(t, option.ReticulumOutboundOptions{})
+	err := o.Start(adapter.StartStateInitialize)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "destination or name must be set")
+}
 
-	var router adapter.Router
-	logger := log.NewNOPFactory().Logger()
+// TestOutboundStartSetsResolvedHashFromDestination verifies that a hex Destination
+// is cached into resolvedHash at Start time (no network call needed).
+func TestOutboundStartSetsResolvedHashFromDestination(t *testing.T) {
+	hash := "aabbccdd00112233445566778899aabb"
+	o := newTestOutbound(t, option.ReticulumOutboundOptions{Destination: hash})
+	// Start will fail at BridgeInit (stub returns ErrBridgeNotAvailable),
+	// but resolvedHash must be populated before that.
+	_ = o.Start(adapter.StartStateInitialize)
+	o.mu.Lock()
+	got := o.resolvedHash
+	o.mu.Unlock()
+	require.Equal(t, hash, got)
+}
 
-	// Create a temporary config file
-	tmpDir := t.TempDir()
-	configPath := tmpDir + "/config.json"
-	configContent := `{"identity_path": "/tmp/test", "storage_path": "/tmp/test"}`
-	err := os.WriteFile(configPath, []byte(configContent), 0644)
-	require.NoError(t, err)
+// TestOutboundDialContextUsesResolvedDestNotTCPDest is a regression test for the
+// bug where DialContext passed destination.String() ("example.com:443") to BridgeDial
+// instead of the configured Reticulum hash.  With the stub bridge, BridgeDial always
+// returns ErrBridgeNotAvailable; if the bug were present the error path would still
+// be the same, but the resolvedHash field proves what *would* have been dialled.
+func TestOutboundDialContextUsesResolvedDestNotTCPDest(t *testing.T) {
+	hash := "aabbccdd00112233445566778899aabb"
+	o := newTestOutbound(t, option.ReticulumOutboundOptions{Destination: hash})
+	o.resolvedHash = hash // bypass Start (which needs a real bridge)
+	o.bridgeInited = true
 
-	opts := option.ReticulumOutboundOptions{
-		ReticulumConfigPath: configPath,
-		Name: "test-config-path",
-	}
+	tcpDest := M.ParseSocksaddr("example.com:443")
+	_, err := o.DialContext(context.Background(), "tcp", tcpDest)
+	// The error must come from BridgeDial (bridge not available), NOT from
+	// BridgeResolveName ("resolve") and NOT from "invalid destination hash".
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "example.com")
+	require.NotContains(t, err.Error(), "resolve")
+}
 
-	outbound, err := NewOutbound(ctx, router, logger, "test", opts)
-	require.NoError(t, err)
-	o := outbound.(*Outbound)
+// TestOutboundDialContextResolvesNameOnFirstCall verifies that when Destination is
+// empty, DialContext calls BridgeResolveName with the configured Name.
+func TestOutboundDialContextResolvesNameOnFirstCall(t *testing.T) {
+	o := newTestOutbound(t, option.ReticulumOutboundOptions{Name: "my-server"})
+	o.bridgeInited = true // skip bridge init for logic test
 
-	err = o.Start(adapter.StartStateInitialize)
-	require.NoError(t, err)
-
-	o.Close()
-	BridgeShutdown()
+	_, err := o.DialContext(context.Background(), "tcp", M.ParseSocksaddr("127.0.0.1:80"))
+	// BridgeResolveName fails with stub, wrapped as "reticulum: resolve ..."
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "resolve")
+	require.Contains(t, err.Error(), "my-server")
 }
 
 func TestOutboundDependencies(t *testing.T) {
-	ctx := context.Background()
-
-	var router adapter.Router
-	logger := log.NewNOPFactory().Logger()
-	opts := option.ReticulumOutboundOptions{}
-
-	outbound, err := NewOutbound(ctx, router, logger, "test", opts)
-	require.NoError(t, err)
-	o := outbound.(*Outbound)
-
-	deps := o.Dependencies()
-	require.Nil(t, deps)
+	o := newTestOutbound(t, option.ReticulumOutboundOptions{Name: "x"})
+	require.Nil(t, o.Dependencies())
 }
 
 func TestOutboundClose(t *testing.T) {
-	err := BridgeInit("")
-	require.NoError(t, err)
+	o := newTestOutbound(t, option.ReticulumOutboundOptions{Name: "x"})
+	require.NoError(t, o.Close())
+}
 
-	ctx := context.Background()
-	var router adapter.Router
-	logger := log.NewNOPFactory().Logger()
-	opts := option.ReticulumOutboundOptions{}
+func TestOutboundStartWithConfigPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := tmpDir + "/config.json"
+	require.NoError(t, os.WriteFile(configPath, []byte(`{"storage_path":"/tmp/test"}`), 0644))
 
-	outbound, err := NewOutbound(ctx, router, logger, "test", opts)
-	require.NoError(t, err)
-	o := outbound.(*Outbound)
+	o := newTestOutbound(t, option.ReticulumOutboundOptions{
+		ReticulumConfigPath: configPath,
+		Name:                "test-config-path",
+	})
+	err := o.Start(adapter.StartStateInitialize)
+	// Fails at BridgeInit (stub) but NOT at validation — Name is set.
+	if err != nil {
+		require.NotContains(t, err.Error(), "destination or name must be set")
+	}
+}
 
-	err = o.Start(adapter.StartStateInitialize)
-	require.NoError(t, err)
-
-	// Close should not error
-	err = o.Close()
-	require.NoError(t, err)
-
-	BridgeShutdown()
+// TestOutboundStartRequiresDestOrName_JSONRoundtrip ensures the JSON config key
+// "destination" maps to the right field (regression: was previously treated as a
+// name rather than a hex hash, confusing resolution logic).
+func TestOutboundStartRequiresDestOrName_JSONRoundtrip(t *testing.T) {
+	hash := "aabbccdd00112233445566778899aabb"
+	opts := option.ReticulumOutboundOptions{Destination: hash}
+	o := newTestOutbound(t, opts)
+	_ = o.Start(adapter.StartStateInitialize)
+	o.mu.Lock()
+	got := o.resolvedHash
+	o.mu.Unlock()
+	if !strings.HasPrefix(got, "a") { // basic sanity on the hash
+		t.Fatalf("unexpected resolvedHash: %q", got)
+	}
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	C "github.com/sagernet/sing-box/constant"
+	M "github.com/sagernet/sing/common/metadata"
 )
 
 // buildConfigJSON returns the JSON string to pass to BridgeInit.
@@ -134,8 +135,19 @@ func (h *Inbound) acceptLoop() {
 			}
 		}
 
+		destAddr, err := readDestHeader(conn)
+		if err != nil {
+			h.logger.Error("reticulum: read dest header: ", err)
+			conn.Close()
+			continue
+		}
+
 		if h.router != nil {
-			h.router.RouteConnectionEx(context.Background(), conn, adapter.InboundContext{}, nil)
+			metadata := adapter.InboundContext{
+				Network:     "tcp",
+				Destination: M.ParseSocksaddr(destAddr),
+			}
+			h.router.RouteConnectionEx(context.Background(), conn, metadata, nil)
 		}
 	}
 }

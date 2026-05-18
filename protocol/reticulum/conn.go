@@ -2,6 +2,7 @@ package reticulum
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -60,14 +61,46 @@ func (c *reticulumConn) Read(b []byte) (int, error) {
 	if c.handle == 0 {
 		return 0, io.ErrClosedPipe
 	}
-	n := BridgeRead(c.handle, b)
-	if n < 0 {
-		return 0, errors.New("read error")
+	for {
+		n := BridgeRead(c.handle, b)
+		if n < 0 {
+			return 0, io.EOF // connection closed
+		}
+		if n > 0 {
+			return n, nil
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// writeDestHeader writes a 2-byte big-endian length followed by the address string.
+// Format: uint16 length + UTF-8 "host:port".
+func writeDestHeader(w io.Writer, addr string) error {
+	b := []byte(addr)
+	hdr := make([]byte, 2)
+	binary.BigEndian.PutUint16(hdr, uint16(len(b)))
+	if _, err := w.Write(hdr); err != nil {
+		return err
+	}
+	_, err := w.Write(b)
+	return err
+}
+
+// readDestHeader reads a 2-byte big-endian length then the address string.
+func readDestHeader(r io.Reader) (string, error) {
+	hdr := make([]byte, 2)
+	if _, err := io.ReadFull(r, hdr); err != nil {
+		return "", err
+	}
+	n := int(binary.BigEndian.Uint16(hdr))
 	if n == 0 {
-		return 0, io.EOF
+		return "", errors.New("empty destination header")
 	}
-	return n, nil
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return "", err
+	}
+	return string(buf), nil
 }
 
 func (c *reticulumConn) Write(b []byte) (int, error) {
