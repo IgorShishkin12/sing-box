@@ -6,11 +6,9 @@ SING_BOX_DIR="$(dirname "$SCRIPT_DIR")"
 
 echo "Building Rust bridge..."
 cd "$SING_BOX_DIR/bridge"
-cargo build
+cargo build --release
 
-echo "Setting LD_LIBRARY_PATH..."
-export LD_LIBRARY_PATH="$SING_BOX_DIR/bridge/target/debug:$LD_LIBRARY_PATH"
-
-echo "Running E2E tests..."
+echo "Running E2E tests via docker-compose..."
 cd "$SING_BOX_DIR"
-go test -v -count=1 ./e2e/...
+docker compose -f docker-compose.e2e.yml build
+docker compose -f docker-compose.e2e.yml up --exit-code-from e2e-client

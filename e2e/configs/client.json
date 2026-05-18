@@ -1,7 +1,7 @@
 {
   "log": {
     "level": "info",
-    "output": "/var/log/sing-box-client.log"
+    "output": "/dev/stdout"
   },
   "inbounds": [
     {
@@ -15,12 +15,18 @@
     {
       "type": "reticulum",
       "tag": "reticulum-out",
-      "destination": "e2e-sum-server",
+      "name": "e2e-sum-server",
+      "password": "e2e-test-password",
       "reticulum_config": {
+        "identity_name": "e2e-client",
         "storage_path": "/var/lib/reticulum/client",
         "interfaces": [
-          {"name": "Reticulum TCP Client", "type": "TCPClientInterface",
-           "target_host": "e2e-server", "target_port": 7788}
+          {
+            "name": "Reticulum TCP Client",
+            "type": "TCPClientInterface",
+            "target_host": "e2e-server",
+            "target_port": 7788
+          }
         ]
       }
     }
