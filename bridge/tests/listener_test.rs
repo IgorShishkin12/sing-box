@@ -1,54 +1,26 @@
 use std::ffi::CString;
-use std::ptr;
-use std::time::Duration;
-
 use sing_box_reticulum_bridge::c_api::*;
 
-fn poll_task(task_id: i32, timeout: Duration) -> Result<u64, String> {
-    let start = std::time::Instant::now();
-    loop {
-        if start.elapsed() > timeout {
-            return Err("poll timeout".to_string());
-        }
-        let mut result_out: *mut u8 = ptr::null_mut();
-        let mut len_out: usize = 0;
-        let status = reticulum_poll(task_id, &mut result_out, &mut len_out);
-        match status {
-            1 => {
-                let bytes = unsafe { std::slice::from_raw_parts(result_out, len_out) };
-                let handle = u64::from_le_bytes(bytes.try_into().unwrap());
-                reticulum_free(result_out);
-                return Ok(handle);
-            }
-            -1 => {
-                let msg = if !result_out.is_null() {
-                    let bytes = unsafe { std::slice::from_raw_parts(result_out, len_out) };
-                    let s = String::from_utf8_lossy(bytes).to_string();
-                    reticulum_free(result_out);
-                    s
-                } else {
-                    "unknown error".to_string()
-                };
-                return Err(msg);
-            }
-            _ => std::thread::sleep(Duration::from_millis(10)),
-        }
-    }
+extern "C" fn noop_accept(_: u64, _: u64, _: *const std::ffi::c_char) {}
+extern "C" fn noop_connect(_: u64, _: u64) {}
+extern "C" fn noop_data(_: u64, _: *const u8, _: usize) {}
+extern "C" fn noop_close(_: u64) {}
+
+fn init() {
+    let cfg = CString::new("{}").unwrap();
+    let ret = reticulum_init(cfg.as_ptr(), Some(noop_accept), Some(noop_connect), Some(noop_data), Some(noop_close));
+    assert_eq!(ret, 0);
 }
 
-/// Test accepting with an invalid listener handle returns an error quickly.
+/// reticulum_listen succeeds with local service registration (no real network needed).
 #[test]
-fn test_accept_invalid_handle() {
-    let config = CString::new("{}").unwrap();
-    let ret = reticulum_init(config.as_ptr());
-    assert_eq!(ret, 0, "bridge init should succeed");
+fn test_listen_returns_valid_handle() {
+    init();
 
-    // Handle 99999 doesn't exist — the spawned task should fail immediately.
-    let task_id = reticulum_accept(99999);
-    assert!(task_id >= 0, "accept should return a task ID");
-
-    let result = poll_task(task_id, Duration::from_secs(2));
-    assert!(result.is_err(), "accept on invalid handle should fail");
+    let name = CString::new("listener-test-no-network").unwrap();
+    let id = reticulum_listen(name.as_ptr());
+    assert!(id > 0, "reticulum_listen should return a positive listener id, got {}", id);
+    reticulum_close(id as u64);
 
     reticulum_shutdown();
 }

@@ -45,6 +45,14 @@ impl HandleStore {
         }
     }
 
+    pub async fn get_listener(&self, handle: u64) -> Option<Arc<Listener>> {
+        let entries = self.entries.read().await;
+        match entries.get(&handle)? {
+            StoreEntry::Listener(l) => Some(Arc::clone(l)),
+            _ => None,
+        }
+    }
+
     pub async fn remove(&self, handle: u64) -> Option<StoreEntry> {
         self.entries.write().await.remove(&handle)
     }
