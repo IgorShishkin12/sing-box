@@ -131,17 +131,17 @@ func (c *reticulumConn) SetWriteDeadline(_ time.Time) error { return nil }
 // ---------------------------------------------------------------------------
 
 // writeDestHeader sends the proxy destination address as a control message.
-// Must be called after auth completes (gate is already open on callers side).
-func writeDestHeader(fc *framedConn, addr string) error {
+// Must be called after auth completes (gate is already open on caller's side).
+func writeDestHeader(io AuthIO, addr string) error {
 	if addr == "" {
 		return errors.New("empty destination header")
 	}
-	return fc.WriteMsg(addr)
+	return io.WriteMsg(addr)
 }
 
 // readDestHeader receives the proxy destination address from the control channel.
-func readDestHeader(fc *framedConn) (string, error) {
-	addr, err := fc.ReadMsg()
+func readDestHeader(io AuthIO) (string, error) {
+	addr, err := io.ReadMsg()
 	if err != nil {
 		return "", err
 	}

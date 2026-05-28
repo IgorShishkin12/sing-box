@@ -1,0 +1,126 @@
+name: retv2e2e
+
+# Build context for all services is the sing-box/ directory (parent of e2e/).
+# Dockerfiles are referenced as e2e/Dockerfile.{server,client} from that context.
+
+services:
+
+  # ── TCP profile (default test) ─────────────────────────────────────────────
+  e2e-server:
+    profiles: [tcp]
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile.server
+    image: retv2e2e-server
+    command: >
+      -c "
+        sum-server &
+        sleep 2 &&
+        sing-box run -c /etc/sing-box/config.json
+      "
+    networks:
+      - e2e-net
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x sing-box > /dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
+  e2e-client:
+    profiles: [tcp]
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile.client
+    image: retv2e2e-client
+    command: >
+      -c "
+        sing-box run -c /etc/sing-box/config.json &
+        e2e-loadtest --socks 127.0.0.1:1080 --url http://127.0.0.1:8080 &&
+        echo 'ALL E2E TESTS PASSED'
+      "
+    networks:
+      - e2e-net
+    depends_on:
+      e2e-server:
+        condition: service_healthy
+
+  # ── UDP profile ────────────────────────────────────────────────────────────
+  e2e-server-udp:
+    profiles: [udp]
+    image: retv2e2e-server
+    command: >
+      -c "
+        sum-server &
+        sleep 2 &&
+        sing-box run -c /etc/sing-box/config.json
+      "
+    volumes:
+      - ./configs/server-udp.json:/etc/sing-box/config.json:ro
+    networks:
+      - e2e-net
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x sing-box > /dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
+  e2e-client-udp:
+    profiles: [udp]
+    image: retv2e2e-client
+    command: >
+      -c "
+        sing-box run -c /etc/sing-box/config.json &
+        e2e-loadtest --socks 127.0.0.1:1080 --url http://127.0.0.1:8080 &&
+        echo 'UDP E2E TESTS PASSED'
+      "
+    volumes:
+      - ./configs/client-udp.json:/etc/sing-box/config.json:ro
+    networks:
+      - e2e-net
+    depends_on:
+      e2e-server-udp:
+        condition: service_healthy
+
+  # ── Auto profile ───────────────────────────────────────────────────────────
+  e2e-server-auto:
+    profiles: [auto]
+    image: retv2e2e-server
+    command: >
+      -c "
+        sum-server &
+        sleep 2 &&
+        sing-box run -c /etc/sing-box/config.json
+      "
+    volumes:
+      - ./configs/server-auto.json:/etc/sing-box/config.json:ro
+    networks:
+      - e2e-net
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x sing-box > /dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
+  e2e-client-auto:
+    profiles: [auto]
+    image: retv2e2e-client
+    command: >
+      -c "
+        sing-box run -c /etc/sing-box/config.json &
+        e2e-loadtest --socks 127.0.0.1:1080 --url http://127.0.0.1:8080 &&
+        echo 'AUTO E2E TESTS PASSED'
+      "
+    volumes:
+      - ./configs/client-auto.json:/etc/sing-box/config.json:ro
+    networks:
+      - e2e-net
+    depends_on:
+      e2e-server-auto:
+        condition: service_healthy
+
+networks:
+  e2e-net:
+    driver: bridge

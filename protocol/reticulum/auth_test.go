@@ -13,7 +13,14 @@ type chanAuthIO struct {
 	recv chan string
 }
 
-func (c *chanAuthIO) WriteMsg(text string) error {
+func (c *chanAuthIO) WriteMsg(text string) (err error) {
+	// Recover from a send on a closed channel (happens when the peer has
+	// already exited and signalled EOF by closing its send channel).
+	defer func() {
+		if r := recover(); r != nil {
+			err = io.EOF
+		}
+	}()
 	c.send <- text
 	return nil
 }
@@ -52,7 +59,14 @@ func TestAuth_WrongPassword(t *testing.T) {
 	serverIO, clientIO := newChanAuthPair()
 
 	errs := make(chan error, 2)
-	go func() { errs <- ServerAuth(serverIO, "server-password") }()
+	go func() {
+		err := ServerAuth(serverIO, "server-password")
+		// Signal the client that we're done by closing our send channel.
+		// This causes the client's next ReadMsg to return io.EOF instead of
+		// blocking forever.
+		close(serverIO.send)
+		errs <- err
+	}()
 	go func() { errs <- ClientAuth(clientIO, "client-password") }()
 
 	errCount := 0
@@ -71,7 +85,6 @@ func TestAuth_BadHeader(t *testing.T) {
 
 	go func() {
 		_ = serverIO.WriteMsg("GARBAGE-HEADER")
-		// Don't send more; the client will error.
 		close(serverIO.send)
 	}()
 

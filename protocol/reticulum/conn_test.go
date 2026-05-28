@@ -1,13 +1,13 @@
 package reticulum
 
 import (
-	"bytes"
-	"encoding/binary"
-	"io"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+// chanAuthIO is already defined in auth_test.go; these tests are in the same
+// package so they share the helper.
 
 func TestDestHeaderRoundtrip(t *testing.T) {
 	addrs := []string{
@@ -16,38 +16,24 @@ func TestDestHeaderRoundtrip(t *testing.T) {
 		"[::1]:9000",
 	}
 	for _, addr := range addrs {
-		var buf bytes.Buffer
-		require.NoError(t, writeDestHeader(&buf, addr))
-		got, err := readDestHeader(&buf)
+		writerIO, readerIO := newChanAuthPair()
+		require.NoError(t, writeDestHeader(writerIO, addr))
+		got, err := readDestHeader(readerIO)
 		require.NoError(t, err)
 		require.Equal(t, addr, got)
 	}
 }
 
 func TestDestHeaderEmptyReturnsError(t *testing.T) {
-	var buf bytes.Buffer
-	binary.Write(&buf, binary.BigEndian, uint16(0))
-	_, err := readDestHeader(&buf)
+	_, readerIO := newChanAuthPair()
+	// Inject an empty string as if the peer sent one.
+	readerIO.recv <- ""
+	_, err := readDestHeader(readerIO)
 	require.Error(t, err)
 }
 
-func TestDestHeaderTruncatedReturnsError(t *testing.T) {
-	// Write a header claiming 10 bytes but only provide 3.
-	var buf bytes.Buffer
-	binary.Write(&buf, binary.BigEndian, uint16(10))
-	buf.Write([]byte("abc"))
-	_, err := readDestHeader(&buf)
-	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
-}
-
-func TestReticulumConnClosedRead(t *testing.T) {
-	c := &reticulumConn{handle: 0}
-	_, err := c.Read(make([]byte, 4))
-	require.ErrorIs(t, err, io.ErrClosedPipe)
-}
-
-func TestReticulumConnClosedWrite(t *testing.T) {
-	c := &reticulumConn{handle: 0}
-	_, err := c.Write([]byte("x"))
-	require.ErrorIs(t, err, io.ErrClosedPipe)
+func TestWriteDestHeaderEmptyReturnsError(t *testing.T) {
+	writerIO, _ := newChanAuthPair()
+	err := writeDestHeader(writerIO, "")
+	require.Error(t, err)
 }

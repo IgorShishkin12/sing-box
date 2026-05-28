@@ -1,0 +1,35 @@
+{
+  "log": {
+    "level": "info",
+    "output": "/dev/stdout"
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 1080
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "reticulum",
+      "tag": "reticulum-out",
+      "name": "e2e-sum-server-auto",
+      "password": "e2e-test-password",
+      "reticulum_config": {
+        "identity_name": "e2e-client-auto",
+        "storage_path": "/var/lib/reticulum/client-auto",
+        "interfaces": [
+          {
+            "name": "Auto Interface",
+            "type": "AutoInterface"
+          }
+        ]
+      }
+    }
+  ],
+  "route": {
+    "final": "reticulum-out"
+  }
+}

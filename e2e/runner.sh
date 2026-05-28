@@ -8,7 +8,24 @@ echo "Building Rust bridge..."
 cd "$SING_BOX_DIR/bridge"
 cargo build --release
 
-echo "Running E2E tests via docker-compose..."
-cd "$SING_BOX_DIR"
-docker compose -f docker-compose.e2e.yml build
-docker compose -f docker-compose.e2e.yml up --exit-code-from e2e-client
+echo "Building e2e Docker images..."
+cd "$SCRIPT_DIR"
+docker compose -f docker-compose.yml build
+
+run_profile() {
+    local profile="$1"
+    local exit_from="$2"
+    echo ""
+    echo "=== Running profile: $profile (exit-from: $exit_from) ==="
+    docker compose -f docker-compose.yml --profile "$profile" up \
+        --exit-code-from "$exit_from" \
+        --abort-on-container-exit
+    docker compose -f docker-compose.yml --profile "$profile" down --volumes
+}
+
+run_profile tcp  e2e-client
+run_profile udp  e2e-client-udp
+run_profile auto e2e-client-auto
+
+echo ""
+echo "=== ALL E2E PROFILES PASSED ==="
