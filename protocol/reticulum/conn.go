@@ -1,7 +1,6 @@
 package reticulum
 
 import (
-	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -61,6 +60,21 @@ type reticulumAddr struct {
 func (a reticulumAddr) Network() string { return a.network }
 func (a reticulumAddr) String() string  { return a.str }
 
+// ReadMessage reads one complete discrete message from the Reticulum transport.
+// Each call returns exactly the bytes delivered by a single BridgeWrite on the
+// remote side, preserving message boundaries.
+func (c *reticulumConn) ReadMessage() ([]byte, error) {
+	select {
+	case chunk, ok := <-c.dataCh:
+		if !ok {
+			return nil, io.EOF
+		}
+		return chunk, nil
+	case <-c.closed:
+		return nil, io.EOF
+	}
+}
+
 // Read blocks until data arrives (or the connection closes).
 func (c *reticulumConn) Read(b []byte) (int, error) {
 	for {
@@ -113,34 +127,26 @@ func (c *reticulumConn) SetReadDeadline(_ time.Time) error  { return nil }
 func (c *reticulumConn) SetWriteDeadline(_ time.Time) error { return nil }
 
 // ---------------------------------------------------------------------------
-// Destination header (length-prefixed address written before proxied data)
+// Destination header — sent as an AUTH_CTRL message after auth completes.
 // ---------------------------------------------------------------------------
 
-// writeDestHeader writes a 2-byte big-endian length followed by the address string.
-func writeDestHeader(w io.Writer, addr string) error {
-	b := []byte(addr)
-	hdr := make([]byte, 2)
-	binary.BigEndian.PutUint16(hdr, uint16(len(b)))
-	if _, err := w.Write(hdr); err != nil {
-		return err
+// writeDestHeader sends the proxy destination address as a control message.
+// Must be called after auth completes (gate is already open on callers side).
+func writeDestHeader(fc *framedConn, addr string) error {
+	if addr == "" {
+		return errors.New("empty destination header")
 	}
-	_, err := w.Write(b)
-	return err
+	return fc.WriteMsg(addr)
 }
 
-// readDestHeader reads a 2-byte big-endian length then the address string.
-func readDestHeader(r io.Reader) (string, error) {
-	hdr := make([]byte, 2)
-	if _, err := io.ReadFull(r, hdr); err != nil {
+// readDestHeader receives the proxy destination address from the control channel.
+func readDestHeader(fc *framedConn) (string, error) {
+	addr, err := fc.ReadMsg()
+	if err != nil {
 		return "", err
 	}
-	n := int(binary.BigEndian.Uint16(hdr))
-	if n == 0 {
+	if addr == "" {
 		return "", errors.New("empty destination header")
 	}
-	buf := make([]byte, n)
-	if _, err := io.ReadFull(r, buf); err != nil {
-		return "", err
-	}
-	return string(buf), nil
+	return addr, nil
 }

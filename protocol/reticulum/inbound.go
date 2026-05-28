@@ -46,13 +46,16 @@ type Inbound struct {
 	listenerHdl uint64
 	doneCh      chan struct{}
 
-	// Auth state: cache authenticated peer identities so we only challenge
-	// each identity once; serialize the challenge itself with a mutex.
-	authedPeers sync.Map   // peerHash(string) → struct{}
-	authMu      sync.Mutex
+	// authMu serialises full SBRT-AUTH-1 exchanges so two simultaneous
+	// first-connections from the same peer don't race each other.
+	authMu sync.Mutex
 
-	mu     sync.Mutex
-	closed bool
+	// trustStore caches authenticated peer identities persistently on disk.
+	trustStore *TrustStore
+
+	mu        sync.Mutex
+	closed    bool
+	accepting bool
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ReticulumInboundOptions) (adapter.Inbound, error) {
@@ -65,6 +68,13 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	}, nil
 }
 
+func (h *Inbound) trustStorePath() string {
+	if h.options.ReticulumConfig != nil && h.options.ReticulumConfig.StoragePath != "" {
+		return h.options.ReticulumConfig.StoragePath + "/trust_store.json"
+	}
+	return "" // in-memory only when no storage path is configured
+}
+
 func (h *Inbound) Start(stage adapter.StartStage) error {
 	if stage != adapter.StartStateInitialize {
 		return nil
@@ -74,6 +84,8 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 	if h.closed {
 		return fmt.Errorf("reticulum inbound: already closed")
 	}
+
+	h.trustStore = NewTrustStore(h.trustStorePath())
 
 	configJSON, err := buildConfigJSON(h.options.ReticulumConfig, h.options.ReticulumConfigPath)
 	if err != nil {
@@ -96,6 +108,7 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 		return fmt.Errorf("bridge listen failed: %w", err)
 	}
 	h.listenerHdl = handle
+	h.accepting = true
 
 	go h.acceptLoop()
 	return nil
@@ -107,7 +120,6 @@ func (h *Inbound) acceptLoop() {
 		case ev := <-globalAcceptCh:
 			if ev.listenerID != h.listenerHdl {
 				// Not for this listener — put it back for other inbounds.
-				// (In practice there is only one inbound, but be correct.)
 				globalAcceptCh <- ev
 				continue
 			}
@@ -119,27 +131,24 @@ func (h *Inbound) acceptLoop() {
 }
 
 func (h *Inbound) handleConn(connID uint64, peerHash string) {
-	conn := newReticulumConn(connID, "inbound", peerHash)
+	raw := newReticulumConn(connID, "inbound", peerHash)
+	fc := newFramedConn(raw)
+	go fc.dispatch()
+
+	defer fc.Close()
 
 	if h.options.Password != "" {
-		if _, cached := h.authedPeers.Load(peerHash); !cached {
-			// Serialize auth challenges so at most one HMAC exchange runs at a time.
-			h.authMu.Lock()
-			err := ServerAuth(conn, h.options.Password)
-			h.authMu.Unlock()
-			if err != nil {
-				h.logger.Error("reticulum auth failed: ", err)
-				conn.Close()
-				return
-			}
-			h.authedPeers.Store(peerHash, struct{}{})
+		if err := h.negotiateAuth(fc, peerHash); err != nil {
+			h.logger.Error("reticulum auth failed: ", err)
+			return
 		}
+	} else {
+		fc.OpenGate()
 	}
 
-	destAddr, err := readDestHeader(conn)
+	destAddr, err := readDestHeader(fc)
 	if err != nil {
 		h.logger.Error("reticulum: read dest header: ", err)
-		conn.Close()
 		return
 	}
 
@@ -148,8 +157,56 @@ func (h *Inbound) handleConn(connID uint64, peerHash string) {
 			Network:     "tcp",
 			Destination: M.ParseSocksaddr(destAddr),
 		}
-		h.router.RouteConnectionEx(context.Background(), conn, metadata, nil)
+		h.router.RouteConnectionEx(context.Background(), fc, metadata, nil)
 	}
+}
+
+// negotiateAuth exchanges trust hints with the peer and either opens the gate
+// immediately (both sides trust each other) or runs a full SBRT-AUTH-1
+// handshake.
+func (h *Inbound) negotiateAuth(fc *framedConn, peerHash string) error {
+	// Determine our side's trust state.
+	myTrust := byte(0x00)
+	if h.trustStore.IsTrusted(peerHash, h.options.Password) {
+		myTrust = 0x01
+	}
+
+	// Send our hint first (non-blocking in reticulum), then read peer's.
+	if err := fc.WriteMsg(string([]byte{myTrust})); err != nil {
+		return fmt.Errorf("write trust hint: %w", err)
+	}
+
+	peerMsg, err := fc.ReadMsg()
+	if err != nil {
+		return fmt.Errorf("read trust hint: %w", err)
+	}
+	if len(peerMsg) == 0 {
+		return fmt.Errorf("empty trust hint from peer")
+	}
+	peerTrust := peerMsg[0]
+
+	if myTrust == 0x01 && peerTrust == 0x01 {
+		// Both sides trust each other — skip the full handshake.
+		fc.OpenGate()
+		return nil
+	}
+
+	// Full handshake required. Serialise per-inbound so at most one
+	// SBRT-AUTH-1 exchange happens at a time (prevents protocol races when
+	// two connections from the same peer arrive simultaneously).
+	h.authMu.Lock()
+	err = ServerAuth(fc, h.options.Password)
+	h.authMu.Unlock()
+	if err != nil {
+		return err
+	}
+
+	if err := h.trustStore.Store(peerHash, h.options.Password); err != nil {
+		// Non-fatal: trust is held in memory even if disk write fails.
+		h.logger.Warn("trust store write failed: ", err)
+	}
+	fc.OpenGate()
+	return nil
 }
 
 func (h *Inbound) Close() error {
@@ -159,6 +216,7 @@ func (h *Inbound) Close() error {
 		return nil
 	}
 	h.closed = true
+	h.accepting = false
 	close(h.doneCh)
 	if h.listenerHdl != 0 {
 		BridgeClose(h.listenerHdl)

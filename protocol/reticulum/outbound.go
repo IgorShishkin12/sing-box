@@ -27,6 +27,7 @@ type Outbound struct {
 	options      option.ReticulumOutboundOptions
 	bridgeInited bool
 	resolvedHash string
+	trustStore   *TrustStore
 	mu           sync.Mutex
 }
 
@@ -38,6 +39,13 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		logger:  logger,
 		options: options,
 	}, nil
+}
+
+func (h *Outbound) trustStorePath() string {
+	if h.options.ReticulumConfig != nil && h.options.ReticulumConfig.StoragePath != "" {
+		return h.options.ReticulumConfig.StoragePath + "/trust_store.json"
+	}
+	return ""
 }
 
 func (h *Outbound) Start(stage adapter.StartStage) error {
@@ -63,6 +71,7 @@ func (h *Outbound) Start(stage adapter.StartStage) error {
 	if err := BridgeInit(configJSON); err != nil {
 		return fmt.Errorf("bridge init failed: %w", err)
 	}
+	h.trustStore = NewTrustStore(h.trustStorePath())
 	h.bridgeInited = true
 	return nil
 }
@@ -88,6 +97,7 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 
 	h.mu.Lock()
 	destHash := h.resolvedHash
+	ts := h.trustStore
 	h.mu.Unlock()
 
 	if destHash == "" {
@@ -120,21 +130,65 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 	if h.options.Name != "" {
 		localName = h.options.Name
 	}
-	conn := newReticulumConn(connID, localName, destHash)
+	raw := newReticulumConn(connID, localName, destHash)
+	fc := newFramedConn(raw)
+	go fc.dispatch()
 
 	if h.options.Password != "" {
-		if err := ClientAuth(conn, h.options.Password); err != nil {
-			conn.Close()
+		if err := h.negotiateAuth(fc, destHash, ts); err != nil {
+			fc.Close()
 			return nil, fmt.Errorf("reticulum auth failed: %w", err)
 		}
+	} else {
+		fc.OpenGate()
 	}
 
-	if err := writeDestHeader(conn, destination.String()); err != nil {
-		conn.Close()
+	if err := writeDestHeader(fc, destination.String()); err != nil {
+		fc.Close()
 		return nil, fmt.Errorf("reticulum: write dest header: %w", err)
 	}
 
-	return conn, nil
+	return fc, nil
+}
+
+// negotiateAuth exchanges trust hints with the server and either opens the gate
+// immediately or runs a full SBRT-AUTH-1 handshake.
+func (h *Outbound) negotiateAuth(fc *framedConn, destHash string, ts *TrustStore) error {
+	myTrust := byte(0x00)
+	if ts != nil && ts.IsTrusted(destHash, h.options.Password) {
+		myTrust = 0x01
+	}
+
+	// Write our hint, then read server's.
+	if err := fc.WriteMsg(string([]byte{myTrust})); err != nil {
+		return fmt.Errorf("write trust hint: %w", err)
+	}
+
+	peerMsg, err := fc.ReadMsg()
+	if err != nil {
+		return fmt.Errorf("read trust hint: %w", err)
+	}
+	if len(peerMsg) == 0 {
+		return fmt.Errorf("empty trust hint from server")
+	}
+	peerTrust := peerMsg[0]
+
+	if myTrust == 0x01 && peerTrust == 0x01 {
+		fc.OpenGate()
+		return nil
+	}
+
+	if err := ClientAuth(fc, h.options.Password); err != nil {
+		return err
+	}
+
+	if ts != nil {
+		if err := ts.Store(destHash, h.options.Password); err != nil {
+			h.logger.Warn("trust store write failed: ", err)
+		}
+	}
+	fc.OpenGate()
+	return nil
 }
 
 func (h *Outbound) ListenPacket(_ context.Context, _ M.Socksaddr) (net.PacketConn, error) {
