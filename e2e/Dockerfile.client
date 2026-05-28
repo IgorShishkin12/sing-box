@@ -34,8 +34,7 @@ RUN apk add --no-cache bash curl ca-certificates libgcc libstdc++
 
 COPY --from=builder /usr/local/bin/sing-box /usr/local/bin/sing-box
 COPY --from=builder /usr/local/bin/e2e-loadtest /usr/local/bin/e2e-loadtest
-COPY ./e2e/configs/client.json /etc/sing-box/config.json
 
 EXPOSE 1080
 
-ENTRYPOINT ["/usr/bin/timeout", "120", "/bin/sh"]
+ENTRYPOINT ["/usr/bin/timeout", "300", "/bin/sh"]

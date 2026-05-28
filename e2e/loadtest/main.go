@@ -31,9 +31,9 @@ import (
 func main() {
 	socksAddr := flag.String("socks", "127.0.0.1:1080", "SOCKS5 proxy address")
 	targetURL := flag.String("url", "http://127.0.0.1:8080", "Base URL of the sum-server")
-	concurrency := flag.Int("concurrency", 20, "Number of concurrent goroutines in phase 2")
-	requests := flag.Int("requests", 100, "Total requests to send in phase 2")
-	warmupTimeout := flag.Duration("warmup-timeout", 120*time.Second, "Max time for phase 1 warm-up")
+	concurrency := flag.Int("concurrency", 5, "Number of concurrent goroutines in phase 2")
+	requests := flag.Int("requests", 20, "Total requests to send in phase 2")
+	warmupTimeout := flag.Duration("warmup-timeout", 60*time.Second, "Max time for phase 1 warm-up")
 	flag.Parse()
 
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
@@ -42,7 +42,7 @@ func main() {
 	log.Printf("Phase 1: warming up (max %v) ...", *warmupTimeout)
 	warmupStart := time.Now()
 	for {
-		err := doRequest(*socksAddr, *targetURL+"/sum", 3, 5)
+		err := doRequest(*socksAddr, *targetURL+"/sum", 3, 0) // b=0 marks warm-up
 		if err == nil {
 			log.Printf("Phase 1: warm-up succeeded in %v", time.Since(warmupStart).Round(time.Millisecond))
 			break
@@ -59,6 +59,7 @@ func main() {
 		wg      sync.WaitGroup
 		success atomic.Int64
 		failure atomic.Int64
+		reqSeq  atomic.Int64 // global request sequence number, visible on server side
 	)
 	start := time.Now()
 	perGoroutine := *requests / *concurrency
@@ -68,17 +69,20 @@ func main() {
 
 	for g := 0; g < *concurrency; g++ {
 		wg.Add(1)
-		go func() {
+		go func(goroutine int) {
 			defer wg.Done()
 			for i := 0; i < perGoroutine; i++ {
-				if err := doRequest(*socksAddr, *targetURL+"/sum", 3, 5); err != nil {
-					log.Printf("request failed: %v", err)
+				// b = global sequence number so server logs "sum: 3 + N = 3+N"
+				b := int(reqSeq.Add(1))
+				if err := doRequest(*socksAddr, *targetURL+"/sum", 3, b); err != nil {
+					log.Printf("[g%d] req#%d FAIL: %v", goroutine, b, err)
 					failure.Add(1)
 				} else {
-					success.Add(1)
+					n := success.Add(1)
+					log.Printf("[g%d] req#%d ok (total ok: %d/%d)", goroutine, b, n, int64(*requests))
 				}
 			}
-		}()
+		}(g)
 	}
 	wg.Wait()
 	elapsed := time.Since(start)

@@ -1,6 +1,6 @@
 bridge/target/
 .git/
-*.md
+**/*.md
 test/
-Dockerfile.*
-docker-compose.*
+**/Dockerfile.*
+**/docker-compose.*
