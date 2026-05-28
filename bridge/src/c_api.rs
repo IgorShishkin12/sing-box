@@ -3,6 +3,8 @@ use std::os::raw::c_char;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use tracing_subscriber::layer::SubscriberExt as _;
+
 use crate::config;
 use crate::listener::Listener;
 use crate::runtime;
@@ -16,6 +18,7 @@ pub(crate) static ON_ACCEPT:  AtomicUsize = AtomicUsize::new(0);
 pub(crate) static ON_CONNECT: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static ON_DATA:    AtomicUsize = AtomicUsize::new(0);
 pub(crate) static ON_CLOSE:   AtomicUsize = AtomicUsize::new(0);
+pub(crate) static ON_LOG:     AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) fn call_on_accept(listener_id: u64, conn_id: u64, peer_hash: &str) {
     let ptr = ON_ACCEPT.load(Ordering::Relaxed);
@@ -62,16 +65,13 @@ pub extern "C" fn reticulum_init(
     on_data:      Option<extern "C" fn(u64, *const u8, usize)>,
     on_close:     Option<extern "C" fn(u64)>,
 ) -> i32 {
-    #[cfg(target_os = "android")]
-    android_logger::init_once(
-        android_logger::Config::default()
-            .with_max_level(log::LevelFilter::Trace)
-            .with_tag("reticulum_bridge"),
+    // Route log:: macro calls into tracing so reticulum-rs events and bridge
+    // events all flow through the same subscriber.
+    let _ = tracing_log::LogTracer::init();
+    let _ = tracing::subscriber::set_global_default(
+        tracing_subscriber::Registry::default()
+            .with(crate::logger::CLogLayer),
     );
-    #[cfg(not(target_os = "android"))]
-    let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    ).try_init();
 
     // Store callbacks.
     if let Some(f) = on_accept  { ON_ACCEPT.store(f as usize, Ordering::Relaxed); }
@@ -108,6 +108,17 @@ pub extern "C" fn reticulum_init(
     }
 
     0
+}
+
+/// Register the Go log callback. Must be called before `reticulum_init` to
+/// capture early initialisation log events. Safe to call from any thread.
+#[no_mangle]
+pub extern "C" fn reticulum_set_log_callback(
+    on_log: Option<extern "C" fn(u8, *const c_char, *const c_char)>,
+) {
+    if let Some(f) = on_log {
+        ON_LOG.store(f as usize, Ordering::Relaxed);
+    }
 }
 
 /// Shut down the bridge and release all resources.

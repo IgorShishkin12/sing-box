@@ -16,13 +16,10 @@ libc = "0.2"
 rand_core = "0.6"
 sha2 = "0.10"
 hex = "0.4"
-reticulum-rs = { version = "0.2", features = ["core", "transport"] }
-
-[target.'cfg(target_os = "android")'.dependencies]
-android_logger = "0.14"
-
-[target.'cfg(not(target_os = "android"))'.dependencies]
-env_logger = "0.11"
+reticulum-rs = { git = "https://github.com/IgorShishkin12/LXMF-rs", branch = "switch_to_tracing", features = ["core", "transport"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
+tracing-log = "0.2"
 
 [dev-dependencies]
 serial_test = "3"

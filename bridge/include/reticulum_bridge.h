@@ -37,6 +37,12 @@ typedef void (*reticulum_on_data_fn)(uint64_t conn_id, uint8_t *data,
 /* Connection has been closed (by either side). */
 typedef void (*reticulum_on_close_fn)(uint64_t conn_id);
 
+/* Log event from Rust. level: 1=Error 2=Warn 3=Info 4=Debug 5=Trace.
+ * target is the tracing/log crate target (e.g. "reticulum_rs::transport").
+ * Both strings are valid only for the duration of the call. */
+typedef void (*reticulum_log_fn)(uint8_t level, const char *target,
+                                 const char *message);
+
 /* -------------------------------------------------------------------------
  * Lifecycle
  * ------------------------------------------------------------------------- */
@@ -52,6 +58,12 @@ int reticulum_init(const char *config_json,
                    reticulum_on_connect_fn on_connect,
                    reticulum_on_data_fn    on_data,
                    reticulum_on_close_fn   on_close);
+
+/*
+ * Register the Go log callback. Call before reticulum_init to capture
+ * early initialisation events. Safe to call from any thread.
+ */
+void reticulum_set_log_callback(reticulum_log_fn on_log);
 
 /*
  * Shut down the bridge and release all resources.

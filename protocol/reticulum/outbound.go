@@ -68,6 +68,7 @@ func (h *Outbound) Start(stage adapter.StartStage) error {
 	if err != nil {
 		return err
 	}
+	BridgeSetLogger(h.logger)
 	if err := BridgeInit(configJSON); err != nil {
 		return E.Cause(err, "bridge init failed")
 	}

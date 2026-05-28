@@ -18,12 +18,15 @@ extern void goOnAccept (uint64_t listener_id, uint64_t conn_id, char* peer_hash)
 extern void goOnConnect(uint64_t task_id,     uint64_t conn_id);
 extern void goOnData   (uint64_t conn_id,     uint8_t* data, size_t len);
 extern void goOnClose  (uint64_t conn_id);
+extern void goOnLog    (uint8_t level, char* target, char* message);
 */
 import "C"
 import (
 	"sync"
 	"sync/atomic"
 	"unsafe"
+
+	"github.com/sagernet/sing-box/log"
 )
 
 // ---------------------------------------------------------------------------
@@ -36,6 +39,9 @@ var pendingDials sync.Map // uint64 → chan uint64
 
 // nextTaskSeq generates unique task IDs for outbound dials.
 var nextTaskSeq atomic.Uint64
+
+// bridgeLoggerVal holds the log.ContextLogger set by BridgeSetLogger.
+var bridgeLoggerVal atomic.Value // stores log.ContextLogger
 
 // ---------------------------------------------------------------------------
 // Exported callbacks (called from Rust tokio threads)
@@ -87,6 +93,28 @@ func goOnClose(connID C.uint64_t) {
 	}
 }
 
+//export goOnLog
+func goOnLog(level C.uint8_t, target *C.char, message *C.char) {
+	logger, _ := bridgeLoggerVal.Load().(log.ContextLogger)
+	if logger == nil {
+		return
+	}
+	tgt := C.GoString(target)
+	msg := "[" + tgt + "] " + C.GoString(message)
+	switch uint8(level) {
+	case 1:
+		logger.Error(msg)
+	case 2:
+		logger.Warn(msg)
+	case 3:
+		logger.Info(msg)
+	case 4:
+		logger.Debug(msg)
+	default: // 5 = Trace
+		logger.Trace(msg)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Bridge API (called from Go)
 // ---------------------------------------------------------------------------
@@ -95,6 +123,13 @@ var (
 	bridgeInitOnce sync.Once
 	bridgeInitErr  error
 )
+
+// BridgeSetLogger wires the Go log.ContextLogger into the Rust log callback.
+// Call before BridgeInit to capture early initialisation events.
+func BridgeSetLogger(logger log.ContextLogger) {
+	bridgeLoggerVal.Store(logger)
+	C.reticulum_set_log_callback(C.reticulum_log_fn(C.goOnLog))
+}
 
 // BridgeInit initializes the Rust bridge with a JSON config string.
 // Registers the four Go callbacks. Only the first call matters.

@@ -1,6 +1,7 @@
 pub mod config;
 pub mod connection;
 pub mod c_api;
+pub mod logger;
 pub mod listener;
 pub mod runtime;
 pub mod store;

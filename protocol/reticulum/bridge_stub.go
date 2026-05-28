@@ -2,9 +2,15 @@
 
 package reticulum
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/sagernet/sing-box/log"
+)
 
 var ErrBridgeNotAvailable = errors.New("reticulum bridge not available: build with -tags with_reticulum")
+
+func BridgeSetLogger(_ log.ContextLogger) {}
 
 func BridgeInit(_ string) error { return ErrBridgeNotAvailable }
 
