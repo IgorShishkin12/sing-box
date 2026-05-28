@@ -3,7 +3,6 @@ package reticulum
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net"
 	"os"
 	"sync"
@@ -13,6 +12,7 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	C "github.com/sagernet/sing-box/constant"
+	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 )
 
@@ -20,14 +20,14 @@ func buildConfigJSON(inlineConfig *option.ReticulumConfig, configPath string) (s
 	if inlineConfig != nil {
 		b, err := json.Marshal(inlineConfig)
 		if err != nil {
-			return "", fmt.Errorf("failed to marshal reticulum config: %w", err)
+			return "", E.Cause(err, "failed to marshal reticulum config")
 		}
 		return string(b), nil
 	}
 	if configPath != "" {
 		data, err := os.ReadFile(configPath)
 		if err != nil {
-			return "", fmt.Errorf("failed to read reticulum config from %s: %w", configPath, err)
+			return "", E.Cause(err, "failed to read reticulum config from ", configPath)
 		}
 		return string(data), nil
 	}
@@ -82,7 +82,7 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
-		return fmt.Errorf("reticulum inbound: already closed")
+		return E.New("reticulum inbound: already closed")
 	}
 
 	h.trustStore = NewTrustStore(h.trustStorePath())
@@ -92,7 +92,7 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 		return err
 	}
 	if err := BridgeInit(configJSON); err != nil {
-		return fmt.Errorf("bridge init failed: %w", err)
+		return E.Cause(err, "bridge init failed")
 	}
 
 	listenHash := h.options.Destination
@@ -100,12 +100,12 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 		listenHash = h.options.Name
 	}
 	if listenHash == "" {
-		return fmt.Errorf("reticulum inbound: destination or name must be set")
+		return E.New("reticulum inbound: destination or name must be set")
 	}
 
 	handle, err := BridgeListen(listenHash)
 	if err != nil {
-		return fmt.Errorf("bridge listen failed: %w", err)
+		return E.Cause(err, "bridge listen failed")
 	}
 	h.listenerHdl = handle
 	h.accepting = true
@@ -173,15 +173,15 @@ func (h *Inbound) negotiateAuth(fc *framedConn, peerHash string) error {
 
 	// Send our hint first (non-blocking in reticulum), then read peer's.
 	if err := fc.WriteMsg(string([]byte{myTrust})); err != nil {
-		return fmt.Errorf("write trust hint: %w", err)
+		return E.Cause(err, "write trust hint")
 	}
 
 	peerMsg, err := fc.ReadMsg()
 	if err != nil {
-		return fmt.Errorf("read trust hint: %w", err)
+		return E.Cause(err, "read trust hint")
 	}
 	if len(peerMsg) == 0 {
-		return fmt.Errorf("empty trust hint from peer")
+		return E.New("empty trust hint from peer")
 	}
 	peerTrust := peerMsg[0]
 

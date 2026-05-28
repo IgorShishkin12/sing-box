@@ -2,7 +2,6 @@ package reticulum
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"sync"
 
@@ -11,6 +10,7 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	C "github.com/sagernet/sing-box/constant"
+	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
@@ -61,7 +61,7 @@ func (h *Outbound) Start(stage adapter.StartStage) error {
 	if h.options.Destination != "" {
 		h.resolvedHash = h.options.Destination
 	} else if h.options.Name == "" {
-		return fmt.Errorf("reticulum outbound: destination or name must be set")
+		return E.New("reticulum outbound: destination or name must be set")
 	}
 
 	configJSON, err := buildConfigJSON(h.options.ReticulumConfig, h.options.ReticulumConfigPath)
@@ -69,7 +69,7 @@ func (h *Outbound) Start(stage adapter.StartStage) error {
 		return err
 	}
 	if err := BridgeInit(configJSON); err != nil {
-		return fmt.Errorf("bridge init failed: %w", err)
+		return E.Cause(err, "bridge init failed")
 	}
 	h.trustStore = NewTrustStore(h.trustStorePath())
 	h.bridgeInited = true
@@ -103,7 +103,7 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 	if destHash == "" {
 		hash, err := BridgeResolveName(h.options.Name)
 		if err != nil {
-			return nil, fmt.Errorf("reticulum: resolve %q: %w", h.options.Name, err)
+			return nil, E.Cause(err, "reticulum: resolve ", h.options.Name)
 		}
 		h.mu.Lock()
 		h.resolvedHash = hash
@@ -137,7 +137,7 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 	if h.options.Password != "" {
 		if err := h.negotiateAuth(fc, destHash, ts); err != nil {
 			fc.Close()
-			return nil, fmt.Errorf("reticulum auth failed: %w", err)
+			return nil, E.Cause(err, "reticulum auth failed")
 		}
 	} else {
 		fc.OpenGate()
@@ -145,7 +145,7 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 
 	if err := writeDestHeader(fc, destination.String()); err != nil {
 		fc.Close()
-		return nil, fmt.Errorf("reticulum: write dest header: %w", err)
+		return nil, E.Cause(err, "reticulum: write dest header")
 	}
 
 	return fc, nil
@@ -161,15 +161,15 @@ func (h *Outbound) negotiateAuth(fc *framedConn, destHash string, ts *TrustStore
 
 	// Write our hint, then read server's.
 	if err := fc.WriteMsg(string([]byte{myTrust})); err != nil {
-		return fmt.Errorf("write trust hint: %w", err)
+		return E.Cause(err, "write trust hint")
 	}
 
 	peerMsg, err := fc.ReadMsg()
 	if err != nil {
-		return fmt.Errorf("read trust hint: %w", err)
+		return E.Cause(err, "read trust hint")
 	}
 	if len(peerMsg) == 0 {
-		return fmt.Errorf("empty trust hint from server")
+		return E.New("empty trust hint from server")
 	}
 	peerTrust := peerMsg[0]
 

@@ -21,8 +21,9 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"time"
+
+	E "github.com/sagernet/sing/common/exceptions"
 )
 
 // authTimeout is the per-message read deadline during the auth handshake.
@@ -51,45 +52,45 @@ func computeHMAC(password string, salt []byte) []byte {
 func ServerAuth(io AuthIO, password string) error {
 	saltS, err := generateSalt()
 	if err != nil {
-		return fmt.Errorf("auth: generate server salt: %w", err)
+		return E.Cause(err, "auth: generate server salt")
 	}
 
 	if err := io.WriteMsg("SBRT-AUTH-1"); err != nil {
-		return fmt.Errorf("auth: write header: %w", err)
+		return E.Cause(err, "auth: write header")
 	}
 	if err := io.WriteMsg(hex.EncodeToString(saltS)); err != nil {
-		return fmt.Errorf("auth: write server salt: %w", err)
+		return E.Cause(err, "auth: write server salt")
 	}
 
 	saltCHex, err := io.ReadMsg()
 	if err != nil {
-		return fmt.Errorf("auth: read client salt: %w", err)
+		return E.Cause(err, "auth: read client salt")
 	}
 	saltC, err := hex.DecodeString(saltCHex)
 	if err != nil || len(saltC) != 32 {
-		return fmt.Errorf("auth: invalid client salt")
+		return E.New("auth: invalid client salt")
 	}
 
 	clientHMACHex, err := io.ReadMsg()
 	if err != nil {
-		return fmt.Errorf("auth: read client HMAC: %w", err)
+		return E.Cause(err, "auth: read client HMAC")
 	}
 	clientHMACBytes, err := hex.DecodeString(clientHMACHex)
 	if err != nil {
-		return fmt.Errorf("auth: invalid client HMAC hex")
+		return E.New("auth: invalid client HMAC hex")
 	}
 
 	expected := computeHMAC(password, saltS)
 	if !hmac.Equal(clientHMACBytes, expected) {
-		return fmt.Errorf("auth: wrong password")
+		return E.New("auth: wrong password")
 	}
 
 	if err := io.WriteMsg("OK"); err != nil {
-		return fmt.Errorf("auth: write OK: %w", err)
+		return E.Cause(err, "auth: write OK")
 	}
 	serverHMAC := computeHMAC(password, saltC)
 	if err := io.WriteMsg(hex.EncodeToString(serverHMAC)); err != nil {
-		return fmt.Errorf("auth: write server HMAC: %w", err)
+		return E.Cause(err, "auth: write server HMAC")
 	}
 
 	return nil
@@ -104,54 +105,54 @@ func ServerAuth(io AuthIO, password string) error {
 func ClientAuth(io AuthIO, password string) error {
 	header, err := io.ReadMsg()
 	if err != nil {
-		return fmt.Errorf("auth: read header: %w", err)
+		return E.Cause(err, "auth: read header")
 	}
 	if header != "SBRT-AUTH-1" {
-		return fmt.Errorf("auth: unexpected protocol header: %q", header)
+		return E.New("auth: unexpected protocol header: ", header)
 	}
 
 	saltSHex, err := io.ReadMsg()
 	if err != nil {
-		return fmt.Errorf("auth: read server salt: %w", err)
+		return E.Cause(err, "auth: read server salt")
 	}
 	saltS, err := hex.DecodeString(saltSHex)
 	if err != nil || len(saltS) != 32 {
-		return fmt.Errorf("auth: invalid server salt")
+		return E.New("auth: invalid server salt")
 	}
 
 	saltC, err := generateSalt()
 	if err != nil {
-		return fmt.Errorf("auth: generate client salt: %w", err)
+		return E.Cause(err, "auth: generate client salt")
 	}
 
 	clientHMAC := computeHMAC(password, saltS)
 	if err := io.WriteMsg(hex.EncodeToString(saltC)); err != nil {
-		return fmt.Errorf("auth: write client salt: %w", err)
+		return E.Cause(err, "auth: write client salt")
 	}
 	if err := io.WriteMsg(hex.EncodeToString(clientHMAC)); err != nil {
-		return fmt.Errorf("auth: write client HMAC: %w", err)
+		return E.Cause(err, "auth: write client HMAC")
 	}
 
 	status, err := io.ReadMsg()
 	if err != nil {
-		return fmt.Errorf("auth: read server status: %w", err)
+		return E.Cause(err, "auth: read server status")
 	}
 	if status != "OK" {
-		return fmt.Errorf("auth: rejected by server")
+		return E.New("auth: rejected by server")
 	}
 
 	serverHMACHex, err := io.ReadMsg()
 	if err != nil {
-		return fmt.Errorf("auth: read server HMAC: %w", err)
+		return E.Cause(err, "auth: read server HMAC")
 	}
 	serverHMACBytes, err := hex.DecodeString(serverHMACHex)
 	if err != nil {
-		return fmt.Errorf("auth: invalid server HMAC hex")
+		return E.New("auth: invalid server HMAC hex")
 	}
 
 	expected := computeHMAC(password, saltC)
 	if !hmac.Equal(serverHMACBytes, expected) {
-		return fmt.Errorf("auth: server has wrong password")
+		return E.New("auth: server has wrong password")
 	}
 
 	return nil
