@@ -44,22 +44,31 @@ var nextTaskSeq atomic.Uint64
 //export goOnAccept
 func goOnAccept(listenerID, connID C.uint64_t, peerHash *C.char) {
 	hash := C.GoString(peerHash)
+	// Pre-create the reticulumConn (registering its dataCh in connDataChans)
+	// before pushing the event. This guarantees that any goOnData call for
+	// this connID arriving before handleConn runs will be buffered, not dropped.
+	conn := newReticulumConn(uint64(connID), "inbound", hash)
 	ev := acceptEvent{
 		listenerID: uint64(listenerID),
-		connID:     uint64(connID),
-		peerHash:   hash,
+		conn:       conn,
 	}
 	select {
 	case globalAcceptCh <- ev:
 	default:
-		// Channel full — should not happen with capacity 256; drop and log.
+		// Accept queue full — drop and clean up.
+		conn.Close()
 	}
 }
 
 //export goOnConnect
 func goOnConnect(taskID, connID C.uint64_t) {
-	if ch, ok := pendingDials.LoadAndDelete(uint64(taskID)); ok {
-		ch.(chan uint64) <- uint64(connID)
+	id := uint64(connID)
+	// Pre-register the dataCh so that any goOnData call arriving before
+	// DialContext creates the reticulumConn is buffered, not dropped.
+	dataCh := make(chan []byte, 256)
+	connDataChans.Store(id, dataCh)
+	if resultCh, ok := pendingDials.LoadAndDelete(uint64(taskID)); ok {
+		resultCh.(chan uint64) <- id
 	}
 }
 

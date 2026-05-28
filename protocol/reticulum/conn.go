@@ -19,8 +19,10 @@ var globalAcceptCh = make(chan acceptEvent, 256)
 
 type acceptEvent struct {
 	listenerID uint64
-	connID     uint64
-	peerHash   string
+	// conn is pre-created by goOnAccept with its dataCh already registered in
+	// connDataChans, so any goOnData calls arriving before handleConn runs are
+	// buffered rather than dropped.
+	conn *reticulumConn
 }
 
 // reticulumConn implements net.Conn using the Reticulum bridge.
@@ -41,8 +43,12 @@ type reticulumConn struct {
 }
 
 func newReticulumConn(id uint64, localName, remoteName string) *reticulumConn {
+	// Reuse a channel pre-registered by goOnAccept or goOnConnect to avoid
+	// dropping messages that arrive before handleConn/DialContext runs.
 	ch := make(chan []byte, 256)
-	connDataChans.Store(id, ch)
+	if actual, loaded := connDataChans.LoadOrStore(id, ch); loaded {
+		ch = actual.(chan []byte)
+	}
 	return &reticulumConn{
 		id:         id,
 		dataCh:     ch,

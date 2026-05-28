@@ -123,20 +123,20 @@ func (h *Inbound) acceptLoop() {
 				globalAcceptCh <- ev
 				continue
 			}
-			go h.handleConn(ev.connID, ev.peerHash)
+			go h.handleConn(ev.conn)
 		case <-h.doneCh:
 			return
 		}
 	}
 }
 
-func (h *Inbound) handleConn(connID uint64, peerHash string) {
-	raw := newReticulumConn(connID, "inbound", peerHash)
+func (h *Inbound) handleConn(raw *reticulumConn) {
 	fc := newFramedConn(raw)
 	go fc.dispatch()
 
 	defer fc.Close()
 
+	peerHash := raw.remoteAddr.String()
 	if h.options.Password != "" {
 		if err := h.negotiateAuth(fc, peerHash); err != nil {
 			h.logger.Error("reticulum auth failed: ", err)
