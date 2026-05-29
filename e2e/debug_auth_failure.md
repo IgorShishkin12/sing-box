@@ -177,20 +177,38 @@ link should always have a valid `session_cipher`. This should not cause the erro
 
 ---
 
+## Confirmed findings (empirical, from actual test runs)
+
+### simple-tcp test: PASSES after fixes
+
+Added `conn.write: status={:?}` logging (WARN level) in `connection.rs write()`.
+Full write sequence for a successful request:
+```
+link /7a4b.../ activated (event) cur_status=Active, dial successful
+conn.write: conn=1 link=/7a4b.../ status=Active len=2    ← trust hint
+conn.write: conn=1 link=/7a4b.../ status=Active len=65   ← HMAC challenge
+conn.write: conn=1 link=/7a4b.../ status=Active len=65   ← HMAC response
+conn.write: conn=1 link=/7a4b.../ status=Active len=15   ← dest header
+conn.write: conn=1 link=/7a4b.../ status=Active len=154  ← HTTP request (curl payload)
+can't create data packet for closed link                  ← teardown, after request done
+```
+
+The warning fires AFTER the HTTP data was delivered, during connection teardown.
+Root cause of the warning at teardown: sing-box's connection pipe may still attempt writes after
+`reticulum_close` marks the link Closed. Harmless — request completed before the link closed.
+
+### Previous "can't create on first write" failures
+Those failures were from the old binary (before the `reticulum_close → link.close()` fix). With
+the fix, the link is properly closed after each connection so `tp.link()` creates a fresh one on
+the next dial, and the SERVER fires a new `call_on_accept` each time.
+
 ## Next steps (in order)
 
-1. **Run a SINGLE-REQUEST test first** (simple-tcp), with a fresh `--no-cache` build, and collect
-   full logs. Determine if the single request (non-concurrent) passes after the 01:23 fixes.
-
-2. **If single request passes**: The concurrent load test (H1) is the remaining issue. Fix: prevent
-   link sharing between concurrent dials. Options:
-   - Serialize dials (allow only one active link per destination at a time)
-   - In `reticulum_dial`, before calling `tp.link()`, check if there's an existing non-Closed link
-     and wait/close it first.
-   - Multiplex multiple logical connections over one link (major protocol change).
-
-3. **If single request fails**: Collect full trace-level logs. Add logging around the
-   `link.data_packet()` call to print the link status at the exact moment of failure.
+1. **DONE**: simple-tcp passes — the single-request case is fixed.
+2. **Run full loadtest** (docker-compose.tcp.yml) to verify H1 (concurrent link sharing) is
+   also fixed. If 5 concurrent goroutines work correctly, the issue is resolved end-to-end.
+3. **Cleanup**: Remove the temporary WARN logging from `connection.rs write()` or downgrade to
+   DEBUG.
 
 ## Proposed fix for H1 (concurrent link sharing)
 

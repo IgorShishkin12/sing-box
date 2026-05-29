@@ -580,7 +580,7 @@ pub async fn dial_and_wait(
         let link_status = { link_clone.lock().await.status() };
         match link_status {
             LinkStatus::Active => {
-                log::info!("link {} active, dial successful", link_id);
+                log::info!("link {} active (poll), dial successful", link_id);
                 return Ok((link_clone, link_id));
             }
             LinkStatus::Closed | LinkStatus::Stale => {
@@ -593,7 +593,8 @@ pub async fn dial_and_wait(
         tokio::time::sleep(DIAL_POLL_INTERVAL).await;
         match link_events.try_recv() {
             Ok(event) if event.id == link_id && matches!(event.event, LinkEvent::Activated) => {
-                log::info!("link {} activated (event), dial successful", link_id);
+                let cur_status = { link_clone.lock().await.status() };
+                log::info!("link {} activated (event) cur_status={:?}, dial successful", link_id, cur_status);
                 return Ok((link_clone, link_id));
             }
             Ok(_) => {}

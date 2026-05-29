@@ -48,6 +48,11 @@ impl Connection {
     pub async fn write(&self, data: &[u8]) -> Result<usize, String> {
         let (packet, iface) = {
             let link_guard = self.link.lock().await;
+            let status = link_guard.status();
+            log::warn!(
+                "conn.write: conn={} link={} status={:?} len={}",
+                self.id, self.link_id, status, data.len()
+            );
             let packet = link_guard.data_packet(data)
                 .map_err(|e| format!("{:?}", e))?;
             (packet, link_guard.ingress_iface())
