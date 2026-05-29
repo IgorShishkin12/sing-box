@@ -80,7 +80,7 @@ pub extern "C" fn reticulum_init(
     if let Some(f) = on_close   { ON_CLOSE.store(f as usize, Ordering::Relaxed); }
 
     if config_json.is_null() {
-        log::error!("[bridge] config_json must not be null");
+        log::error!("config_json must not be null");
         return -1;
     }
     let c_str = match unsafe { CStr::from_ptr(config_json).to_str() } {
@@ -90,19 +90,19 @@ pub extern "C" fn reticulum_init(
     match config::parse_config(c_str) {
         Ok(cfg) => crate::set_global_config(Some(cfg)),
         Err(e) => {
-            log::error!("[bridge] config parse error: {}", e);
+            log::error!("config parse error: {}", e);
             return -1;
         }
     }
 
     if let Err(e) = runtime::init_runtime() {
-        log::error!("[bridge] runtime init failed: {}", e);
+        log::error!("runtime init failed: {}", e);
         return -1;
     }
 
     if let Some(cfg) = crate::get_global_config() {
         if let Err(e) = crate::transport::init_transport(cfg) {
-            log::error!("[bridge] init_transport failed: {}", e);
+            log::error!("init_transport failed: {}", e);
             return -1;
         }
     }
@@ -186,7 +186,7 @@ pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i64 {
         )
         .await
         {
-            log::warn!("[c_api] discovery dest registration failed: {}", e);
+            log::warn!("discovery dest registration failed: {}", e);
         }
 
         // Announce loop (auto-stop after 600 s).
@@ -210,7 +210,7 @@ pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i64 {
     match result {
         Ok(handle) => handle as i64,
         Err(e) => {
-            log::error!("[c_api] reticulum_listen failed: {}", e);
+            log::error!("reticulum_listen failed: {}", e);
             -1
         }
     }
@@ -259,7 +259,7 @@ pub extern "C" fn reticulum_dial(task_id: u64, destination_hash: *const c_char) 
                     call_on_connect(task_id, handle);
                 }
                 Err(e) => {
-                    log::warn!("[c_api] dial failed: {}", e);
+                    log::warn!("dial failed: {}", e);
                     call_on_connect(task_id, 0);
                 }
             }
@@ -283,7 +283,7 @@ pub extern "C" fn reticulum_write(conn_handle: u64, data: *const u8, len: usize)
             Some(conn) => match conn.write(data_slice).await {
                 Ok(n) => n as i32,
                 Err(e) => {
-                    log::warn!("[c_api] write on handle {}: {}", conn_handle, e);
+                    log::warn!("write on handle {}: {}", conn_handle, e);
                     -1
                 }
             },
@@ -328,7 +328,7 @@ pub extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
         for attempt in 0u32..MAX_ATTEMPTS {
             if attempt > 0 {
                 log::info!(
-                    "[c_api] no service announce for '{}' (attempt {}/{}), retrying in {:?}",
+                    "no service announce for '{}' (attempt {}/{}), retrying in {:?}",
                     name_str, attempt, MAX_ATTEMPTS, backoff
                 );
                 tokio::time::sleep(backoff).await;
@@ -339,16 +339,16 @@ pub extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 if let Err(e) = crate::transport::dial_discovery_and_wait(&knock_name).await {
-                    log::warn!("[c_api] discovery knock failed: {}", e);
+                    log::warn!("discovery knock failed: {}", e);
                 }
             });
 
             if let Some(hash) = crate::transport::wait_for_service_announce(&name_str, ANNOUNCE_WAIT).await {
-                log::info!("[c_api] resolved '{}' → {}", name_str, hash);
+                log::info!("resolved '{}' → {}", name_str, hash);
                 return Some(hash);
             }
         }
-        log::warn!("[c_api] gave up resolving '{}' after {} attempts", name_str, MAX_ATTEMPTS);
+        log::warn!("gave up resolving '{}' after {} attempts", name_str, MAX_ATTEMPTS);
         None
     });
 
