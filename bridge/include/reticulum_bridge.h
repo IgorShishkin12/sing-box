@@ -104,6 +104,12 @@ void reticulum_free(void* ptr);
  */
 char* reticulum_resolve_name(const char* name);
 
+/* Log callback type: (level, target, message) */
+typedef void (*reticulum_log_fn)(uint8_t, const char*, const char*);
+
+/* Register a Go log callback. Call before reticulum_init. */
+void reticulum_set_log_callback(reticulum_log_fn on_log);
+
 #ifdef __cplusplus
 }
 #endif

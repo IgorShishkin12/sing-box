@@ -10,18 +10,60 @@ package reticulum
 #cgo android,386   LDFLAGS: ${SRCDIR}/../../bridge/target/i686-linux-android/release/libsing_box_reticulum_bridge.a
 #cgo android,amd64 LDFLAGS: ${SRCDIR}/../../bridge/target/x86_64-linux-android/release/libsing_box_reticulum_bridge.a
 #include "reticulum_bridge.h"
+
+#include <stdlib.h>
+extern void goOnLog    (uint8_t level, char* target, char* message);
 */
 import "C"
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"unsafe"
+
+	"github.com/sagernet/sing-box/log"
 )
 
 var (
 	bridgeInitOnce sync.Once
 	bridgeInitErr  error
 )
+
+// bridgeLoggerVal holds the log.ContextLogger set by BridgeSetLogger.
+var bridgeLoggerVal atomic.Value // stores log.ContextLogger
+
+
+
+//export goOnLog
+func goOnLog(level C.uint8_t, target *C.char, message *C.char) {
+	logger, _ := bridgeLoggerVal.Load().(log.ContextLogger)
+	if logger == nil {
+		return
+	}
+	tgt := C.GoString(target)
+	msg := "[" + tgt + "] " + C.GoString(message)
+	switch uint8(level) {
+	case 1:
+		logger.Error(msg)
+	case 2:
+		logger.Warn(msg)
+	case 3:
+		logger.Info(msg)
+	case 4:
+		logger.Debug(msg)
+	default: // 5 = Trace
+		logger.Trace(msg)
+	}
+}
+
+
+// BridgeSetLogger wires the Go log.ContextLogger into the Rust log callback.
+// Call before BridgeInit to capture early initialisation events.
+func BridgeSetLogger(logger log.ContextLogger) {
+	bridgeLoggerVal.Store(logger)
+	C.reticulum_set_log_callback(C.reticulum_log_fn(C.goOnLog))
+}
+
 
 // BridgeInit initializes the Rust bridge with a JSON config string.
 // Only the first call crosses the CGO boundary; subsequent callers get the

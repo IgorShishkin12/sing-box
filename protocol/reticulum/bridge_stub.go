@@ -2,7 +2,13 @@
 
 package reticulum
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/sagernet/sing-box/log"
+)
+
+func BridgeSetLogger(_ log.ContextLogger) {}
 
 // BridgeInit is a stub that returns an error when the with_reticulum build tag is not set.
 func BridgeInit(configJSON string) error {
