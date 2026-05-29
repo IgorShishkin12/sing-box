@@ -71,6 +71,7 @@ func (fc *framedConn) dispatch() {
 	for {
 		msg, err := fc.raw.ReadMessage()
 		if err != nil {
+			pkgWarn("[framed_conn] dispatch: ReadMessage error: ", err)
 			fc.close()
 			return
 		}

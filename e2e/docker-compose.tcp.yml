@@ -12,6 +12,8 @@ services:
         sleep 2 &&
         sing-box run -c /etc/sing-box/config.json
       "
+    volumes:
+      - ./configs/server.json:/etc/sing-box/config.json:ro
     networks:
       - e2e-net
     healthcheck:
@@ -32,6 +34,8 @@ services:
         e2e-loadtest --socks 127.0.0.1:1080 --url http://127.0.0.1:8080 &&
         echo 'ALL E2E TESTS PASSED'
       "
+    volumes:
+      - ./configs/client.json:/etc/sing-box/config.json:ro
     networks:
       - e2e-net
     depends_on:

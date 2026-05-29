@@ -51,6 +51,7 @@ func goOnAccept(listenerID, connID C.uint64_t, peerHash *C.char) {
 	ch := make(chan []byte, 256)
 	connDataChans.Store(uint64(connID), ch)
 	hash := C.GoString(peerHash)
+	pkgWarn("[bridge] goOnAccept: listener=", uint64(listenerID), " conn=", uint64(connID))
 	ev := acceptEvent{
 		listenerID: uint64(listenerID),
 		connID:     uint64(connID),
@@ -59,7 +60,7 @@ func goOnAccept(listenerID, connID C.uint64_t, peerHash *C.char) {
 	select {
 	case globalAcceptCh <- ev:
 	default:
-		// Channel full — should not happen with capacity 256; drop and log.
+		pkgWarn("[bridge] goOnAccept: globalAcceptCh full, dropped event for conn=", uint64(connID))
 	}
 }
 
@@ -104,8 +105,12 @@ func goOnData(connID C.uint64_t, data *C.uint8_t, length C.size_t) {
 
 //export goOnClose
 func goOnClose(connID C.uint64_t) {
-	if ch, ok := connDataChans.LoadAndDelete(uint64(connID)); ok {
+	id := uint64(connID)
+	if ch, ok := connDataChans.LoadAndDelete(id); ok {
+		pkgWarn("[bridge] goOnClose: closing dataCh for conn ", id)
 		close(ch.(chan []byte))
+	} else {
+		pkgWarn("[bridge] goOnClose: no dataCh found for conn ", id, " (already closed or never registered)")
 	}
 }
 

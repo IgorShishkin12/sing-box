@@ -177,6 +177,134 @@ link should always have a valid `session_cipher`. This should not cause the erro
 
 ---
 
+## Root cause found (2026-05-29, session 3)
+
+### H5 — CLIENT's trust-hint write fails silently → negotiateAuth fails → link closes
+
+**Claim**: The `conn.write` log is emitted BEFORE `data_packet()` is called. If
+`data_packet()` returns `Err`, `reticulum_write` returns -1. Go sees a `WriteMsg` error →
+`negotiateAuth` returns error → `fc.Close()` → `reticulumConn.Close()` → link closes.
+
+**Observed evidence** (from goOnClose / dispatch tracing, timestamp logs):
+```
+12:07:31 [client] conn.write: conn=1 link=/0bf5d3d.../ status=Active len=2   ← logged BEFORE data_packet
+12:07:31 [client] [rns] close /0bf5d3d.../                                    ← link.close() from reticulum_close(1)
+12:07:31 [client] [bridge] goOnClose: no dataCh found for conn 1 (already closed or never registered)
+             ← reticulumConn.Close() already deleted dataCh from map before BridgeClose
+12:07:31 [client] [framed_conn] dispatch: ReadMessage error: EOF
+             ← c.closed was closed by reticulumConn.Close(); dispatch calls fc.close()
+12:07:31 [server] conn.write: len=2, 12, 65, 3, 65 (server auth)
+12:07:36 [server] outbound connection to 127.0.0.1:8080
+12:07:36 [server] close /link/
+12:07:36 [server] dispatch: ReadMessage error: EOF
+```
+
+**Sequence on CLIENT**:
+1. conn.write log fires (before packet creation)
+2. `data_packet()` returns Err → `reticulum_write` returns -1 → Go `reticulumConn.Write` returns error
+3. `framedConn.WriteMsg` returns error → `negotiateAuth` returns error → `fc.Close()` called
+4. `fc.Close()` → `reticulumConn.Close()` → `connDataChans.Delete(1)` + `BridgeClose(1)` + `close(c.closed)`
+5. `close(c.closed)` → dispatch sees `c.closed` → "dispatch: ReadMessage error: EOF" + `fc.close()`
+6. `BridgeClose(1)` → `reticulum_close(1)` → `link.close()` → "close /link/" + `call_on_close(1)`
+7. `goOnClose(1)` → `LoadAndDelete(1)` → not found (already deleted in step 4) → "no dataCh found"
+
+**The "no dataCh found" is NOT a bug — it's the expected result of `reticulumConn.Close()` deleting the
+channel before the subsequent `call_on_close` fires.**
+
+**Open question**: WHY does `data_packet()` fail when status=Active? Two sub-hypotheses:
+
+#### H5a — Encryption fails because `ingress_iface` is None
+
+`conn.write()` calls `link_guard.ingress_iface()` AFTER `data_packet()`. If `data_packet()` itself
+fails, the iface doesn't matter. But if `data_packet()` succeeds and only `send_direct` fails…
+actually `send_direct` failure is silent (no error return). So this can't be the cause.
+
+#### H5b — link status is NOT Active at the time of `data_packet()`
+
+The log says `status=Active` but the status is read SEPARATELY from `data_packet()`. Both hold the
+mutex, but they're sequential reads. The status could change between the log and `data_packet()`.
+
+Actually: the mutex IS held across BOTH lines:
+```rust
+let link_guard = self.link.lock().await;    // mutex acquired
+let status = link_guard.status();           // read 1
+log::warn!(..., status, ...);               // log
+let packet = link_guard.data_packet(data)  // read 2 (same lock)
+    .map_err(...)?;
+```
+`link_guard` holds the mutex for both reads. So status CANNOT change between log and
+`data_packet()`. If status=Active is logged, `can_exchange_data()` is true and the warning is not
+fired.
+
+#### H5c — Encryption fails because `ingress_iface` is None, causing `send_broadcast` to not send
+
+Wait, `data_packet()` → `encrypt_packet_data_into()` → `encrypt()`. If `session_cipher` is Some
+and functional (Active link should have it), encryption succeeds. `data_packet()` should return Ok.
+
+#### H5d — The trust hint write SUCCEEDS but a subsequent write fails
+
+Maybe it's NOT the trust hint write (len=2) that fails. Maybe a LATER write fails (client salt
+len=65 or client HMAC len=65) and we're misreading the log order. The `conn.write` log for len=2
+appears in the output, but the subsequent writes (len=65 × 2) do NOT appear.
+
+**CONFIRMED: this is the most likely explanation.** The CLIENT's auth sequence should be:
+- Write trust hint (len=2) ← LOGGED
+- Read server trust hint (ReadMsg, via dispatch → ctrlCh)
+- Write client salt (len=65) ← NOT LOGGED → this is where failure occurs
+- ...
+
+But `ReadMsg` reads from `ctrlCh`. `ctrlCh` is filled by `dispatch()` from link data. If the
+SERVER's auth messages arrive before `ReadMsg` is called, they're buffered. But if `dispatch()` is
+already closed (fc.closed), `ReadMsg` returns EOF immediately without waiting.
+
+**But**: the "dispatch: ReadMessage error: EOF" appears AFTER "close /link/". The dispatch is
+closed by `reticulumConn.Close()` (step 4 above). Step 4 happens only after `fc.Close()` in step
+3. Step 3 happens only after `negotiateAuth` returns error. So dispatch is closed AFTER auth fails.
+
+This means `ReadMsg()` in step "Read server trust hint" ALSO returns EOF. The auth fails on the
+READ step, not the write step. The trust hint write succeeded, then `ReadMsg` returned EOF because
+`fc.closed` was already set from somewhere.
+
+#### H5e — `fc.closed` is set BEFORE `ReadMsg` is called, but AFTER the trust hint write
+
+For `fc.closed` to be set, `fc.close()` must be called. `fc.close()` is called by `dispatch()` on
+error. For dispatch to error, `ReadMessage()` must fail. For `ReadMessage()` to fail, `dataCh`
+(the `reticulumConn.dataCh`, NOT `fc.dataCh`) must be closed, OR `c.closed` must fire.
+
+**`c.closed`** can only be fired by `reticulumConn.Close()`. But that's in step 4, after auth fails.
+**`dataCh`** can be closed by `goOnClose(1)`. But `goOnClose(1)` shows "no dataCh found" — meaning
+the channel was already deleted. It was deleted by `reticulumConn.Close()` (in step 4). But that's
+a chicken-and-egg problem again.
+
+**UNLESS**: there's a DIFFERENT `reticulumConn.Close()` call from a PRIOR connection with the same
+conn_id=1. If a previous dial left a conn_id=1 in a bad state...
+
+Actually: `goOnConnect` stores a NEW channel for conn_id=1. Then `newReticulumConn(1)` reuses it.
+If `goOnClose(1)` fired from a PREVIOUS call and closed+deleted the channel, then `goOnConnect`
+for conn_id=1 would store a NEW channel. But `newReticulumConn(1)` would load THIS new channel.
+So as long as the channel stored in `connDataChans[1]` is the same instance that `reticulumConn.dataCh`
+points to, there should be no issue.
+
+The "no dataCh found" proves `reticulumConn.Close()` ran (which deletes the entry). This proves
+`fc.Close()` was called. And `fc.Close()` is only called on error. So auth DID fail.
+
+**STILL OPEN**: what caused the FIRST failure that triggered `fc.Close()`? The auth error path is:
+- Write trust hint → ReadMsg → FAILS → auth error → `fc.Close()`
+
+`ReadMsg` fails when `fc.closed` fires before the server's trust hint arrives in `ctrlCh`.
+
+`fc.closed` fires from `fc.close()` from `dispatch()` when `ReadMessage()` fails.
+
+`dispatch()` runs in a separate goroutine. Is there a race where `dispatch()` errors BEFORE the server's auth data arrives?
+
+If `dispatch()` is the FIRST goroutine to run after `go fc.dispatch()` is called, it immediately tries to call `ReadMessage()`. At that point, the server's trust hint might not have arrived yet in `dataCh`. So `ReadMessage()` would BLOCK (not error), waiting for data.
+
+The only way `ReadMessage()` returns an error is if `dataCh` or `c.closed` signals. But `dataCh` is a fresh channel (from `goOnConnect`) and `c.closed` is a fresh channel. Neither is closed.
+
+**FINAL HYPOTHESIS**: There must be a timing issue where the CLIENT closes the conn BEFORE the server's first auth message arrives. If the pipe terminates (no response from server in time) OR if there's a context cancellation, `fc.Close()` could be called while dispatch is waiting.
+
+**NEXT STEP**: add logging at the actual WriteMsg/ReadMsg call sites in negotiateAuth to confirm WHICH message fails and with what error.
+
 ## Confirmed findings (empirical, from actual test runs)
 
 ### simple-tcp test: PASSES after fixes

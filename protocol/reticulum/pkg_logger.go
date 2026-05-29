@@ -17,3 +17,9 @@ func pkgTrace(args ...interface{}) {
 		l.Trace(args...)
 	}
 }
+
+func pkgWarn(args ...interface{}) {
+	if l, _ := bridgeLoggerVal.Load().(log.ContextLogger); l != nil {
+		l.Warn(args...)
+	}
+}
