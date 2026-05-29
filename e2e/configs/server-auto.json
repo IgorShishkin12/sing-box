@@ -8,17 +8,15 @@
     {
       "type": "reticulum",
       "tag": "reticulum-in",
-      "name": "e2e-sum-server",
+      "name": "e2e-sum-server-auto",
       "password": "e2e-test-password",
       "reticulum_config": {
-        "identity_name": "e2e-server",
-        "storage_path": "/var/lib/reticulum/server",
+        "identity_name": "e2e-server-auto",
+        "storage_path": "/var/lib/reticulum/server-auto",
         "interfaces": [
           {
-            "name": "Reticulum TCP Server",
-            "type": "TCPServerInterface",
-            "listen_ip": "0.0.0.0",
-            "listen_port": 7788
+            "name": "Auto Interface",
+            "type": "AutoInterface"
           }
         ]
       }

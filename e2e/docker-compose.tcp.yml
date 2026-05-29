@@ -1,41 +1,41 @@
-name: retv2run
+name: retv2e2e-tcp
 
 services:
   e2e-server:
-    image: reticulum-v2-e2e_e2e-server:latest
     build:
-      context: .
-      dockerfile: Dockerfile.e2e.server
+      context: ..
+      dockerfile: e2e/Dockerfile.server
+    image: retv2e2e-server
     command: >
       -c "
         sum-server &
         sleep 2 &&
         sing-box run -c /etc/sing-box/config.json
       "
+    volumes:
+      - ./configs/server.json:/etc/sing-box/config.json:ro
     networks:
       - e2e-net
     healthcheck:
       test: ["CMD-SHELL", "pgrep -x sing-box > /dev/null 2>&1 || exit 1"]
       interval: 5s
       timeout: 5s
-      retries: 12
+      retries: 18
       start_period: 30s
 
   e2e-client:
-    image: reticulum-v2-e2e_e2e-client:latest
     build:
-      context: .
-      dockerfile: Dockerfile.e2e.client
+      context: ..
+      dockerfile: e2e/Dockerfile.client
+    image: retv2e2e-client
     command: >
       -c "
         sing-box run -c /etc/sing-box/config.json &
-        sleep 20 &&
-        RESP=$(curl -sf --socks5-hostname 127.0.0.1:1080 http://127.0.0.1:8080/sum \
-          -H 'Content-Type: application/json' -d '{\"a\":3,\"b\":5}') &&
-        echo \"Response: $$RESP\" &&
-        echo \"$$RESP\" | grep -q '\"sum\":8' &&
-        echo 'E2E TEST PASSED: 3 + 5 = 8'
+        e2e-loadtest --socks 127.0.0.1:1080 --url http://127.0.0.1:8080 &&
+        echo 'ALL E2E TESTS PASSED'
       "
+    volumes:
+      - ./configs/client.json:/etc/sing-box/config.json:ro
     networks:
       - e2e-net
     depends_on:

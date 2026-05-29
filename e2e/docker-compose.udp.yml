@@ -1,0 +1,41 @@
+name: retv2e2e-udp
+
+services:
+  e2e-server-udp:
+    image: retv2e2e-server
+    command: >
+      -c "
+        sum-server &
+        sleep 2 &&
+        sing-box run -c /etc/sing-box/config.json
+      "
+    volumes:
+      - ./configs/server-udp.json:/etc/sing-box/config.json:ro
+    networks:
+      - e2e-net
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x sing-box > /dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
+  e2e-client-udp:
+    image: retv2e2e-client
+    command: >
+      -c "
+        sing-box run -c /etc/sing-box/config.json &
+        e2e-loadtest --socks 127.0.0.1:1080 --url http://127.0.0.1:8080 &&
+        echo 'UDP E2E TESTS PASSED'
+      "
+    volumes:
+      - ./configs/client-udp.json:/etc/sing-box/config.json:ro
+    networks:
+      - e2e-net
+    depends_on:
+      e2e-server-udp:
+        condition: service_healthy
+
+networks:
+  e2e-net:
+    driver: bridge
