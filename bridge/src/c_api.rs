@@ -166,14 +166,14 @@ pub extern "C" fn reticulum_dial(destination_hash: *const c_char) -> i32 {
             Some(transport) => {
                 // Subscribe to data events BEFORE dialing so we capture packets
                 // that arrive the instant the link activates on the server side.
-                let data_rx = {
+                let (data_rx, link_closed_rx) = {
                     let tp = transport.lock().await;
-                    tp.received_data_events()
+                    (tp.received_data_events(), tp.out_link_events())
                 };
                 match crate::transport::dial_and_wait(&dest).await {
                     Ok((link, link_id)) => {
                         let conn = crate::connection::Connection::new_from_link(link, link_id);
-                        crate::transport::spawn_link_data_reader(conn.clone(), link_id, data_rx);
+                        crate::transport::spawn_link_data_reader(conn.clone(), link_id, data_rx, link_closed_rx);
                         let handle = store.insert_connection(conn).await;
                         registry
                             .complete(
@@ -382,11 +382,24 @@ pub extern "C" fn reticulum_get_listener_hash(listener_handle: u64) -> *mut c_ch
 }
 
 /// Close a connection or listener handle.
+/// For connections, also closes the underlying Reticulum link so that the next
+/// dial to the same destination creates a new link (and triggers a new server accept event).
 #[no_mangle]
 pub extern "C" fn reticulum_close(handle: u64) {
     let store = global_store();
     runtime::block_on(async move {
-        store.remove(handle).await;
+        match store.remove(handle).await {
+            Some(crate::store::StoreEntry::Connection(conn)) => {
+                log::info!("[c_api] reticulum_close: closing connection handle={}, closing link", handle);
+                conn.close_link().await;
+            }
+            Some(crate::store::StoreEntry::Listener(_)) => {
+                log::info!("[c_api] reticulum_close: closing listener handle={}", handle);
+            }
+            None => {
+                log::warn!("[c_api] reticulum_close: handle={} not found in store", handle);
+            }
+        }
     });
 }
 
@@ -481,7 +494,7 @@ pub extern "C" fn reticulum_read(conn_handle: u64, buffer: *mut u8, max_len: usi
 
     runtime::block_on(async move {
         match store.get_connection(conn_handle).await {
-            Some(conn) => conn.read(buffer_slice).await as i32,
+            Some(conn) => conn.read(buffer_slice).await, // i32: >0 bytes, 0 no data, -1 EOF
             None => -1,
         }
     })

@@ -51,14 +51,16 @@ type Inbound struct {
 	accepting   bool
 	mu          sync.Mutex
 	closed      bool
+	trustStore  *TrustStore
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ReticulumInboundOptions) (adapter.Inbound, error) {
 	return &Inbound{
-		Adapter: inbound.NewAdapter(C.TypeReticulum, tag),
-		router:  router,
-		logger:  logger,
-		options: options,
+		Adapter:    inbound.NewAdapter(C.TypeReticulum, tag),
+		router:     router,
+		logger:     logger,
+		options:    options,
+		trustStore: NewTrustStore(),
 	}, nil
 }
 
@@ -128,31 +130,69 @@ func (h *Inbound) acceptLoop() {
 			continue
 		}
 
-		conn := newReticulumConn(handle, "inbound", fmt.Sprintf("listener-%d", h.listenerHdl))
+		// Get peer hash for trust store lookup (may be empty if unavailable).
+		peerHash, _ := BridgeGetListenerHash(h.listenerHdl)
 
-		if h.options.Password != "" {
-			if err := ServerAuth(conn, h.options.Password); err != nil {
-				h.logger.Error("reticulum auth failed: ", err)
-				conn.Close()
-				continue
-			}
-		}
+		raw := newReticulumConn(handle, "inbound", fmt.Sprintf("listener-%d", h.listenerHdl))
+		fc := newFramedConn(raw)
 
-		destAddr, err := readDestHeader(conn)
-		if err != nil {
-			h.logger.Error("reticulum: read dest header: ", err)
-			conn.Close()
-			continue
-		}
+		// Handle each connection concurrently so the accept loop can
+		// immediately issue the next BridgeAccept.
+		go h.handleConn(fc, peerHash)
+	}
+}
 
-		if h.router != nil {
-			metadata := adapter.InboundContext{
-				Network:     "tcp",
-				Destination: M.ParseSocksaddr(destAddr),
-			}
-			h.router.RouteConnectionEx(context.Background(), conn, metadata, nil)
+func (h *Inbound) handleConn(fc *framedConn, peerHash string) {
+	defer fc.Close()
+
+	if h.options.Password != "" {
+		if err := negotiateServerAuth(fc, h.options.Password, peerHash, h.trustStore, h.logger); err != nil {
+			h.logger.Error("reticulum auth failed: ", err)
+			return
 		}
 	}
+
+	fc.OpenGate()
+
+	destAddr, err := readDestHeader(fc)
+	if err != nil {
+		h.logger.Error("reticulum: read dest header: ", err)
+		return
+	}
+
+	if h.router != nil {
+		metadata := adapter.InboundContext{
+			Network:     "tcp",
+			Destination: M.ParseSocksaddr(destAddr),
+		}
+		h.router.RouteConnectionEx(context.Background(), fc, metadata, nil)
+	}
+}
+
+// negotiateServerAuth performs the server-side auth negotiation.
+// If the peer is in the trust store, skips full auth; otherwise runs ServerAuth.
+func negotiateServerAuth(fc *framedConn, password, peerHash string, ts *TrustStore, logger log.ContextLogger) error {
+	if peerHash != "" {
+		tok := TrustToken(password, peerHash)
+		if ts.Check(peerHash, tok) {
+			// Trusted peer: send hint byte 0x01 and skip full auth.
+			if err := fc.WriteMsg([]byte{0x01}); err != nil {
+				return fmt.Errorf("write trust hint: %w", err)
+			}
+			return nil
+		}
+	}
+	// Unknown peer: send hint byte 0x00 and do full auth.
+	if err := fc.WriteMsg([]byte{0x00}); err != nil {
+		return fmt.Errorf("write auth hint: %w", err)
+	}
+	if err := ServerAuth(fc, password); err != nil {
+		return err
+	}
+	if peerHash != "" {
+		ts.Store(peerHash, TrustToken(password, peerHash))
+	}
+	return nil
 }
 
 func (h *Inbound) Close() error {

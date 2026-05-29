@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use reticulum_rs::transport::destination::link::Link;
@@ -19,6 +19,8 @@ enum ConnectionInner {
         link: Arc<Mutex<Link>>,
         link_id: AddressHash,
         read_buf: Arc<RwLock<Vec<u8>>>,
+        /// Set to true when the link closes so BridgeRead returns -1 (EOF).
+        eof: Arc<AtomicBool>,
     },
     /// In-memory buffered connection — test use only.
     #[cfg(test)]
@@ -56,6 +58,7 @@ impl Connection {
                 link,
                 link_id,
                 read_buf: Arc::new(RwLock::new(Vec::new())),
+                eof: Arc::new(AtomicBool::new(false)),
             },
         }
     }
@@ -82,6 +85,41 @@ impl Connection {
 
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Signal EOF so that subsequent read() calls return -1.
+    pub async fn push_eof(&self) {
+        if let ConnectionInner::Link { eof, .. } = &self.inner {
+            eof.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Close the underlying Reticulum link.  Sends a teardown packet to the peer
+    /// (notifying it to close too) then marks the link Closed locally.
+    /// Only acts if the link is still Active or Stale; idempotent otherwise.
+    pub async fn close_link(&self) {
+        if let ConnectionInner::Link { link, .. } = &self.inner {
+            let (packet, iface) = {
+                let mut guard = link.lock().await;
+                use reticulum_rs::transport::destination::link::LinkStatus;
+                if !matches!(guard.status(), LinkStatus::Active | LinkStatus::Stale) {
+                    return; // already closed
+                }
+                let iface = guard.ingress_iface();
+                let packet = guard.teardown(); // sends teardown + sets Closed
+                (packet, iface)
+            };
+            if let Some(packet) = packet {
+                if let Some(transport) = crate::transport::get_transport() {
+                    let tp = transport.lock().await;
+                    if let Some(iface) = iface {
+                        tp.send_direct(iface, packet).await;
+                    } else {
+                        tp.send_broadcast(packet, None).await;
+                    }
+                }
+            }
+        }
     }
 
     /// Write data to the connection.
@@ -117,17 +155,21 @@ impl Connection {
     }
 
     /// Read data from the connection's read buffer.
-    pub async fn read(&self, buf: &mut [u8]) -> usize {
+    /// Returns: > 0 = bytes read, 0 = no data (try again), -1 = EOF (link closed).
+    pub async fn read(&self, buf: &mut [u8]) -> i32 {
         match &self.inner {
-            ConnectionInner::Link { read_buf, .. } => {
+            ConnectionInner::Link { read_buf, eof, .. } => {
                 let mut buf_lock = read_buf.write().await;
                 if buf_lock.is_empty() {
+                    if eof.load(Ordering::SeqCst) {
+                        return -1; // link closed, signal EOF
+                    }
                     return 0;
                 }
                 let len = buf.len().min(buf_lock.len());
                 buf[..len].copy_from_slice(&buf_lock[..len]);
                 buf_lock.drain(..len);
-                len
+                len as i32
             }
             #[cfg(test)]
             ConnectionInner::Memory { read_buf, .. } => {
@@ -138,7 +180,7 @@ impl Connection {
                 let len = buf.len().min(read_buf.len());
                 buf[..len].copy_from_slice(&read_buf[..len]);
                 read_buf.drain(..len);
-                len
+                len as i32
             }
         }
     }
@@ -302,6 +344,16 @@ mod tests {
         let read = conn.read(&mut buf).await;
         assert_eq!(read, 10);
         assert_eq!(&buf, b"hello link");
+    }
+
+    #[tokio::test]
+    async fn test_link_connection_push_eof() {
+        let (link, link_id) = make_test_link();
+        let conn = Connection::new_from_link(link, link_id);
+        conn.push_eof().await;
+        let mut buf = [0u8; 4];
+        let read = conn.read(&mut buf).await;
+        assert_eq!(read, -1, "read after push_eof should return -1");
     }
 
     #[tokio::test]

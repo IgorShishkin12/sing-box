@@ -54,5 +54,9 @@ func main() {
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	log.Printf("sum server listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	// DisableKeepAlives ensures each HTTP response closes the TCP connection.
+	// Without this, the Reticulum tunnel's data relay never terminates cleanly.
+	server := &http.Server{Addr: addr}
+	server.SetKeepAlivesEnabled(false)
+	log.Fatal(server.ListenAndServe())
 }

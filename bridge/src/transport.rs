@@ -14,7 +14,7 @@ use tokio::sync::{broadcast, watch};
 use tokio::sync::Mutex;
 
 use rand_core::OsRng;
-use reticulum_rs::transport::destination::link::{Link, LinkEvent, LinkStatus};
+use reticulum_rs::transport::destination::link::{Link, LinkEvent, LinkEventData, LinkStatus};
 use reticulum_rs::transport::destination::{DestinationDesc, DestinationName, SingleInputDestination};
 use reticulum_rs::transport::hash::AddressHash;
 use reticulum_rs::transport::identity::{Identity, PrivateIdentity};
@@ -342,12 +342,12 @@ pub async fn register_listener_destination(
                             );
                             // Subscribe BEFORE push_connection so no data sent by the
                             // client immediately after link setup is missed.
-                            let data_rx = {
+                            let (data_rx, link_closed_rx) = {
                                 let tp = transport.lock().await;
-                                tp.received_data_events()
+                                (tp.received_data_events(), tp.in_link_events())
                             };
                             let conn = Connection::new_from_link(link.clone(), event.id);
-                            spawn_link_data_reader(conn.clone(), event.id, data_rx);
+                            spawn_link_data_reader(conn.clone(), event.id, data_rx, link_closed_rx);
                             listener_clone.push_connection(conn).await;
                         }
                         // Links for the discovery dest or other dests are ignored here.
@@ -606,30 +606,55 @@ pub async fn dial_discovery_and_wait(name: &str) -> Result<(), &'static str> {
 // ---------------------------------------------------------------------------
 
 /// Spawn a background task that forwards inbound link data into a connection's
-/// read buffer.
+/// read buffer, and signals EOF when the link closes.
 ///
-/// `data_rx` must already be subscribed to the transport's `received_data_events`
-/// channel **before** this function is called — typically before the link request
-/// is sent — so that no data packets are lost to the broadcast-channel race where
-/// the server starts writing before the reader has subscribed.
+/// `data_rx` must be subscribed **before** the link request is sent to avoid
+/// missing data packets that arrive immediately after link activation.
+/// `link_closed_rx` should be a receiver on the relevant link event channel
+/// (out_link_events for dial, in_link_events for accept).
 pub fn spawn_link_data_reader(
     conn: Connection,
     link_id: AddressHash,
-    mut data_rx: broadcast::Receiver<ReceivedData>,
+    data_rx: broadcast::Receiver<ReceivedData>,
+    link_closed_rx: broadcast::Receiver<LinkEventData>,
 ) {
     tokio::spawn(async move {
+        let mut data_rx = data_rx;
+        let mut link_closed_rx = link_closed_rx;
         loop {
-            match data_rx.recv().await {
-                Ok(data) => {
-                    if data.destination == link_id {
-                        conn.push_read_data(data.data.as_slice()).await;
+            tokio::select! {
+                data_res = data_rx.recv() => {
+                    match data_res {
+                        Ok(data) => {
+                            if data.destination == link_id {
+                                conn.push_read_data(data.data.as_slice()).await;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            log::warn!("[bridge-tp] data channel closed, EOF for link {}", link_id);
+                            conn.push_eof().await;
+                            break;
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
                     }
                 }
-                Err(broadcast::error::RecvError::Closed) => {
-                    log::warn!("[bridge-tp] data event channel closed");
-                    break;
+                ev_res = link_closed_rx.recv() => {
+                    match ev_res {
+                        Ok(ev) if ev.id == link_id => {
+                            if matches!(ev.event, LinkEvent::Closed) {
+                                log::info!("[bridge-tp] link {} closed, signalling EOF", link_id);
+                                conn.push_eof().await;
+                                break;
+                            }
+                        }
+                        Ok(_) => {} // different link
+                        Err(broadcast::error::RecvError::Closed) => {
+                            conn.push_eof().await;
+                            break;
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
             }
         }
     });

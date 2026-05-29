@@ -20,6 +20,20 @@ func RegisterOutbound(registry *outbound.Registry) {
 	outbound.Register[option.ReticulumOutboundOptions](registry, C.TypeReticulum, NewOutbound)
 }
 
+// serializedConn wraps a net.Conn and releases a per-destination mutex on Close,
+// ensuring at most one active Reticulum connection per destination at a time.
+type serializedConn struct {
+	net.Conn
+	mu   *sync.Mutex
+	once sync.Once
+}
+
+func (sc *serializedConn) Close() error {
+	err := sc.Conn.Close()
+	sc.once.Do(func() { sc.mu.Unlock() })
+	return err
+}
+
 type Outbound struct {
 	outbound.Adapter
 	network      []string
@@ -29,15 +43,18 @@ type Outbound struct {
 	bridgeInited bool
 	resolvedHash string // Reticulum destination hash, cached after first resolution
 	mu           sync.Mutex
+	trustStore   *TrustStore
+	dialMu       sync.Map // destHash → *sync.Mutex; serializes dials per destination
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ReticulumOutboundOptions) (adapter.Outbound, error) {
 	return &Outbound{
-		Adapter: outbound.NewAdapterWithDialerOptions(C.TypeReticulum, tag, options.Network.Build(), options.DialerOptions),
-		network: options.Network.Build(),
-		router:  router,
-		logger:  logger,
-		options: options,
+		Adapter:    outbound.NewAdapterWithDialerOptions(C.TypeReticulum, tag, options.Network.Build(), options.DialerOptions),
+		network:    options.Network.Build(),
+		router:     router,
+		logger:     logger,
+		options:    options,
+		trustStore: NewTrustStore(),
 	}, nil
 }
 
@@ -83,6 +100,12 @@ func (h *Outbound) Dependencies() []string {
 	return nil
 }
 
+// perDestMu returns (and lazily creates) the per-destination mutex.
+func (h *Outbound) perDestMu(destHash string) *sync.Mutex {
+	v, _ := h.dialMu.LoadOrStore(destHash, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
 func (h *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	h.mu.Lock()
 	inited := h.bridgeInited
@@ -108,8 +131,14 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 		destHash = hash
 	}
 
+	// Serialize dials per destination: only one active Reticulum connection at a
+	// time prevents concurrent goroutines from racing on the shared link.
+	mu := h.perDestMu(destHash)
+	mu.Lock()
+
 	taskID, err := BridgeDial(destHash)
 	if err != nil {
+		mu.Unlock()
 		return nil, err
 	}
 
@@ -118,12 +147,14 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 	if ok {
 		timeout = time.Until(deadline)
 		if timeout <= 0 {
+			mu.Unlock()
 			return nil, context.DeadlineExceeded
 		}
 	}
 
 	handle, err := BridgePollTask(taskID, timeout)
 	if err != nil {
+		mu.Unlock()
 		return nil, err
 	}
 
@@ -131,21 +162,46 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 	if h.options.Name != "" {
 		localName = h.options.Name
 	}
-	conn := newReticulumConn(handle, localName, destHash)
+	raw := newReticulumConn(handle, localName, destHash)
+	fc := newFramedConn(raw)
 
 	if h.options.Password != "" {
-		if err := ClientAuth(conn, h.options.Password); err != nil {
-			conn.Close()
+		if err := negotiateClientAuth(fc, h.options.Password, destHash, h.trustStore); err != nil {
+			fc.Close()
+			mu.Unlock()
 			return nil, fmt.Errorf("reticulum auth failed: %w", err)
 		}
 	}
 
-	if err := writeDestHeader(conn, destination.String()); err != nil {
-		conn.Close()
+	fc.OpenGate()
+
+	if err := writeDestHeader(fc, destination.String()); err != nil {
+		fc.Close()
+		mu.Unlock()
 		return nil, fmt.Errorf("reticulum: write dest header: %w", err)
 	}
 
-	return conn, nil
+	// Wrap conn so the per-dest mutex is released when the connection closes.
+	return &serializedConn{Conn: fc, mu: mu}, nil
+}
+
+// negotiateClientAuth performs the client-side auth negotiation.
+// Reads the server's trust hint; if trusted (0x01), skips full auth.
+func negotiateClientAuth(fc *framedConn, password, destHash string, ts *TrustStore) error {
+	hint, err := fc.ReadMsg()
+	if err != nil {
+		return fmt.Errorf("read trust hint: %w", err)
+	}
+	if len(hint) > 0 && hint[0] == 0x01 {
+		return nil // server trusts us, skip full auth
+	}
+	if err := ClientAuth(fc, password); err != nil {
+		return err
+	}
+	if destHash != "" {
+		ts.Store(destHash, TrustToken(password, destHash))
+	}
+	return nil
 }
 
 func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
