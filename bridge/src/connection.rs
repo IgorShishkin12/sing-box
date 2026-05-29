@@ -38,6 +38,8 @@ impl Connection {
 
     pub fn id(&self) -> u64 { self.id }
 
+    pub fn link(&self) -> &Arc<Mutex<Link>> { &self.link }
+
     pub fn link_id(&self) -> AddressHash { self.link_id }
 
     pub fn peer_hash(&self) -> &str { &self.peer_hash }

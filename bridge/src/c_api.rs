@@ -297,7 +297,16 @@ pub extern "C" fn reticulum_write(conn_handle: u64, data: *const u8, len: usize)
 pub extern "C" fn reticulum_close(handle: u64) {
     let store = global_store();
     runtime::block_on(async move {
-        store.remove(handle).await;
+        let entry = store.remove(handle).await;
+        // Close the underlying Reticulum link when a Connection is removed.
+        // This marks the link as Closed so the next DialContext call creates a
+        // fresh link and the server fires call_on_accept again. Without this,
+        // tp.link() reuses the existing active link and the server never gets a
+        // new call_on_accept, causing subsequent connections to hang.
+        if let Some(crate::store::StoreEntry::Connection(conn)) = entry {
+            conn.link().lock().await.close();
+            log::debug!("reticulum_close: closed link for conn handle {}", handle);
+        }
     });
     // on_close is fired by the data reader task when the channel closes naturally,
     // but force-fire it here too so Go always gets notified.

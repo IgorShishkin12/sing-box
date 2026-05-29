@@ -40,9 +40,6 @@ var pendingDials sync.Map // uint64 → chan uint64
 // nextTaskSeq generates unique task IDs for outbound dials.
 var nextTaskSeq atomic.Uint64
 
-// bridgeLoggerVal holds the log.ContextLogger set by BridgeSetLogger.
-var bridgeLoggerVal atomic.Value // stores log.ContextLogger
-
 // ---------------------------------------------------------------------------
 // Exported callbacks (called from Rust tokio threads)
 // ---------------------------------------------------------------------------
@@ -92,7 +89,15 @@ func goOnData(connID C.uint64_t, data *C.uint8_t, length C.size_t) {
 		select {
 		case ch.(chan []byte) <- buf:
 		default:
-			// Receiver is not keeping up; drop packet to avoid blocking Rust.
+			// dataCh full — receiver is not keeping up; drop packet.
+			if logger, _ := bridgeLoggerVal.Load().(log.ContextLogger); logger != nil {
+				logger.Trace("[bridge] goOnData: dataCh full, dropped ", n, "B for conn ", uint64(connID))
+			}
+		}
+	} else {
+		// conn not yet registered (race window) or already closed.
+		if logger, _ := bridgeLoggerVal.Load().(log.ContextLogger); logger != nil {
+			logger.Trace("[bridge] goOnData: conn ", uint64(connID), " not registered, dropped ", n, "B")
 		}
 	}
 }

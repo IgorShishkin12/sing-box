@@ -30,6 +30,12 @@ const (
 
 	maxDataQueue = 256 // pre-gate data frames before dropping
 	maxCtrlQueue = 32  // ctrl frame buffer (auth messages)
+
+	// maxFramePayload is the maximum user-data bytes per Reticulum DATA packet.
+	// Reticulum's PACKET_MDU is 464 bytes; after link-layer encryption overhead
+	// (~32 bytes) and our 1-byte type prefix the safe plaintext budget is ~431 B.
+	// We use 400 to leave margin for encryption variants.
+	maxFramePayload = 400
 )
 
 // AuthIO is the transport interface used by ServerAuth / ClientAuth.
@@ -79,12 +85,14 @@ func (fc *framedConn) dispatch() {
 			case fc.dataCh <- payload:
 			default:
 				// Queue full — drop frame (allowed packet loss during auth)
+				pkgTrace("[framed_conn] dispatch: dataCh full, dropped ", len(payload), "B DATA frame")
 			}
 		} else if typeByte == typeAuthCtrl {
 			select {
 			case fc.ctrlCh <- payload:
 			default:
-				// Ctrl queue full — shouldn't happen; auth will time out if so
+				// Ctrl queue full — auth will time out
+				pkgTrace("[framed_conn] dispatch: ctrlCh full, dropped AUTH_CTRL frame")
 			}
 		} else if typeByte == typeReauthReq {
 			// Re-auth requested by peer. TODO: trigger re-auth goroutine.
@@ -168,23 +176,32 @@ func (fc *framedConn) Read(b []byte) (int, error) {
 	}
 }
 
-// Write sends a DATA frame.
+// Write sends one or more DATA frames. Payloads larger than maxFramePayload
+// are split into multiple frames so each fits within the Reticulum packet MDU.
 func (fc *framedConn) Write(b []byte) (int, error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
-	msg := make([]byte, 1+len(b))
-	msg[0] = typeData
-	copy(msg[1:], b)
-	n, err := fc.raw.Write(msg)
-	if err != nil {
-		return 0, err
+	total := 0
+	for len(b) > 0 {
+		chunk := b
+		if len(chunk) > maxFramePayload {
+			chunk = b[:maxFramePayload]
+		}
+		msg := make([]byte, 1+len(chunk))
+		msg[0] = typeData
+		copy(msg[1:], chunk)
+		n, err := fc.raw.Write(msg)
+		if err != nil {
+			return total, err
+		}
+		if n > 0 {
+			n-- // subtract the type byte
+		}
+		total += n
+		b = b[len(chunk):]
 	}
-	// Subtract the type byte from the reported write count.
-	if n > 0 {
-		n--
-	}
-	return n, nil
+	return total, nil
 }
 
 func (fc *framedConn) LocalAddr() net.Addr                { return fc.raw.LocalAddr() }
