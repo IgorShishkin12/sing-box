@@ -41,8 +41,15 @@ type reticulumConn struct {
 }
 
 func newReticulumConn(id uint64, localName, remoteName string) *reticulumConn {
-	ch := make(chan []byte, 256)
-	connDataChans.Store(id, ch)
+	// Reuse a channel pre-registered by goOnConnect/goOnAccept if present,
+	// so that packets arriving in the race window before this call are not lost.
+	var ch chan []byte
+	if v, ok := connDataChans.Load(id); ok {
+		ch = v.(chan []byte)
+	} else {
+		ch = make(chan []byte, 256)
+		connDataChans.Store(id, ch)
+	}
 	return &reticulumConn{
 		id:         id,
 		dataCh:     ch,

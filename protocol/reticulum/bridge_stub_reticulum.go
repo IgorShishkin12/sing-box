@@ -49,6 +49,10 @@ var bridgeLoggerVal atomic.Value // stores log.ContextLogger
 
 //export goOnAccept
 func goOnAccept(listenerID, connID C.uint64_t, peerHash *C.char) {
+	// Pre-register the data channel immediately so that goOnData does not
+	// drop packets that arrive before handleConn calls newReticulumConn.
+	ch := make(chan []byte, 256)
+	connDataChans.Store(uint64(connID), ch)
 	hash := C.GoString(peerHash)
 	ev := acceptEvent{
 		listenerID: uint64(listenerID),
@@ -64,8 +68,15 @@ func goOnAccept(listenerID, connID C.uint64_t, peerHash *C.char) {
 
 //export goOnConnect
 func goOnConnect(taskID, connID C.uint64_t) {
+	id := uint64(connID)
+	if id != 0 {
+		// Pre-register the data channel immediately so that goOnData does not
+		// drop packets that arrive before DialContext calls newReticulumConn.
+		ch := make(chan []byte, 256)
+		connDataChans.Store(id, ch)
+	}
 	if ch, ok := pendingDials.LoadAndDelete(uint64(taskID)); ok {
-		ch.(chan uint64) <- uint64(connID)
+		ch.(chan uint64) <- id
 	}
 }
 
