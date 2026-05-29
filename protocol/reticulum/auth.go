@@ -104,6 +104,7 @@ func ServerAuth(io AuthIO, password string) error {
 // Returns nil on success. On failure the caller should close the connection.
 func ClientAuth(io AuthIO, password string) error {
 	header, err := io.ReadMsg()
+	pkgWarn("[auth] ClientAuth: first ReadMsg got len=", len(header), " val=", header[:min(len(header), 20)], " err=", err)
 	if err != nil {
 		return E.Cause(err, "auth: read header")
 	}

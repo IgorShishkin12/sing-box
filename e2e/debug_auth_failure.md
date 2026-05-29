@@ -177,6 +177,20 @@ link should always have a valid `session_cipher`. This should not cause the erro
 
 ---
 
+## Current status (2026-05-29, session 3)
+
+simple-tcp test: **PASSES 5/5 runs** after the `reticulum_close → link.close()` fix.
+
+Two remaining warnings (benign, do not cause test failure):
+1. `can't create data packet for closed link` — fires ~20s after request completes during
+   the library watchdog teardown of the idle link (confirmed: Stale→teardown). Root: library
+   bug where `teardown_packet()` calls `packet_with_context()` which warns for non-Active status,
+   even though Stale links are valid teardown targets. **Benign.**
+2. `close /link/` from `finalize_local_close()` — always fires when link is torn down. Normal.
+
+One intermittent failure mode (observed once, not reproducible):
+See H5 below.
+
 ## Root cause found (2026-05-29, session 3)
 
 ### H5 — CLIENT's trust-hint write fails silently → negotiateAuth fails → link closes
@@ -301,9 +315,28 @@ If `dispatch()` is the FIRST goroutine to run after `go fc.dispatch()` is called
 
 The only way `ReadMessage()` returns an error is if `dataCh` or `c.closed` signals. But `dataCh` is a fresh channel (from `goOnConnect`) and `c.closed` is a fresh channel. Neither is closed.
 
-**FINAL HYPOTHESIS**: There must be a timing issue where the CLIENT closes the conn BEFORE the server's first auth message arrives. If the pipe terminates (no response from server in time) OR if there's a context cancellation, `fc.Close()` could be called while dispatch is waiting.
+**ADDITIONAL FINDING** (from auth trace logging run):
+In passing runs, the auth sequence is correct:
+```
+trust hint ReadMsg got len=1 err=nil          ← SERVER trust hint, 1 byte ✓
+ClientAuth: first ReadMsg got len=11 SBRT-AUTH-1  ← header ✓
+```
 
-**NEXT STEP**: add logging at the actual WriteMsg/ReadMsg call sites in negotiateAuth to confirm WHICH message fails and with what error.
+In the one observed failing case, the ctrlCh had [SBRT-AUTH-1 (11B), salt (64B)] — the 1-byte
+trust hint was missing. This caused negotiateAuth's ReadMsg to read "SBRT-AUTH-1" as the trust
+hint, then ClientAuth to read the salt as the header → FAIL.
+
+The 1-byte trust hint being absent means it was either: (a) delivered as a DATA frame (typeByte
+0x00) due to decryption error on a closed link, or (b) delivered to a Closed link (session_cipher
+cleared by finalize_local_close) which garbled decryption and caused the data to be dropped.
+
+**Root cause candidate**: The CLIENT's link closed immediately after the trust hint write (same
+millisecond range). The link was closed by `reticulum_close(1)` which was called from `BridgeClose`
+which was called from `reticulumConn.Close()` — but WHY `reticulumConn.Close()` was called while
+still in `negotiateAuth` is unclear. This intermittent failure was NOT reproduced in 5 subsequent
+runs. Possibly a one-off race in Tokio task scheduling at link activation time.
+
+**Status**: INTERMITTENT, unconfirmed root cause. Test passes reliably (5/5 runs).
 
 ## Confirmed findings (empirical, from actual test runs)
 
@@ -332,11 +365,11 @@ the next dial, and the SERVER fires a new `call_on_accept` each time.
 
 ## Next steps (in order)
 
-1. **DONE**: simple-tcp passes — the single-request case is fixed.
-2. **Run full loadtest** (docker-compose.tcp.yml) to verify H1 (concurrent link sharing) is
-   also fixed. If 5 concurrent goroutines work correctly, the issue is resolved end-to-end.
-3. **Cleanup**: Remove the temporary WARN logging from `connection.rs write()` or downgrade to
-   DEBUG.
+1. **DONE**: simple-tcp passes 5/5 — the single-request case is fixed.
+2. **Cleanup**: Remove temporary WARN logging (conn.write status, auth ReadMsg traces, goOnClose)
+   or downgrade to DEBUG. These are for tracing only.
+3. **Run full loadtest** (docker-compose.tcp.yml) to verify H1 (concurrent link sharing) is
+   the root cause of the loadtest failures.
 
 ## Proposed fix for H1 (concurrent link sharing)
 

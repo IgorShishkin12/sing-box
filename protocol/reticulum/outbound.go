@@ -166,6 +166,7 @@ func (h *Outbound) negotiateAuth(fc *framedConn, destHash string, ts *TrustStore
 	}
 
 	peerMsg, err := fc.ReadMsg()
+	pkgWarn("[auth] outbound negotiateAuth: trust hint ReadMsg got len=", len(peerMsg), " err=", err)
 	if err != nil {
 		return E.Cause(err, "read trust hint")
 	}
