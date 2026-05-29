@@ -72,23 +72,25 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 		return fmt.Errorf("reticulum inbound: already closed")
 	}
 
-	configJSON, err := buildConfigJSON(h.options.ReticulumConfig, h.options.ReticulumConfigPath)
-	if err != nil {
-		return err
-	}
-
-	BridgeSetLogger(h.logger)
-
-	if err := BridgeInit(configJSON); err != nil {
-		return fmt.Errorf("bridge init failed: %w", err)
-	}
-
 	listenHash := h.options.Destination
 	if listenHash == "" {
 		listenHash = h.options.Name
 	}
 	if listenHash == "" {
 		return fmt.Errorf("reticulum inbound: destination or name must be set")
+	}
+
+	configJSON, err := buildConfigJSON(h.options.ReticulumConfig, h.options.ReticulumConfigPath)
+	if err != nil {
+		return err
+	}
+
+	h.logger.Info("reticulum inbound: starting, listening on ", listenHash)
+
+	BridgeSetLogger(h.logger)
+
+	if err := BridgeInit(configJSON); err != nil {
+		return fmt.Errorf("bridge init failed: %w", err)
 	}
 
 	taskID, err := BridgeListen(listenHash)
@@ -102,6 +104,8 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 		return fmt.Errorf("listener poll failed: %w", err)
 	}
 	h.listenerHdl = handle
+
+	h.logger.Info("reticulum inbound: listener ready")
 	h.accepting = true
 
 	go h.acceptLoop()
@@ -119,12 +123,14 @@ func (h *Inbound) acceptLoop() {
 
 		taskID, err := BridgeAccept(h.listenerHdl)
 		if err != nil {
+			h.logger.Error("reticulum: accept error: ", err)
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
 		handle, err := BridgePollTask(taskID, 30*time.Second)
 		if err != nil {
+			h.logger.Error("reticulum: poll after accept failed: ", err)
 			continue
 		}
 
