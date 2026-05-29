@@ -26,7 +26,7 @@
             "name": "Reticulum UDP Client",
             "type": "UDPInterface",
             "forward_ip": "e2e-server-udp",
-            "forward_port": 7789
+            "forward_port": 4243
           }
         ]
       }

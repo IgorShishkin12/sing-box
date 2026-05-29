@@ -35,6 +35,4 @@ RUN apk add --no-cache bash curl ca-certificates libgcc libstdc++ coreutils
 COPY --from=builder /usr/local/bin/sing-box /usr/local/bin/sing-box
 COPY --from=builder /usr/local/bin/sum-server /usr/local/bin/sum-server
 
-EXPOSE 7788
-
 ENTRYPOINT ["/usr/bin/timeout", "300", "/bin/sh"]
