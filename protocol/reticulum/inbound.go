@@ -74,23 +74,25 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 		return fmt.Errorf("reticulum inbound: already closed")
 	}
 
-	configJSON, err := buildConfigJSON(h.options.ReticulumConfig, h.options.ReticulumConfigPath)
-	if err != nil {
-		return err
-	}
-
-	BridgeSetLogger(h.logger)
-
-	if err := BridgeInit(configJSON); err != nil {
-		return fmt.Errorf("bridge init failed: %w", err)
-	}
-
 	listenHash := h.options.Destination
 	if listenHash == "" {
 		listenHash = h.options.Name
 	}
 	if listenHash == "" {
 		return fmt.Errorf("reticulum inbound: destination or name must be set")
+	}
+
+	configJSON, err := buildConfigJSON(h.options.ReticulumConfig, h.options.ReticulumConfigPath)
+	if err != nil {
+		return err
+	}
+
+	h.logger.Info("reticulum inbound: starting, listening on ", listenHash)
+
+	BridgeSetLogger(h.logger)
+
+	if err := BridgeInit(configJSON); err != nil {
+		return fmt.Errorf("bridge init failed: %w", err)
 	}
 
 	taskID, err := BridgeListen(listenHash)
@@ -104,6 +106,8 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 		return fmt.Errorf("listener poll failed: %w", err)
 	}
 	h.listenerHdl = handle
+
+	h.logger.Info("reticulum inbound: listener ready")
 	h.accepting = true
 
 	go h.acceptLoop()
@@ -121,20 +125,24 @@ func (h *Inbound) acceptLoop() {
 
 		taskID, err := BridgeAccept(h.listenerHdl)
 		if err != nil {
+			h.logger.Error("reticulum: accept error: ", err)
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
 		handle, err := BridgePollTask(taskID, 30*time.Second)
 		if err != nil {
+			h.logger.Error("reticulum: poll after accept failed: ", err)
 			continue
 		}
 
 		// Get peer hash for trust store lookup (may be empty if unavailable).
 		peerHash, _ := BridgeGetListenerHash(h.listenerHdl)
 
+		h.logger.Debug("reticulum: accepted connection, peer=", peerHash, " handle=", handle)
+
 		raw := newReticulumConn(handle, "inbound", fmt.Sprintf("listener-%d", h.listenerHdl))
-		fc := newFramedConn(raw)
+		fc := newFramedConn(raw, h.logger)
 
 		// Handle each connection concurrently so the accept loop can
 		// immediately issue the next BridgeAccept.
@@ -144,6 +152,8 @@ func (h *Inbound) acceptLoop() {
 
 func (h *Inbound) handleConn(fc *framedConn, peerHash string) {
 	defer fc.Close()
+
+	h.logger.Debug("reticulum: handling inbound connection, peer=", peerHash)
 
 	if h.options.Password != "" {
 		if err := negotiateServerAuth(fc, h.options.Password, peerHash, h.trustStore, h.logger); err != nil {
@@ -160,6 +170,8 @@ func (h *Inbound) handleConn(fc *framedConn, peerHash string) {
 		return
 	}
 
+	h.logger.Info("reticulum: inbound connection from ", peerHash, " to ", destAddr)
+
 	if h.router != nil {
 		metadata := adapter.InboundContext{
 			Network:     "tcp",
@@ -175,6 +187,7 @@ func negotiateServerAuth(fc *framedConn, password, peerHash string, ts *TrustSto
 	if peerHash != "" {
 		tok := TrustToken(password, peerHash)
 		if ts.Check(peerHash, tok) {
+			logger.Debug("reticulum: trusted peer, skipping auth: ", peerHash)
 			// Trusted peer: send hint byte 0x01 and skip full auth.
 			if err := fc.WriteMsg([]byte{0x01}); err != nil {
 				return fmt.Errorf("write trust hint: %w", err)
@@ -182,6 +195,7 @@ func negotiateServerAuth(fc *framedConn, password, peerHash string, ts *TrustSto
 			return nil
 		}
 	}
+	logger.Debug("reticulum: running full auth for peer: ", peerHash)
 	// Unknown peer: send hint byte 0x00 and do full auth.
 	if err := fc.WriteMsg([]byte{0x00}); err != nil {
 		return fmt.Errorf("write auth hint: %w", err)
@@ -192,6 +206,7 @@ func negotiateServerAuth(fc *framedConn, password, peerHash string, ts *TrustSto
 	if peerHash != "" {
 		ts.Store(peerHash, TrustToken(password, peerHash))
 	}
+	logger.Debug("reticulum: auth succeeded for peer: ", peerHash)
 	return nil
 }
 

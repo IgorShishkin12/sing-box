@@ -74,6 +74,8 @@ func (h *Outbound) Start(stage adapter.StartStage) error {
 		return fmt.Errorf("reticulum outbound: destination or name must be set")
 	}
 
+	h.logger.Info("reticulum outbound: starting, destination=", h.options.Destination, " name=", h.options.Name)
+
 	configJSON, err := buildConfigJSON(h.options.ReticulumConfig, h.options.ReticulumConfigPath)
 	if err != nil {
 		return err
@@ -84,10 +86,12 @@ func (h *Outbound) Start(stage adapter.StartStage) error {
 		return fmt.Errorf("bridge init failed: %w", err)
 	}
 	h.bridgeInited = true
+	h.logger.Info("reticulum outbound: bridge initialized")
 	return nil
 }
 
 func (h *Outbound) Close() error {
+	h.logger.Debug("reticulum outbound: shutting down")
 	BridgeShutdown()
 	return nil
 }
@@ -121,15 +125,19 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 	h.mu.Unlock()
 
 	if destHash == "" {
+		h.logger.Debug("reticulum: resolving name ", h.options.Name)
 		hash, err := BridgeResolveName(h.options.Name)
 		if err != nil {
 			return nil, fmt.Errorf("reticulum: resolve %q: %w", h.options.Name, err)
 		}
+		h.logger.Debug("reticulum: resolved ", h.options.Name, " → ", hash)
 		h.mu.Lock()
 		h.resolvedHash = hash
 		h.mu.Unlock()
 		destHash = hash
 	}
+
+	h.logger.DebugContext(ctx, "reticulum: dialing ", destHash, " for ", destination)
 
 	// Serialize dials per destination: only one active Reticulum connection at a
 	// time prevents concurrent goroutines from racing on the shared link.
@@ -138,6 +146,7 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 
 	taskID, err := BridgeDial(destHash)
 	if err != nil {
+		h.logger.ErrorContext(ctx, "reticulum: dial error: ", err)
 		mu.Unlock()
 		return nil, err
 	}
@@ -158,15 +167,17 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 		return nil, err
 	}
 
+	h.logger.InfoContext(ctx, "reticulum: connected to ", destHash)
+
 	localName := "outbound"
 	if h.options.Name != "" {
 		localName = h.options.Name
 	}
 	raw := newReticulumConn(handle, localName, destHash)
-	fc := newFramedConn(raw)
+	fc := newFramedConn(raw, h.logger)
 
 	if h.options.Password != "" {
-		if err := negotiateClientAuth(fc, h.options.Password, destHash, h.trustStore); err != nil {
+		if err := negotiateClientAuth(fc, h.options.Password, destHash, h.trustStore, h.logger); err != nil {
 			fc.Close()
 			mu.Unlock()
 			return nil, fmt.Errorf("reticulum auth failed: %w", err)
@@ -187,14 +198,16 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 
 // negotiateClientAuth performs the client-side auth negotiation.
 // Reads the server's trust hint; if trusted (0x01), skips full auth.
-func negotiateClientAuth(fc *framedConn, password, destHash string, ts *TrustStore) error {
+func negotiateClientAuth(fc *framedConn, password, destHash string, ts *TrustStore, logger log.ContextLogger) error {
 	hint, err := fc.ReadMsg()
 	if err != nil {
 		return fmt.Errorf("read trust hint: %w", err)
 	}
 	if len(hint) > 0 && hint[0] == 0x01 {
-		return nil // server trusts us, skip full auth
+		logger.Debug("reticulum: server trusts us, skipping auth")
+		return nil
 	}
+	logger.Debug("reticulum: running full client auth")
 	if err := ClientAuth(fc, password); err != nil {
 		return err
 	}

@@ -1,10 +1,13 @@
 package reticulum
 
 import (
+	"errors"
 	"io"
 	"net"
 	"sync"
 	"time"
+
+	"github.com/sagernet/sing-box/log"
 )
 
 // Message type prefixes. High bit 1 = control, 0 = pass-through data.
@@ -20,7 +23,19 @@ type AuthIO interface {
 	WriteMsg([]byte) error
 }
 
-// framedConn wraps a *reticulumConn and demultiplexes framed messages.
+// innerConn abstracts the framed-message transport so tests can inject fakes.
+type innerConn interface {
+	ReadMessage() (byte, []byte, error)
+	WriteMessage(byte, []byte) error
+	Close() error
+	LocalAddr() net.Addr
+	RemoteAddr() net.Addr
+	SetDeadline(time.Time) error
+	SetReadDeadline(time.Time) error
+	SetWriteDeadline(time.Time) error
+}
+
+// framedConn wraps an innerConn and demultiplexes framed messages.
 //
 // A reader goroutine routes incoming messages:
 //   - TypeAuthCtrl / TypeReauthReq → ctrlCh (carrying [type][payload...])
@@ -28,7 +43,8 @@ type AuthIO interface {
 //
 // Implements net.Conn and AuthIO. Callers must call OpenGate() after auth.
 type framedConn struct {
-	inner *reticulumConn
+	inner  innerConn
+	logger log.ContextLogger
 
 	ctrlCh chan []byte // control messages: [type_byte][payload...]
 	dataCh chan []byte // data payloads
@@ -42,9 +58,10 @@ type framedConn struct {
 }
 
 // newFramedConn wraps raw and starts the demux goroutine.
-func newFramedConn(raw *reticulumConn) *framedConn {
+func newFramedConn(raw innerConn, logger log.ContextLogger) *framedConn {
 	fc := &framedConn{
 		inner:  raw,
+		logger: logger,
 		ctrlCh: make(chan []byte, 16),
 		dataCh: make(chan []byte, 256),
 		gate:   make(chan struct{}),
@@ -69,6 +86,9 @@ func (fc *framedConn) readLoop() {
 	for {
 		typ, payload, err := fc.inner.ReadMessage()
 		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				fc.logger.Debug("reticulum: framed conn read error: ", err)
+			}
 			return
 		}
 		if typ == TypeData {
@@ -77,7 +97,8 @@ func (fc *framedConn) readLoop() {
 			case <-fc.done:
 				return
 			default:
-				// Drop oldest to avoid stalling.
+				// Drop oldest to avoid stalling; warn since this is data loss.
+				fc.logger.Warn("reticulum: dataCh full, dropping oldest packet")
 				select {
 				case <-fc.dataCh:
 				default:
@@ -96,7 +117,7 @@ func (fc *framedConn) readLoop() {
 			case <-fc.done:
 				return
 			default:
-				// Drop control message if channel full.
+				fc.logger.Debug("reticulum: ctrlCh full, dropping control message type=", typ)
 			}
 		}
 	}
