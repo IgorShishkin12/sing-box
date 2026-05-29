@@ -420,6 +420,7 @@ pub extern "C" fn reticulum_accept(listener_handle: u64) -> i32 {
                 Some(listener) => match listener.accept_wait(ACCEPT_TIMEOUT).await {
                     Some(conn) => {
                         let handle = store.insert_connection(conn).await;
+                        log::debug!("[c_api] accept: listener={} → conn handle={}", listener_handle, handle);
                         registry
                             .complete(
                                 task_id,
@@ -431,6 +432,7 @@ pub extern "C" fn reticulum_accept(listener_handle: u64) -> i32 {
                             .await;
                     }
                     None => {
+                        log::warn!("[c_api] accept: timeout on listener={}", listener_handle);
                         registry
                             .complete(
                                 task_id,
@@ -442,6 +444,7 @@ pub extern "C" fn reticulum_accept(listener_handle: u64) -> i32 {
                     }
                 },
                 None => {
+                    log::warn!("[c_api] accept: invalid listener handle={}", listener_handle);
                     registry
                         .complete(
                             task_id,
@@ -477,7 +480,10 @@ pub extern "C" fn reticulum_write(conn_handle: u64, data: *const u8, len: usize)
                     -1
                 }
             },
-            None => -1,
+            None => {
+                log::warn!("[c_api] write: invalid conn handle={}", conn_handle);
+                -1
+            }
         }
     })
 }
@@ -495,7 +501,10 @@ pub extern "C" fn reticulum_read(conn_handle: u64, buffer: *mut u8, max_len: usi
     runtime::block_on(async move {
         match store.get_connection(conn_handle).await {
             Some(conn) => conn.read(buffer_slice).await, // i32: >0 bytes, 0 no data, -1 EOF
-            None => -1,
+            None => {
+                log::warn!("[c_api] read: invalid conn handle={}", conn_handle);
+                -1
+            }
         }
     })
 }
@@ -522,6 +531,7 @@ pub extern "C" fn reticulum_poll(
     len_out: *mut usize,
 ) -> i32 {
     if task_id < 0 {
+        log::warn!("[c_api] poll: invalid task_id={}", task_id);
         return -1;
     }
     let registry = global_registry();
@@ -529,6 +539,7 @@ pub extern "C" fn reticulum_poll(
     match result {
         None => 0,
         Some(TaskResult::Done { handle, data: _ }) => {
+            log::debug!("[c_api] poll: task={} done, handle={}", task_id, handle);
             let handle_bytes = handle.to_le_bytes();
             let len = handle_bytes.len();
             unsafe {
@@ -546,6 +557,7 @@ pub extern "C" fn reticulum_poll(
             1
         }
         Some(TaskResult::Error { message }) => {
+            log::warn!("[c_api] poll: task={} error: {}", task_id, message);
             let msg_bytes = message.into_bytes();
             let len = msg_bytes.len();
             unsafe {
