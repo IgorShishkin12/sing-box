@@ -71,7 +71,7 @@ func TestOutboundDialContextResolvesNameOnFirstCall(t *testing.T) {
 	o.bridgeInited = true // skip bridge init for logic test
 
 	_, err := o.DialContext(context.Background(), "tcp", M.ParseSocksaddr("127.0.0.1:80"))
-	// BridgeResolveName fails with stub, wrapped as "reticulum: resolve ..."
+	// BridgeResolveName fails with stub, wrapped as "resolve ..."
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "resolve")
 	require.Contains(t, err.Error(), "my-server")

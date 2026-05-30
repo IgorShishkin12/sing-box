@@ -70,7 +70,7 @@ fn test_listen_succeeds_without_network() {
         }
         Err(e) => {
             // Acceptable: transport may require interfaces for service registration.
-            eprintln!("[test] listen failed (acceptable without network): {}", e);
+            eprintln!("listen failed (acceptable without network): {}", e);
         }
     }
 

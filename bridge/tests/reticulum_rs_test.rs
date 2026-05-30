@@ -85,16 +85,16 @@ mod tests {
 
         let listener_handle = poll_task(listen_task_id, Duration::from_secs(10))
             .expect("listener task should complete");
-        eprintln!("[test] listener_handle={}", listener_handle);
+        eprintln!("listener_handle={}", listener_handle);
 
         let dest_hash_hex = get_listener_dest_hash(listener_handle);
-        eprintln!("[test] dest_hash_hex={}", dest_hash_hex);
+        eprintln!("dest_hash_hex={}", dest_hash_hex);
         assert_eq!(dest_hash_hex.len(), 32);
 
         reticulum_close(listener_handle);
         reticulum_shutdown();
 
-        eprintln!("[test] bridge init and listen test PASSED");
+        eprintln!("bridge init and listen test PASSED");
     }
 
     /// Test: dial to an unknown hash returns an error.
@@ -148,7 +148,7 @@ mod tests {
 
         if dial_task_id >= 0 {
             let dial_result = poll_task(dial_task_id, Duration::from_secs(15));
-            eprintln!("[test] dial result (expected to fail without network): {:?}", dial_result);
+            eprintln!("dial result (expected to fail without network): {:?}", dial_result);
         }
 
         reticulum_close(listener_handle);

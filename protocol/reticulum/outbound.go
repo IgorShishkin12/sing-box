@@ -9,9 +9,9 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	C "github.com/sagernet/sing-box/constant"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
@@ -102,23 +102,23 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 	h.mu.Unlock()
 
 	if destHash == "" {
-		h.logger.Debug("reticulum: resolving name ", h.options.Name)
+		h.logger.Debug("resolving name ", h.options.Name)
 		hash, err := BridgeResolveName(h.options.Name)
 		if err != nil {
-			return nil, fmt.Errorf("reticulum: resolve %q: %w", h.options.Name, err)
+			return nil, fmt.Errorf("resolve %q: %w", h.options.Name, err)
 		}
-		h.logger.Debug("reticulum: resolved ", h.options.Name, " → ", hash)
+		h.logger.Debug("resolved ", h.options.Name, " → ", hash)
 		h.mu.Lock()
 		h.resolvedHash = hash
 		h.mu.Unlock()
 		destHash = hash
 	}
 
-	h.logger.DebugContext(ctx, "reticulum: dialing ", destHash, " for ", destination)
+	h.logger.DebugContext(ctx, "dialing ", destHash, " for ", destination)
 
 	taskID, err := BridgeDial(destHash)
 	if err != nil {
-		h.logger.ErrorContext(ctx, "reticulum: dial error: ", err)
+		h.logger.ErrorContext(ctx, "dial error: ", err)
 		return nil, err
 	}
 
@@ -136,7 +136,7 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 		return nil, err
 	}
 
-	h.logger.InfoContext(ctx, "reticulum: connected to ", destHash)
+	h.logger.InfoContext(ctx, "connected to ", destHash)
 
 	localName := "outbound"
 	if h.options.Name != "" {
@@ -153,7 +153,7 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 
 	if err := writeDestHeader(conn, destination.String()); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("reticulum: write dest header: %w", err)
+		return nil, fmt.Errorf("write dest header: %w", err)
 	}
 
 	return conn, nil

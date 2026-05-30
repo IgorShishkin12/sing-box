@@ -10,9 +10,9 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	C "github.com/sagernet/sing-box/constant"
 	M "github.com/sagernet/sing/common/metadata"
 )
 
@@ -43,14 +43,14 @@ func RegisterInbound(registry *inbound.Registry) {
 
 type Inbound struct {
 	inbound.Adapter
-	router      adapter.Router
-	logger      log.ContextLogger
-	options     option.ReticulumInboundOptions
+	router       adapter.Router
+	logger       log.ContextLogger
+	options      option.ReticulumInboundOptions
 	listenerTask int
 	listenerHdl  uint64
-	accepting   bool
-	mu          sync.Mutex
-	closed      bool
+	accepting    bool
+	mu           sync.Mutex
+	closed       bool
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ReticulumInboundOptions) (adapter.Inbound, error) {
@@ -123,18 +123,18 @@ func (h *Inbound) acceptLoop() {
 
 		taskID, err := BridgeAccept(h.listenerHdl)
 		if err != nil {
-			h.logger.Error("reticulum: accept error: ", err)
+			h.logger.Error("accept error: ", err)
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
 		handle, err := BridgePollTask(taskID, 30*time.Second)
 		if err != nil {
-			h.logger.Error("reticulum: poll after accept failed: ", err)
+			h.logger.Error("poll after accept failed: ", err)
 			continue
 		}
 
-		h.logger.Debug("reticulum: accepted connection, handle=", handle)
+		h.logger.Debug("accepted connection, handle=", handle)
 
 		conn := newReticulumConn(handle, "inbound", fmt.Sprintf("listener-%d", h.listenerHdl))
 
@@ -148,12 +148,12 @@ func (h *Inbound) acceptLoop() {
 
 		destAddr, err := readDestHeader(conn)
 		if err != nil {
-			h.logger.Error("reticulum: read dest header: ", err)
+			h.logger.Error("read dest header: ", err)
 			conn.Close()
 			continue
 		}
 
-		h.logger.Info("reticulum: inbound connection to ", destAddr)
+		h.logger.Info("inbound connection to ", destAddr)
 
 		if h.router != nil {
 			metadata := adapter.InboundContext{
