@@ -84,7 +84,6 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 	if err != nil {
 		return err
 	}
-
 	h.logger.Info("reticulum inbound: starting, listening on ", listenHash)
 
 	BridgeSetLogger(h.logger)
@@ -136,7 +135,7 @@ func (h *Inbound) acceptLoop() {
 
 		h.logger.Debug("accepted connection, handle=", handle)
 
-		conn := newReticulumConn(handle, "inbound", fmt.Sprintf("listener-%d", h.listenerHdl))
+		conn := newReticulumConn(handle, "inbound", fmt.Sprintf("listener-%d", h.listenerHdl), h.logger)
 
 		if h.options.Password != "" {
 			if err := ServerAuth(conn, h.options.Password); err != nil {

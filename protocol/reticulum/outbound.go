@@ -142,7 +142,7 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 	if h.options.Name != "" {
 		localName = h.options.Name
 	}
-	conn := newReticulumConn(handle, localName, destHash)
+	conn := newReticulumConn(handle, localName, destHash, h.logger)
 
 	if h.options.Password != "" {
 		if err := ClientAuth(conn, h.options.Password); err != nil {

@@ -8,6 +8,8 @@ import (
 	"io"
 	"net"
 	"time"
+
+	"github.com/sagernet/sing-box/log"
 )
 
 // BridgePollTask polls for task completion with a timeout.
@@ -47,13 +49,15 @@ type reticulumConn struct {
 	// local/remote addresses are synthetic since Reticulum is destination-based
 	localAddr  net.Addr
 	remoteAddr net.Addr
+	logger     log.ContextLogger
 }
 
-func newReticulumConn(handle uint64, localName, remoteName string) net.Conn {
+func newReticulumConn(handle uint64, localName, remoteName string, logger log.ContextLogger) net.Conn {
 	return &reticulumConn{
 		handle:     handle,
 		localAddr:  reticulumAddr{network: "reticulum", str: localName},
 		remoteAddr: reticulumAddr{network: "reticulum", str: remoteName},
+		logger:     logger,
 	}
 }
 
@@ -64,9 +68,15 @@ func (c *reticulumConn) Read(b []byte) (int, error) {
 	for {
 		n := BridgeRead(c.handle, b)
 		if n < 0 {
+			if c.logger != nil {
+				c.logger.Trace("BridgeRead: handle=", c.handle, " EOF")
+			}
 			return 0, io.EOF // connection closed
 		}
 		if n > 0 {
+			if c.logger != nil {
+				c.logger.Trace("BridgeRead: handle=", c.handle, " n=", n, " data=", fmt.Sprintf("%q", b[:n]))
+			}
 			return n, nil
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -107,10 +117,19 @@ func (c *reticulumConn) Write(b []byte) (int, error) {
 	if c.handle == 0 {
 		return 0, io.ErrClosedPipe
 	}
+	if c.logger != nil {
+		c.logger.Trace("BridgeWrite: handle=", c.handle, " len=", len(b), " data=", fmt.Sprintf("%q", b))
+	}
 	// reticulum_write always writes all bytes or returns -1; partial writes cannot occur.
 	n := BridgeWrite(c.handle, b)
 	if n < 0 {
+		if c.logger != nil {
+			c.logger.Trace("BridgeWrite: handle=", c.handle, " error")
+		}
 		return 0, errors.New("write error")
+	}
+	if c.logger != nil {
+		c.logger.Trace("BridgeWrite: handle=", c.handle, " written=", n)
 	}
 	return n, nil
 }
