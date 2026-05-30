@@ -87,7 +87,7 @@ func (fc *framedConn) readLoop() {
 		typ, payload, err := fc.inner.ReadMessage()
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
-				fc.logger.Debug("reticulum: framed conn read error: ", err)
+				fc.logger.Debug("framed conn read error: ", err)
 			}
 			return
 		}
@@ -98,7 +98,7 @@ func (fc *framedConn) readLoop() {
 				return
 			default:
 				// Drop oldest to avoid stalling; warn since this is data loss.
-				fc.logger.Warn("reticulum: dataCh full, dropping oldest packet")
+				fc.logger.Warn("dataCh full, dropping oldest packet")
 				select {
 				case <-fc.dataCh:
 				default:
@@ -117,7 +117,7 @@ func (fc *framedConn) readLoop() {
 			case <-fc.done:
 				return
 			default:
-				fc.logger.Debug("reticulum: ctrlCh full, dropping control message type=", typ)
+				fc.logger.Debug("ctrlCh full, dropping control message type=", typ)
 			}
 		}
 	}

@@ -14,7 +14,7 @@ fn lock_runtime() -> std::sync::MutexGuard<'static, Option<Arc<Runtime>>> {
     get_runtime_lock()
         .lock()
         .unwrap_or_else(|poisoned| {
-            log::warn!("[bridge] runtime mutex was poisoned, recovering");
+            log::warn!("runtime mutex was poisoned, recovering");
             poisoned.into_inner()
         })
 }
@@ -92,7 +92,7 @@ where
             get_block_on_lock()
                 .lock()
                 .unwrap_or_else(|poisoned| {
-                    log::warn!("[bridge] block_on mutex was poisoned, recovering");
+                    log::warn!("block_on mutex was poisoned, recovering");
                     poisoned.into_inner()
                 }),
         )

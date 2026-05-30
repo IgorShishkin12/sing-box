@@ -10,9 +10,9 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	C "github.com/sagernet/sing-box/constant"
 	M "github.com/sagernet/sing/common/metadata"
 )
 
@@ -43,15 +43,15 @@ func RegisterInbound(registry *inbound.Registry) {
 
 type Inbound struct {
 	inbound.Adapter
-	router      adapter.Router
-	logger      log.ContextLogger
-	options     option.ReticulumInboundOptions
+	router       adapter.Router
+	logger       log.ContextLogger
+	options      option.ReticulumInboundOptions
 	listenerTask int
 	listenerHdl  uint64
-	accepting   bool
-	mu          sync.Mutex
-	closed      bool
-	trustStore  *TrustStore
+	accepting    bool
+	mu           sync.Mutex
+	closed       bool
+	trustStore   *TrustStore
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ReticulumInboundOptions) (adapter.Inbound, error) {
@@ -125,21 +125,21 @@ func (h *Inbound) acceptLoop() {
 
 		taskID, err := BridgeAccept(h.listenerHdl)
 		if err != nil {
-			h.logger.Error("reticulum: accept error: ", err)
+			h.logger.Error("accept error: ", err)
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 
 		handle, err := BridgePollTask(taskID, 30*time.Second)
 		if err != nil {
-			h.logger.Error("reticulum: poll after accept failed: ", err)
+			h.logger.Error("poll after accept failed: ", err)
 			continue
 		}
 
 		// Get peer hash for trust store lookup (may be empty if unavailable).
 		peerHash, _ := BridgeGetListenerHash(h.listenerHdl)
 
-		h.logger.Debug("reticulum: accepted connection, peer=", peerHash, " handle=", handle)
+		h.logger.Debug("accepted connection, peer=", peerHash, " handle=", handle)
 
 		raw := newReticulumConn(handle, "inbound", fmt.Sprintf("listener-%d", h.listenerHdl))
 		fc := newFramedConn(raw, h.logger)
@@ -153,7 +153,7 @@ func (h *Inbound) acceptLoop() {
 func (h *Inbound) handleConn(fc *framedConn, peerHash string) {
 	defer fc.Close()
 
-	h.logger.Debug("reticulum: handling inbound connection, peer=", peerHash)
+	h.logger.Debug("handling inbound connection, peer=", peerHash)
 
 	if h.options.Password != "" {
 		if err := negotiateServerAuth(fc, h.options.Password, peerHash, h.trustStore, h.logger); err != nil {
@@ -166,11 +166,11 @@ func (h *Inbound) handleConn(fc *framedConn, peerHash string) {
 
 	destAddr, err := readDestHeader(fc)
 	if err != nil {
-		h.logger.Error("reticulum: read dest header: ", err)
+		h.logger.Error("read dest header: ", err)
 		return
 	}
 
-	h.logger.Info("reticulum: inbound connection from ", peerHash, " to ", destAddr)
+	h.logger.Info("inbound connection from ", peerHash, " to ", destAddr)
 
 	if h.router != nil {
 		metadata := adapter.InboundContext{
@@ -187,7 +187,7 @@ func negotiateServerAuth(fc *framedConn, password, peerHash string, ts *TrustSto
 	if peerHash != "" {
 		tok := TrustToken(password, peerHash)
 		if ts.Check(peerHash, tok) {
-			logger.Debug("reticulum: trusted peer, skipping auth: ", peerHash)
+			logger.Debug("trusted peer, skipping auth: ", peerHash)
 			// Trusted peer: send hint byte 0x01 and skip full auth.
 			if err := fc.WriteMsg([]byte{0x01}); err != nil {
 				return fmt.Errorf("write trust hint: %w", err)
@@ -195,7 +195,7 @@ func negotiateServerAuth(fc *framedConn, password, peerHash string, ts *TrustSto
 			return nil
 		}
 	}
-	logger.Debug("reticulum: running full auth for peer: ", peerHash)
+	logger.Debug("running full auth for peer: ", peerHash)
 	// Unknown peer: send hint byte 0x00 and do full auth.
 	if err := fc.WriteMsg([]byte{0x00}); err != nil {
 		return fmt.Errorf("write auth hint: %w", err)
@@ -206,7 +206,7 @@ func negotiateServerAuth(fc *framedConn, password, peerHash string, ts *TrustSto
 	if peerHash != "" {
 		ts.Store(peerHash, TrustToken(password, peerHash))
 	}
-	logger.Debug("reticulum: auth succeeded for peer: ", peerHash)
+	logger.Debug("auth succeeded for peer: ", peerHash)
 	return nil
 }
 

@@ -126,7 +126,7 @@ func (c *reticulumConn) WriteMessage(typ byte, payload []byte) error {
 		return io.ErrClosedPipe
 	}
 	if len(payload) > maxMsgPayload {
-		return fmt.Errorf("reticulum: message payload %d bytes exceeds max %d", len(payload), maxMsgPayload)
+		return fmt.Errorf("message payload %d bytes exceeds max %d", len(payload), maxMsgPayload)
 	}
 	msg := make([]byte, 3+len(payload))
 	msg[0] = typ

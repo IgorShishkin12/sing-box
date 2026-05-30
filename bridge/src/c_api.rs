@@ -25,7 +25,7 @@ pub extern "C" fn reticulum_init(config_json: *const c_char) -> i32 {
     );
 
     if config_json.is_null() {
-        log::error!("[bridge] config_json must not be null; pass at least {{}} for defaults");
+        log::error!("config_json must not be null; pass at least {{}} for defaults");
         return -1;
     }
     let c_str = match unsafe { CStr::from_ptr(config_json).to_str() } {
@@ -37,19 +37,19 @@ pub extern "C" fn reticulum_init(config_json: *const c_char) -> i32 {
             crate::set_global_config(Some(cfg));
         }
         Err(e) => {
-            log::error!("[bridge] config parse error: {}", e);
+            log::error!("config parse error: {}", e);
             return -1;
         }
     }
 
     if let Err(e) = runtime::init_runtime() {
-        log::error!("[bridge] runtime init failed: {}", e);
+        log::error!("runtime init failed: {}", e);
         return -1;
     }
 
     if let Some(cfg) = crate::get_global_config() {
         if let Err(e) = crate::transport::init_transport(cfg) {
-            log::error!("[bridge] init_transport failed: {}", e);
+            log::error!("init_transport failed: {}", e);
             return -1;
         }
     }
@@ -282,7 +282,7 @@ pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i32 {
                         )
                         .await
                         {
-                            log::warn!("[c_api] discovery dest registration failed: {}", e);
+                            log::warn!("discovery dest registration failed: {}", e);
                         }
 
                         {
@@ -390,14 +390,14 @@ pub extern "C" fn reticulum_close(handle: u64) {
     runtime::block_on(async move {
         match store.remove(handle).await {
             Some(crate::store::StoreEntry::Connection(conn)) => {
-                log::info!("[c_api] reticulum_close: closing connection handle={}, closing link", handle);
+                log::info!("reticulum_close: closing connection handle={}, closing link", handle);
                 conn.close_link().await;
             }
             Some(crate::store::StoreEntry::Listener(_)) => {
-                log::info!("[c_api] reticulum_close: closing listener handle={}", handle);
+                log::info!("reticulum_close: closing listener handle={}", handle);
             }
             None => {
-                log::warn!("[c_api] reticulum_close: handle={} not found in store", handle);
+                log::warn!("reticulum_close: handle={} not found in store", handle);
             }
         }
     });
@@ -420,7 +420,7 @@ pub extern "C" fn reticulum_accept(listener_handle: u64) -> i32 {
                 Some(listener) => match listener.accept_wait(ACCEPT_TIMEOUT).await {
                     Some(conn) => {
                         let handle = store.insert_connection(conn).await;
-                        log::debug!("[c_api] accept: listener={} → conn handle={}", listener_handle, handle);
+                        log::debug!("accept: listener={} → conn handle={}", listener_handle, handle);
                         registry
                             .complete(
                                 task_id,
@@ -432,7 +432,7 @@ pub extern "C" fn reticulum_accept(listener_handle: u64) -> i32 {
                             .await;
                     }
                     None => {
-                        log::warn!("[c_api] accept: timeout on listener={}", listener_handle);
+                        log::warn!("accept: timeout on listener={}", listener_handle);
                         registry
                             .complete(
                                 task_id,
@@ -444,7 +444,7 @@ pub extern "C" fn reticulum_accept(listener_handle: u64) -> i32 {
                     }
                 },
                 None => {
-                    log::warn!("[c_api] accept: invalid listener handle={}", listener_handle);
+                    log::warn!("accept: invalid listener handle={}", listener_handle);
                     registry
                         .complete(
                             task_id,
@@ -476,12 +476,12 @@ pub extern "C" fn reticulum_write(conn_handle: u64, data: *const u8, len: usize)
             Some(conn) => match conn.write(data_slice).await {
                 Ok(n) => n as i32,
                 Err(e) => {
-                    log::warn!("[c_api] write on handle {}: {}", conn_handle, e);
+                    log::warn!("write on handle {}: {}", conn_handle, e);
                     -1
                 }
             },
             None => {
-                log::warn!("[c_api] write: invalid conn handle={}", conn_handle);
+                log::warn!("write: invalid conn handle={}", conn_handle);
                 -1
             }
         }
@@ -502,7 +502,7 @@ pub extern "C" fn reticulum_read(conn_handle: u64, buffer: *mut u8, max_len: usi
         match store.get_connection(conn_handle).await {
             Some(conn) => conn.read(buffer_slice).await, // i32: >0 bytes, 0 no data, -1 EOF
             None => {
-                log::warn!("[c_api] read: invalid conn handle={}", conn_handle);
+                log::warn!("read: invalid conn handle={}", conn_handle);
                 -1
             }
         }
@@ -531,7 +531,7 @@ pub extern "C" fn reticulum_poll(
     len_out: *mut usize,
 ) -> i32 {
     if task_id < 0 {
-        log::warn!("[c_api] poll: invalid task_id={}", task_id);
+        log::warn!("poll: invalid task_id={}", task_id);
         return -1;
     }
     let registry = global_registry();
@@ -539,7 +539,7 @@ pub extern "C" fn reticulum_poll(
     match result {
         None => 0,
         Some(TaskResult::Done { handle, data: _ }) => {
-            log::debug!("[c_api] poll: task={} done, handle={}", task_id, handle);
+            log::debug!("poll: task={} done, handle={}", task_id, handle);
             let handle_bytes = handle.to_le_bytes();
             let len = handle_bytes.len();
             unsafe {
@@ -557,7 +557,7 @@ pub extern "C" fn reticulum_poll(
             1
         }
         Some(TaskResult::Error { message }) => {
-            log::warn!("[c_api] poll: task={} error: {}", task_id, message);
+            log::warn!("poll: task={} error: {}", task_id, message);
             let msg_bytes = message.into_bytes();
             let len = msg_bytes.len();
             unsafe {
@@ -616,7 +616,7 @@ pub extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
         for attempt in 0u32..MAX_ATTEMPTS {
             if attempt > 0 {
                 log::info!(
-                    "[c_api] no service announce for '{}' (attempt {}/{}), retrying in {:?}",
+                    "no service announce for '{}' (attempt {}/{}), retrying in {:?}",
                     name_str,
                     attempt,
                     MAX_ATTEMPTS,
@@ -630,19 +630,19 @@ pub extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 if let Err(e) = crate::transport::dial_discovery_and_wait(&knock_name).await {
-                    log::warn!("[c_api] discovery knock failed: {}", e);
+                    log::warn!("discovery knock failed: {}", e);
                 }
             });
 
             if let Some(hash) =
                 crate::transport::wait_for_service_announce(&name_str, ANNOUNCE_WAIT).await
             {
-                log::info!("[c_api] resolved '{}' → {}", name_str, hash);
+                log::info!("resolved '{}' → {}", name_str, hash);
                 return Some(hash);
             }
         }
         log::warn!(
-            "[c_api] gave up resolving '{}' after {} attempts",
+            "gave up resolving '{}' after {} attempts",
             name_str,
             MAX_ATTEMPTS
         );
