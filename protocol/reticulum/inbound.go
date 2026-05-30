@@ -134,6 +134,8 @@ func (h *Inbound) acceptLoop() {
 			continue
 		}
 
+		h.logger.Debug("reticulum: accepted connection, handle=", handle)
+
 		conn := newReticulumConn(handle, "inbound", fmt.Sprintf("listener-%d", h.listenerHdl))
 
 		if h.options.Password != "" {
@@ -150,6 +152,8 @@ func (h *Inbound) acceptLoop() {
 			conn.Close()
 			continue
 		}
+
+		h.logger.Info("reticulum: inbound connection to ", destAddr)
 
 		if h.router != nil {
 			metadata := adapter.InboundContext{
