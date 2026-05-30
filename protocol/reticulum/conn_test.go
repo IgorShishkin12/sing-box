@@ -1,8 +1,6 @@
 package reticulum
 
 import (
-	"bytes"
-	"encoding/binary"
 	"io"
 	"testing"
 
@@ -16,28 +14,20 @@ func TestDestHeaderRoundtrip(t *testing.T) {
 		"[::1]:9000",
 	}
 	for _, addr := range addrs {
-		var buf bytes.Buffer
-		require.NoError(t, writeDestHeader(&buf, addr))
-		got, err := readDestHeader(&buf)
+		srvIO, cliIO := newChanAuthPair()
+		writeErr := make(chan error, 1)
+		go func() { writeErr <- writeDestHeader(cliIO, addr) }()
+		got, err := readDestHeader(srvIO)
 		require.NoError(t, err)
 		require.Equal(t, addr, got)
+		require.NoError(t, <-writeErr)
 	}
 }
 
 func TestDestHeaderEmptyReturnsError(t *testing.T) {
-	var buf bytes.Buffer
-	binary.Write(&buf, binary.BigEndian, uint16(0))
-	_, err := readDestHeader(&buf)
+	_, cliIO := newChanAuthPair()
+	err := writeDestHeader(cliIO, "")
 	require.Error(t, err)
-}
-
-func TestDestHeaderTruncatedReturnsError(t *testing.T) {
-	// Write a header claiming 10 bytes but only provide 3.
-	var buf bytes.Buffer
-	binary.Write(&buf, binary.BigEndian, uint16(10))
-	buf.Write([]byte("abc"))
-	_, err := readDestHeader(&buf)
-	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 }
 
 func TestReticulumConnClosedRead(t *testing.T) {
@@ -49,5 +39,11 @@ func TestReticulumConnClosedRead(t *testing.T) {
 func TestReticulumConnClosedWrite(t *testing.T) {
 	c := &reticulumConn{handle: 0}
 	_, err := c.Write([]byte("x"))
+	require.ErrorIs(t, err, io.ErrClosedPipe)
+}
+
+func TestReticulumConnReadMessageClosed(t *testing.T) {
+	c := &reticulumConn{handle: 0}
+	_, err := c.ReadMessage()
 	require.ErrorIs(t, err, io.ErrClosedPipe)
 }

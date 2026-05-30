@@ -43,14 +43,21 @@ func RegisterInbound(registry *inbound.Registry) {
 
 type Inbound struct {
 	inbound.Adapter
-	router       adapter.Router
-	logger       log.ContextLogger
-	options      option.ReticulumInboundOptions
-	listenerTask int
-	listenerHdl  uint64
-	accepting    bool
-	mu           sync.Mutex
-	closed       bool
+	router      adapter.Router
+	logger      log.ContextLogger
+	options     option.ReticulumInboundOptions
+	listenerHdl uint64
+
+	// authMu serialises full SBRT-AUTH-1 exchanges so two simultaneous
+	// first-connections from the same peer don't race each other.
+	authMu sync.Mutex
+
+	// trustStore caches authenticated peer identities persistently on disk.
+	trustStore *TrustStore
+
+	mu        sync.Mutex
+	closed    bool
+	accepting bool
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ReticulumInboundOptions) (adapter.Inbound, error) {
@@ -60,6 +67,13 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		logger:  logger,
 		options: options,
 	}, nil
+}
+
+func (h *Inbound) trustStorePath() string {
+	if h.options.ReticulumConfig != nil && h.options.ReticulumConfig.StoragePath != "" {
+		return h.options.ReticulumConfig.StoragePath + "/trust_store.json"
+	}
+	return ""
 }
 
 func (h *Inbound) Start(stage adapter.StartStage) error {
@@ -93,11 +107,12 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 		return fmt.Errorf("bridge init failed: %w", err)
 	}
 
+	h.trustStore = NewTrustStore(h.trustStorePath())
+
 	taskID, err := BridgeListen(listenHash)
 	if err != nil {
 		return fmt.Errorf("bridge listen failed: %w", err)
 	}
-	h.listenerTask = taskID
 
 	handle, err := BridgePollTask(taskID, 30*time.Second)
 	if err != nil {
@@ -128,7 +143,11 @@ func (h *Inbound) acceptLoop() {
 			continue
 		}
 
-		handle, err := BridgePollTask(taskID, 30*time.Second)
+		// Use a long timeout: the first client may take 60-90 s for name
+		// resolution + link establishment. If we time out before the connection
+		// arrives, the Rust accept_wait task silently claims it and the handle
+		// is never retrieved. 120 s gives plenty of margin.
+		handle, err := BridgePollTask(taskID, 120*time.Second)
 		if err != nil {
 			h.logger.Error("poll after accept failed: ", err)
 			continue
@@ -136,33 +155,82 @@ func (h *Inbound) acceptLoop() {
 
 		h.logger.Debug("accepted connection, handle=", handle)
 
-		conn := newReticulumConn(handle, "inbound", fmt.Sprintf("listener-%d", h.listenerHdl))
-
-		if h.options.Password != "" {
-			if err := ServerAuth(conn, h.options.Password); err != nil {
-				h.logger.Error("reticulum auth failed: ", err)
-				conn.Close()
-				continue
-			}
-		}
-
-		destAddr, err := readDestHeader(conn)
-		if err != nil {
-			h.logger.Error("read dest header: ", err)
-			conn.Close()
-			continue
-		}
-
-		h.logger.Info("inbound connection to ", destAddr)
-
-		if h.router != nil {
-			metadata := adapter.InboundContext{
-				Network:     "tcp",
-				Destination: M.ParseSocksaddr(destAddr),
-			}
-			h.router.RouteConnectionEx(context.Background(), conn, metadata, nil)
-		}
+		// Spawn per-connection goroutine immediately so acceptLoop can loop
+		// back to BridgeAccept without waiting for auth+routing to complete.
+		go h.handleConn(handle)
 	}
+}
+
+func (h *Inbound) handleConn(handle uint64) {
+	raw := newReticulumConn(handle, "inbound", fmt.Sprintf("listener-%d", h.listenerHdl))
+	fc := newFramedConn(raw)
+	go fc.dispatch()
+	defer fc.Close()
+
+	if h.options.Password != "" {
+		if err := h.negotiateAuth(fc, "" /* peerHash — available in Phase 2 */); err != nil {
+			h.logger.Error("reticulum auth failed: ", err)
+			return
+		}
+	} else {
+		fc.OpenGate()
+	}
+
+	destAddr, err := readDestHeader(fc)
+	if err != nil {
+		h.logger.Error("read dest header: ", err)
+		return
+	}
+
+	h.logger.Info("inbound connection to ", destAddr)
+
+	if h.router != nil {
+		metadata := adapter.InboundContext{
+			Network:     "tcp",
+			Destination: M.ParseSocksaddr(destAddr),
+		}
+		h.router.RouteConnectionEx(context.Background(), fc, metadata, nil)
+	}
+}
+
+// negotiateAuth exchanges trust hints and runs a full SBRT-AUTH-1 handshake
+// if needed, then opens the data gate.
+func (h *Inbound) negotiateAuth(fc *framedConn, peerHash string) error {
+	myTrust := byte(0x00)
+	if h.trustStore.IsTrusted(peerHash, h.options.Password) {
+		myTrust = 0x01
+	}
+
+	if err := fc.WriteMsg(string([]byte{myTrust})); err != nil {
+		return fmt.Errorf("write trust hint: %w", err)
+	}
+
+	peerMsg, err := fc.ReadMsg()
+	if err != nil {
+		return fmt.Errorf("read trust hint: %w", err)
+	}
+	if len(peerMsg) == 0 {
+		return fmt.Errorf("empty trust hint from peer")
+	}
+	peerTrust := peerMsg[0]
+
+	if myTrust == 0x01 && peerTrust == 0x01 {
+		fc.OpenGate()
+		return nil
+	}
+
+	h.authMu.Lock()
+	err = ServerAuth(fc, h.options.Password)
+	h.authMu.Unlock()
+	if err != nil {
+		return err
+	}
+
+	if err := h.trustStore.Store(peerHash, h.options.Password); err != nil {
+		h.logger.Warn("trust store write failed: ", err)
+	}
+	fc.OpenGate()
+	return nil
 }
 
 func (h *Inbound) Close() error {

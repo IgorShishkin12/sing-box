@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -15,10 +16,11 @@ pub struct Connection {
 #[derive(Clone)]
 enum ConnectionInner {
     /// Real Reticulum link connection.
+    /// read_buf holds one Vec<u8> per received data_packet, preserving message boundaries.
     Link {
         link: Arc<Mutex<Link>>,
         link_id: AddressHash,
-        read_buf: Arc<RwLock<Vec<u8>>>,
+        read_buf: Arc<RwLock<VecDeque<Vec<u8>>>>,
     },
     /// In-memory buffered connection — test use only.
     #[cfg(test)]
@@ -55,7 +57,7 @@ impl Connection {
             inner: ConnectionInner::Link {
                 link,
                 link_id,
-                read_buf: Arc::new(RwLock::new(Vec::new())),
+                read_buf: Arc::new(RwLock::new(VecDeque::new())),
             },
         }
     }
@@ -116,18 +118,29 @@ impl Connection {
         }
     }
 
-    /// Read data from the connection's read buffer.
+    /// Read exactly one complete message from the connection's read buffer.
+    ///
+    /// For Link connections the buffer stores one Vec<u8> per received
+    /// data_packet, so this returns exactly one packet's payload per call.
+    /// Returns 0 if no complete message is available yet.
     pub async fn read(&self, buf: &mut [u8]) -> usize {
         match &self.inner {
             ConnectionInner::Link { read_buf, .. } => {
-                let mut buf_lock = read_buf.write().await;
-                if buf_lock.is_empty() {
-                    return 0;
+                let mut deque = read_buf.write().await;
+                match deque.front_mut() {
+                    None => 0,
+                    Some(msg) => {
+                        let copy_len = buf.len().min(msg.len());
+                        buf[..copy_len].copy_from_slice(&msg[..copy_len]);
+                        if copy_len >= msg.len() {
+                            deque.pop_front();
+                        } else {
+                            // Partial read: drain the consumed prefix.
+                            msg.drain(..copy_len);
+                        }
+                        copy_len
+                    }
                 }
-                let len = buf.len().min(buf_lock.len());
-                buf[..len].copy_from_slice(&buf_lock[..len]);
-                buf_lock.drain(..len);
-                len
             }
             #[cfg(test)]
             ConnectionInner::Memory { read_buf, .. } => {
@@ -143,30 +156,35 @@ impl Connection {
         }
     }
 
-    /// Push data into the read buffer (called by the link event subscriber).
+    /// Push one complete message into the read buffer (called by the link event subscriber).
+    /// Each call corresponds to exactly one received data_packet, preserving boundaries.
     pub async fn push_read_data(&self, data: &[u8]) {
         match &self.inner {
             ConnectionInner::Link { read_buf, .. } => {
-                read_buf.write().await.extend_from_slice(data);
+                read_buf.write().await.push_back(data.to_vec());
             }
             #[cfg(test)]
             ConnectionInner::Memory { .. } => {}
         }
     }
 
-    /// Read all available data without removing it from the buffer.
+    /// Peek at the first available message without removing it from the buffer.
     pub async fn peek(&self) -> Vec<u8> {
         match &self.inner {
-            ConnectionInner::Link { read_buf, .. } => read_buf.read().await.clone(),
+            ConnectionInner::Link { read_buf, .. } => {
+                read_buf.read().await.front().cloned().unwrap_or_default()
+            }
             #[cfg(test)]
             ConnectionInner::Memory { read_buf, .. } => read_buf.read().await.clone(),
         }
     }
 
-    /// Get the number of bytes available to read.
+    /// Get the number of bytes in the first available message (0 if no message is queued).
     pub async fn available(&self) -> usize {
         match &self.inner {
-            ConnectionInner::Link { read_buf, .. } => read_buf.read().await.len(),
+            ConnectionInner::Link { read_buf, .. } => {
+                read_buf.read().await.front().map_or(0, |m| m.len())
+            }
             #[cfg(test)]
             ConnectionInner::Memory { read_buf, .. } => read_buf.read().await.len(),
         }
@@ -306,16 +324,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_link_connection_push_read_data_multi() {
+        // Each push_read_data call is a discrete message; read() returns one message at a time.
         let (link, link_id) = make_test_link();
         let conn = Connection::new_from_link(link, link_id);
         conn.push_read_data(b"abc").await;
         conn.push_read_data(b"def").await;
         conn.push_read_data(b"ghi").await;
-        assert_eq!(conn.available().await, 9);
+        // available() reports the size of the first queued message.
+        assert_eq!(conn.available().await, 3);
         let mut buf = [0u8; 9];
         let read = conn.read(&mut buf).await;
-        assert_eq!(read, 9);
-        assert_eq!(&buf, b"abcdefghi");
+        assert_eq!(read, 3);
+        assert_eq!(&buf[..3], b"abc");
+        let read = conn.read(&mut buf).await;
+        assert_eq!(read, 3);
+        assert_eq!(&buf[..3], b"def");
+        let read = conn.read(&mut buf).await;
+        assert_eq!(read, 3);
+        assert_eq!(&buf[..3], b"ghi");
     }
 
     #[tokio::test]
@@ -324,7 +350,9 @@ mod tests {
         let conn = Connection::new_from_link(link, link_id);
         assert_eq!(conn.available().await, 0);
         conn.push_read_data(b"peek test").await;
+        // available() returns the size of the first queued message.
         assert_eq!(conn.available().await, 9);
+        // peek() returns a clone of the first queued message without removing it.
         let peeked = conn.peek().await;
         assert_eq!(peeked, b"peek test");
         assert_eq!(conn.available().await, 9);
