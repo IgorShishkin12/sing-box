@@ -15,7 +15,7 @@ FROM alpine:3.20 AS copy_git_shenanigans
 RUN apk add --no-cache git
 COPY --from=copy_shenanigans /workspace/sing-box /workspace/sing-box
 WORKDIR /workspace/sing-box
-RUN git add . && git -c user.email="a@a.com" -c user.name="a" commit -m "this message is needed to find commit later on in build 0667351b4867feb55992599d58469b0d43f10ef3"
+RUN git add . && git -c user.email="a@a.com" -c user.name="a" commit -q -m "this message is needed to find commit later on in build 0667351b4867feb55992599d58469b0d43f10ef3"
 RUN git checkout 0667351b4867feb55992599d58469b0d43f10ef3 && git clean -fdx
 
 FROM copy_git_shenanigans as copy_git_shenanigans_without_git
