@@ -10,8 +10,16 @@ RUN find . -type f -name '*_test.rs' -delete
 RUN rm -rf ./bridge/target ./.github ./sing-box
 
 
-FROM copy_shenanigans as copy_shenanigans_w_e2e
-RUN rm -rf ./e2e
+
+FROM alpine:3.20 AS copy_git_shenanigans
+RUN apk add --no-cache git
+COPY --from=copy_shenanigans /workspace/sing-box /workspace/sing-box
+WORKDIR /workspace/sing-box
+RUN git add . && git -c user.email="a@a.com" -c user.name="a" commit -m "this message is needed to find commit later on in build 0667351b4867feb55992599d58469b0d43f10ef3"
+RUN git checkout 0667351b4867feb55992599d58469b0d43f10ef3 && git clean -fdx
+
+FROM copy_git_shenanigans as copy_git_shenanigans_without_git
+RUN rm -rf .git
 
 
 FROM golang:1.24-alpine AS builder
@@ -23,12 +31,12 @@ COPY ./go.mod ./go.sum /workspace/sing-box/
 WORKDIR /workspace/sing-box
 RUN go mod download
 
-COPY --from=copy_shenanigans_w_e2e /workspace/sing-box/bridge /workspace/sing-box/bridge
+COPY --from=copy_git_shenanigans_without_git /workspace/sing-box/bridge /workspace/sing-box/bridge
 
 # Build Rust bridge (release for static linking)
 RUN cd bridge && cargo build --release
 
-COPY --from=copy_shenanigans_w_e2e /workspace/sing-box /workspace/sing-box
+COPY --from=copy_git_shenanigans_without_git /workspace/sing-box /workspace/sing-box
 
 # Build sing-box with reticulum support
 RUN export COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown") && \
@@ -41,6 +49,21 @@ RUN export COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown") &&
         -ldflags "-X \"github.com/sagernet/sing-box/constant.Version=$VERSION\" $LDFLAGS_SHARED -s -w -buildid=" \
         ./cmd/sing-box/
 
+COPY --from=copy_git_shenanigans /workspace/sing-box/.git /workspace/sing-box/.git
+RUN git checkout $(git log --all --grep="this message is needed to find commit later on in build 0667351b4867feb55992599d58469b0d43f10ef3" --format="%H" -1)
+
+RUN cd bridge && cargo build --release
+
+# Build sing-box with reticulum support
+RUN export COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown") && \
+    export VERSION=$(go run ./cmd/internal/read_tag 2>/dev/null || echo "dev") && \
+    export TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS) && \
+    export LDFLAGS_SHARED=$(cat release/LDFLAGS) && \
+    CGO_ENABLED=1 \
+    go build -v -trimpath -tags "$TAGS,with_reticulum" \
+        -o /usr/local/bin/sing-box \
+        -ldflags "-X \"github.com/sagernet/sing-box/constant.Version=$VERSION\" $LDFLAGS_SHARED -s -w -buildid=" \
+        ./cmd/sing-box/
 # Build sum-server
 COPY --from=copy_shenanigans /workspace/sing-box/e2e /workspace/sing-box/e2e
 

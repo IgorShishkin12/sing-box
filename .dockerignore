@@ -1,5 +1,4 @@
 bridge/target/
-.git/
 **/*.md
 test/
 **/Dockerfile.*
