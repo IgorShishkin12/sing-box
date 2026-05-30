@@ -34,6 +34,7 @@ func main() {
 	concurrency := flag.Int("concurrency", 5, "Number of concurrent goroutines in phase 2")
 	requests := flag.Int("requests", 20, "Total requests to send in phase 2")
 	warmupTimeout := flag.Duration("warmup-timeout", 60*time.Second, "Max time for phase 1 warm-up")
+	longTerms := flag.Int("long-terms", 0, "Phase 3: number of terms to sum in a single large request (0 = skip)")
 	flag.Parse()
 
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
@@ -96,6 +97,24 @@ func main() {
 		log.Printf("FAIL: %d requests failed", failure.Load())
 		os.Exit(1)
 	}
+
+	// ── Phase 3: long-message test ───────────────────────────────────────────
+	if *longTerms > 0 {
+		n := *longTerms
+		terms := make([]int, n)
+		expected := 0
+		for i := range terms {
+			terms[i] = i + 1
+			expected += i + 1
+		}
+		log.Printf("Phase 3: sending %d terms (expected sum %d) ...", n, expected)
+		if err := doLongTermsRequest(*socksAddr, *targetURL+"/sum-terms", terms, expected); err != nil {
+			log.Printf("Phase 3: FAIL: %v", err)
+			os.Exit(1)
+		}
+		log.Printf("Phase 3: long-message test passed")
+	}
+
 	log.Printf("ALL E2E TESTS PASSED")
 }
 
@@ -145,6 +164,56 @@ func doRequest(socksAddr, rawURL string, a, b int) error {
 		return fmt.Errorf("decode response: %w", err)
 	}
 	expected := a + b
+	if result.Sum != expected {
+		return fmt.Errorf("wrong sum: got %d, want %d", result.Sum, expected)
+	}
+	return nil
+}
+
+// doLongTermsRequest sends POST /sum with a large terms array via SOCKS5 and
+// verifies the server returns the expected sum.
+func doLongTermsRequest(socksAddr, rawURL string, terms []int, expected int) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("parse url: %w", err)
+	}
+	destHost := u.Hostname()
+	destPort := 80
+	if p := u.Port(); p != "" {
+		destPort, _ = strconv.Atoi(p)
+	}
+
+	conn, err := socks5Connect(socksAddr, destHost, destPort)
+	if err != nil {
+		return fmt.Errorf("socks5 connect: %w", err)
+	}
+	defer conn.Close()
+
+	body, _ := json.Marshal(map[string]any{"terms": terms})
+	req, _ := http.NewRequest("POST", rawURL, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	transport := &http.Transport{
+		Dial: func(network, addr string) (net.Conn, error) { return conn, nil },
+	}
+	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("http do: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Sum int `json:"sum"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
 	if result.Sum != expected {
 		return fmt.Errorf("wrong sum: got %d, want %d", result.Sum, expected)
 	}

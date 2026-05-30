@@ -1,3 +1,19 @@
+FROM alpine:3.20 AS copy_shenanigans
+
+COPY . /workspace/sing-box
+WORKDIR /workspace/sing-box
+
+RUN find . -type f -name '*_test.go' -delete
+RUN find . -type f -name '*_test.rs' -delete
+# RUN find . -type f -name 'Dockerfile.*' -delete
+# RUN find . -type f -name 'docker-compose.*' -delete
+RUN rm -rf ./bridge/target ./.github ./sing-box
+
+
+FROM copy_shenanigans as copy_shenanigans_w_e2e
+RUN rm -rf ./e2e
+
+
 FROM golang:1.24-alpine AS builder
 
 RUN apk add --no-cache rust cargo build-base git
@@ -7,12 +23,12 @@ COPY ./go.mod ./go.sum /workspace/sing-box/
 WORKDIR /workspace/sing-box
 RUN go mod download
 
-COPY ./bridge /workspace/sing-box/bridge
+COPY --from=copy_shenanigans_w_e2e /workspace/sing-box/bridge /workspace/sing-box/bridge
 
 # Build Rust bridge (release for static linking)
 RUN cd bridge && cargo build --release
 
-COPY . /workspace/sing-box
+COPY --from=copy_shenanigans_w_e2e /workspace/sing-box /workspace/sing-box
 
 # Build sing-box with reticulum support
 RUN export COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown") && \
@@ -26,7 +42,10 @@ RUN export COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown") &&
         ./cmd/sing-box/
 
 # Build e2e load tester
+COPY --from=copy_shenanigans /workspace/sing-box/e2e /workspace/sing-box/e2e
+
 RUN go build -o /usr/local/bin/e2e-loadtest ./e2e/loadtest/
+
 
 FROM alpine:3.20
 

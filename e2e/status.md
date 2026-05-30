@@ -5,6 +5,11 @@
 ### TCP simple (phase-1 warmup)
 **PASSES** — single sequential connection, auth + sum request succeeds in ~5.5 s.
 
+### TCP Length test
+**PASSES**: 4, 16, 64
+**FAILS** : 512, 128, 118
+Formula of actual length: 10 + n*3 - 2 + 2 = 10 + n*3
+
 ### TCP loadtest (phase-2 concurrent, 5 goroutines × 4 requests)
 **FAILS** — 0/20 requests succeed.
 

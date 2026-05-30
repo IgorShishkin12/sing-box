@@ -14,6 +14,10 @@ type sumRequest struct {
 	B int `json:"b"`
 }
 
+type sumTermsRequest struct {
+	Terms []int `json:"terms"`
+}
+
 type sumResponse struct {
 	Sum int `json:"sum"`
 }
@@ -37,6 +41,29 @@ func sumHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("sum: %d + %d = %d", req.A, req.B, resp.Sum)
 }
 
+// sumTermsHandler accepts {"terms":[...]} and returns their sum.
+func sumTermsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "only POST allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req sumTermsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("invalid JSON: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	result := 0
+	for _, t := range req.Terms {
+		result += t
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sumResponse{Sum: result})
+
+	log.Printf("sum-terms: %d terms = %d", len(req.Terms), result)
+}
+
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "ok")
 }
@@ -50,6 +77,7 @@ func main() {
 	}
 
 	http.HandleFunc("/sum", sumHandler)
+	http.HandleFunc("/sum-terms", sumTermsHandler)
 	http.HandleFunc("/health", healthHandler)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
