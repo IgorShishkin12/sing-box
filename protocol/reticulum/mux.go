@@ -14,9 +14,8 @@ import (
 
 const (
 	MaxReticulumMessage = 200
-	muxFrameHeaderSize  = 2 // 2-byte big-endian length prefix on every framed mux message
 	muxHeaderSize       = 3
-	maxFragPayload      = MaxReticulumMessage - muxFrameHeaderSize - muxHeaderSize // 195
+	maxFragPayload      = MaxReticulumMessage - muxHeaderSize // 197
 
 	// Control packet type bytes (high bit set). From PLAN.md + new types.
 	TypeAuthCtrl     byte = 0x80 // auth exchange message
@@ -82,15 +81,6 @@ func encodePacket(p muxPacket) []byte {
 	return buf
 }
 
-// writeFramed writes data to w prefixed by a 2-byte big-endian length header.
-// All bytes are written in a single Write call to prevent interleaving.
-func writeFramed(w io.Writer, data []byte) error {
-	framed := make([]byte, muxFrameHeaderSize+len(data))
-	binary.BigEndian.PutUint16(framed, uint16(len(data)))
-	copy(framed[muxFrameHeaderSize:], data)
-	_, err := w.Write(framed)
-	return err
-}
 
 // decodePacket parses wire bytes into a muxPacket.
 func decodePacket(b []byte) (muxPacket, error) {
@@ -226,7 +216,8 @@ func (s *muxSession) OpenConn(dest string) (*muxConn, error) {
 func (s *muxSession) writeCtrl(typ byte, id uint16, payload []byte) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return writeFramed(s.inner, encodePacket(muxPacket{typeByte: typ, connID: id, payload: payload}))
+	_, err := s.inner.Write(encodePacket(muxPacket{typeByte: typ, connID: id, payload: payload}))
+	return err
 }
 
 // writeData fragments data and sends all packets under writeMu, ensuring
@@ -245,7 +236,7 @@ func (s *muxSession) writeData(id uint16, data []byte) error {
 			connID:   id,
 			payload:  part,
 		}
-		if err := writeFramed(s.inner, encodePacket(pkt)); err != nil {
+		if _, err := s.inner.Write(encodePacket(pkt)); err != nil {
 			return err
 		}
 	}
@@ -260,34 +251,22 @@ func (s *muxSession) removeConn(id uint16) {
 }
 
 // readLoop is the single goroutine that reads packets and dispatches them.
-// Each packet is length-prefixed (muxFrameHeaderSize bytes) so that multiple
-// packets coalesced into one Read call are parsed correctly.
 func (s *muxSession) readLoop() {
 	defer s.closeAll()
 
 	fragBufs := make(map[uint16]*fragBuffer)
-	var lenBuf [muxFrameHeaderSize]byte
-	msgBuf := make([]byte, MaxReticulumMessage)
+	buf := make([]byte, MaxReticulumMessage)
 
 	for {
-		if _, err := io.ReadFull(s.inner, lenBuf[:]); err != nil {
-			if s.logger != nil {
-				s.logger.Debug("mux readLoop exit: ", err)
-			}
-			return
-		}
-		msgLen := int(binary.BigEndian.Uint16(lenBuf[:]))
-		if msgLen > len(msgBuf) {
-			msgBuf = make([]byte, msgLen)
-		}
-		if _, err := io.ReadFull(s.inner, msgBuf[:msgLen]); err != nil {
+		n, err := s.inner.Read(buf)
+		if err != nil {
 			if s.logger != nil {
 				s.logger.Debug("mux readLoop exit: ", err)
 			}
 			return
 		}
 
-		pkt, err := decodePacket(msgBuf[:msgLen])
+		pkt, err := decodePacket(buf[:n])
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Error("mux: decode error: ", err)

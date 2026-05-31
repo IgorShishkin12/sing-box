@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -18,7 +19,11 @@ enum ConnectionInner {
     Link {
         link: Arc<Mutex<Link>>,
         link_id: AddressHash,
-        read_buf: Arc<RwLock<Vec<u8>>>,
+        /// TODO: switch bridge to async — remove this queue once BridgeRead is async
+        /// and delivers one packet per await. Until then, each push_read_data call
+        /// enqueues one Reticulum packet and read pops exactly one, preserving
+        /// message boundaries so the Go mux layer sees discrete packets.
+        read_buf: Arc<RwLock<VecDeque<Vec<u8>>>>,
     },
     /// In-memory buffered connection — test use only.
     #[cfg(test)]
@@ -55,7 +60,7 @@ impl Connection {
             inner: ConnectionInner::Link {
                 link,
                 link_id,
-                read_buf: Arc::new(RwLock::new(Vec::new())),
+                read_buf: Arc::new(RwLock::new(VecDeque::new())),
             },
         }
     }
@@ -116,18 +121,21 @@ impl Connection {
         }
     }
 
-    /// Read data from the connection's read buffer.
+    /// Read one message from the connection's receive queue.
+    /// Returns the number of bytes copied, or 0 if no message is available.
+    /// Each call returns exactly one Reticulum packet, preserving message boundaries.
     pub async fn read(&self, buf: &mut [u8]) -> usize {
         match &self.inner {
             ConnectionInner::Link { read_buf, .. } => {
-                let mut buf_lock = read_buf.write().await;
-                if buf_lock.is_empty() {
-                    return 0;
+                let mut queue = read_buf.write().await;
+                match queue.pop_front() {
+                    Some(msg) => {
+                        let len = buf.len().min(msg.len());
+                        buf[..len].copy_from_slice(&msg[..len]);
+                        len
+                    }
+                    None => 0,
                 }
-                let len = buf.len().min(buf_lock.len());
-                buf[..len].copy_from_slice(&buf_lock[..len]);
-                buf_lock.drain(..len);
-                len
             }
             #[cfg(test)]
             ConnectionInner::Memory { read_buf, .. } => {
@@ -143,30 +151,34 @@ impl Connection {
         }
     }
 
-    /// Push data into the read buffer (called by the link event subscriber).
+    /// Enqueue one received Reticulum packet (called by the link event subscriber).
     pub async fn push_read_data(&self, data: &[u8]) {
         match &self.inner {
             ConnectionInner::Link { read_buf, .. } => {
-                read_buf.write().await.extend_from_slice(data);
+                read_buf.write().await.push_back(data.to_vec());
             }
             #[cfg(test)]
             ConnectionInner::Memory { .. } => {}
         }
     }
 
-    /// Read all available data without removing it from the buffer.
+    /// Peek at the next queued message without removing it.
     pub async fn peek(&self) -> Vec<u8> {
         match &self.inner {
-            ConnectionInner::Link { read_buf, .. } => read_buf.read().await.clone(),
+            ConnectionInner::Link { read_buf, .. } => {
+                read_buf.read().await.front().cloned().unwrap_or_default()
+            }
             #[cfg(test)]
             ConnectionInner::Memory { read_buf, .. } => read_buf.read().await.clone(),
         }
     }
 
-    /// Get the number of bytes available to read.
+    /// Get the total number of bytes across all queued messages.
     pub async fn available(&self) -> usize {
         match &self.inner {
-            ConnectionInner::Link { read_buf, .. } => read_buf.read().await.len(),
+            ConnectionInner::Link { read_buf, .. } => {
+                read_buf.read().await.iter().map(|m| m.len()).sum()
+            }
             #[cfg(test)]
             ConnectionInner::Memory { read_buf, .. } => read_buf.read().await.len(),
         }
@@ -311,11 +323,41 @@ mod tests {
         conn.push_read_data(b"abc").await;
         conn.push_read_data(b"def").await;
         conn.push_read_data(b"ghi").await;
+        // available reports total bytes across all queued messages
         assert_eq!(conn.available().await, 9);
+
+        // Each read returns exactly one Reticulum packet, preserving message boundaries.
         let mut buf = [0u8; 9];
         let read = conn.read(&mut buf).await;
-        assert_eq!(read, 9);
-        assert_eq!(&buf, b"abcdefghi");
+        assert_eq!(read, 3);
+        assert_eq!(&buf[..3], b"abc");
+
+        let read = conn.read(&mut buf).await;
+        assert_eq!(read, 3);
+        assert_eq!(&buf[..3], b"def");
+
+        let read = conn.read(&mut buf).await;
+        assert_eq!(read, 3);
+        assert_eq!(&buf[..3], b"ghi");
+
+        assert_eq!(conn.available().await, 0);
+        assert_eq!(conn.read(&mut buf).await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_link_connection_message_boundaries() {
+        // Regression test: two push_read_data calls must not be merged into one read.
+        let (link, link_id) = make_test_link();
+        let conn = Connection::new_from_link(link, link_id);
+        conn.push_read_data(b"\x82\x00\x01host:80").await;   // simulated TypeNewConn
+        conn.push_read_data(b"\x00\x00\x01hello").await;     // simulated data packet
+
+        let mut buf = [0u8; 200];
+        let n = conn.read(&mut buf).await;
+        assert_eq!(&buf[..n], b"\x82\x00\x01host:80");
+
+        let n = conn.read(&mut buf).await;
+        assert_eq!(&buf[..n], b"\x00\x00\x01hello");
     }
 
     #[tokio::test]

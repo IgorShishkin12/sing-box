@@ -1,8 +1,6 @@
 package reticulum
 
 import (
-	"bytes"
-	"encoding/binary"
 	"io"
 	"net"
 	"sync/atomic"
@@ -11,22 +9,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
-
-// bufConn is a read-only net.Conn backed by a bytes.Buffer.
-// It simulates a streaming transport that delivers data in arbitrary chunks.
-// Writes are discarded; Read returns io.EOF when the buffer is empty.
-type bufConn struct {
-	r *bytes.Buffer
-}
-
-func (c *bufConn) Read(b []byte) (int, error)         { return c.r.Read(b) }
-func (c *bufConn) Write(b []byte) (int, error)        { return len(b), nil }
-func (c *bufConn) Close() error                        { return nil }
-func (c *bufConn) LocalAddr() net.Addr                 { return reticulumAddr{network: "test", str: "local"} }
-func (c *bufConn) RemoteAddr() net.Addr                { return reticulumAddr{network: "test", str: "remote"} }
-func (c *bufConn) SetDeadline(t time.Time) error       { return nil }
-func (c *bufConn) SetReadDeadline(t time.Time) error   { return nil }
-func (c *bufConn) SetWriteDeadline(t time.Time) error  { return nil }
 
 // --- encodeDataByte / decodeDataByte ---
 
@@ -338,33 +320,3 @@ func TestMuxSession_idExhaustion(t *testing.T) {
 	require.Contains(t, err.Error(), "exhausted")
 }
 
-// TestMuxReadLoop_coalescedPackets verifies that the readLoop correctly parses
-// two mux packets that arrive concatenated in a single Read call — the TCP
-// coalescing scenario that caused the E2E failure (server received both the
-// TypeNewConn and first data packet as one 167-byte chunk, treating the HTTP
-// request body as part of the destination address).
-func TestMuxReadLoop_coalescedPackets(t *testing.T) {
-	pkt1 := encodePacket(muxPacket{typeByte: TypeNewConn, connID: 1, payload: []byte("host:80")})
-	pkt2 := encodePacket(muxPacket{typeByte: encodeDataByte(1, 0), connID: 1, payload: []byte("hello")})
-
-	var h1, h2 [muxFrameHeaderSize]byte
-	binary.BigEndian.PutUint16(h1[:], uint16(len(pkt1)))
-	binary.BigEndian.PutUint16(h2[:], uint16(len(pkt2)))
-
-	// Concatenate both framed packets into one buffer — simulates TCP coalescing.
-	combined := append(append(append(h1[:], pkt1...), h2[:]...), pkt2...)
-
-	conn := &bufConn{r: bytes.NewBuffer(combined)}
-	session := newMuxSessionServer(conn, nil)
-
-	select {
-	case mc := <-session.incomingCh:
-		require.Equal(t, "host:80", mc.dest)
-		buf := make([]byte, len("hello"))
-		_, err := io.ReadFull(mc, buf)
-		require.NoError(t, err)
-		require.Equal(t, []byte("hello"), buf)
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for incoming conn")
-	}
-}
