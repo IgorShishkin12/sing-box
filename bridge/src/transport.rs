@@ -173,12 +173,22 @@ async fn spawn_interfaces(
         let label = iface.name.as_deref().unwrap_or(&iface.iface_type);
         match iface.iface_type.as_str() {
             "AutoInterface" => {
+                // TODO: This is a minimal approximation of Reticulum's AutoInterface.
+                // The real implementation (RNS/Interfaces/AutoInterface.py) enumerates
+                // every non-loopback interface, opens one UDP socket per interface, sends
+                // to each interface's subnet broadcast address, and uses IPv6 link-local
+                // multicast (ff02::) in addition to IPv4. We use a single site-local
+                // multicast group (239.255.0.1) instead of broadcast because the underlying
+                // socket2 socket does not set SO_BROADCAST, so 255.255.255.255 sends are
+                // silently dropped. This works on most LANs and in Docker/Podman bridge
+                // networks, but diverges from real Reticulum in multi-interface and IPv6
+                // scenarios.
                 let port = iface.data_port.unwrap_or(49555);
-                let bind = format!("0.0.0.0:{port}");
-                let bcast = format!("255.255.255.255:{port}");
-                let ui = UdpInterface::new(&bind, Some(&bcast));
+                let mcast = format!("239.255.0.1:{port}");
+                let ui = UdpInterface::new(&mcast, Some(&mcast));
                 let addr = iface_mgr.spawn(ui, |ctx| UdpInterface::spawn(ctx));
-                log::info!("spawned AutoInterface (UDP broadcast) port={} addr={}", port, addr);
+                log::info!("spawned AutoInterface (UDP multicast 239.255.0.1) port={} addr={}", port, addr);
+                log::warn!("AutoInterface here is experimental feature, incompatible with real Reticulum' implementation");
             }
             "UDPInterface" => {
                 let lip = iface.listen_ip.as_deref().unwrap_or("0.0.0.0");

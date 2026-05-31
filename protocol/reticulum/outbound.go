@@ -29,6 +29,8 @@ type Outbound struct {
 	bridgeInited bool
 	resolvedHash string // Reticulum destination hash, cached after first resolution
 	mu           sync.Mutex
+	sessionMu    sync.Mutex
+	session      *muxSession
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ReticulumOutboundOptions) (adapter.Outbound, error) {
@@ -87,6 +89,55 @@ func (h *Outbound) Dependencies() []string {
 	return nil
 }
 
+// getOrCreateSession returns the shared mux session, creating it if needed.
+// Must be called with h.mu already released (it acquires sessionMu internally).
+func (h *Outbound) getOrCreateSession(ctx context.Context, destHash string) (*muxSession, error) {
+	h.sessionMu.Lock()
+	defer h.sessionMu.Unlock()
+
+	if h.session != nil && !h.session.isClosed() {
+		return h.session, nil
+	}
+
+	h.logger.DebugContext(ctx, "opening new mux session to ", destHash)
+
+	taskID, err := BridgeDial(destHash)
+	if err != nil {
+		return nil, err
+	}
+
+	deadline, ok := ctx.Deadline()
+	timeout := 30 * time.Second
+	if ok {
+		timeout = time.Until(deadline)
+		if timeout <= 0 {
+			return nil, context.DeadlineExceeded
+		}
+	}
+
+	handle, err := BridgePollTask(taskID, timeout)
+	if err != nil {
+		return nil, err
+	}
+
+	localName := "outbound"
+	if h.options.Name != "" {
+		localName = h.options.Name
+	}
+	raw := newReticulumConn(handle, localName, destHash, h.logger)
+
+	if h.options.Password != "" {
+		if err := ClientAuth(raw, h.options.Password); err != nil {
+			raw.Close()
+			return nil, fmt.Errorf("reticulum auth failed: %w", err)
+		}
+	}
+
+	h.session = newMuxSessionClient(raw, h.logger)
+	h.logger.InfoContext(ctx, "mux session established to ", destHash)
+	return h.session, nil
+}
+
 func (h *Outbound) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	h.mu.Lock()
 	inited := h.bridgeInited
@@ -116,47 +167,17 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 
 	h.logger.DebugContext(ctx, "dialing ", destHash, " for ", destination)
 
-	taskID, err := BridgeDial(destHash)
+	session, err := h.getOrCreateSession(ctx, destHash)
 	if err != nil {
-		h.logger.ErrorContext(ctx, "dial error: ", err)
+		h.logger.ErrorContext(ctx, "session error: ", err)
 		return nil, err
 	}
 
-	deadline, ok := ctx.Deadline()
-	timeout := 30 * time.Second
-	if ok {
-		timeout = time.Until(deadline)
-		if timeout <= 0 {
-			return nil, context.DeadlineExceeded
-		}
-	}
-
-	handle, err := BridgePollTask(taskID, timeout)
+	mc, err := session.OpenConn(destination.String())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mux OpenConn: %w", err)
 	}
-
-	h.logger.InfoContext(ctx, "connected to ", destHash)
-
-	localName := "outbound"
-	if h.options.Name != "" {
-		localName = h.options.Name
-	}
-	conn := newReticulumConn(handle, localName, destHash, h.logger)
-
-	if h.options.Password != "" {
-		if err := ClientAuth(conn, h.options.Password); err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("reticulum auth failed: %w", err)
-		}
-	}
-
-	if err := writeDestHeader(conn, destination.String()); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("write dest header: %w", err)
-	}
-
-	return conn, nil
+	return mc, nil
 }
 
 func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
