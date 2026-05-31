@@ -42,13 +42,20 @@ fn test_shutdown_then_dial_returns_error() {
     // Dial without re-init — transport is not available, should error
     let dest = std::ffi::CString::new("aabbccdd00112233445566778899aabb").unwrap();
     let task_id = sing_box_reticulum_bridge::c_api::reticulum_dial(dest.as_ptr());
-    assert!(task_id >= 0, "dial should return a task ID even without transport");
+    assert!(
+        task_id >= 0,
+        "dial should return a task ID even without transport"
+    );
 
     let mut result_out: *mut u8 = std::ptr::null_mut();
     let mut len_out: usize = 0;
     let mut attempts = 0;
     loop {
-        let ret = sing_box_reticulum_bridge::c_api::reticulum_poll(task_id, &mut result_out, &mut len_out);
+        let ret = sing_box_reticulum_bridge::c_api::reticulum_poll(
+            task_id,
+            &mut result_out,
+            &mut len_out,
+        );
         if ret == -1 {
             if !result_out.is_null() {
                 sing_box_reticulum_bridge::c_api::reticulum_free(result_out);

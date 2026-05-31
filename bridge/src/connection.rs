@@ -1,9 +1,9 @@
+use reticulum_rs::transport::destination::link::Link;
+use reticulum_rs::transport::hash::AddressHash;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use reticulum_rs::transport::destination::link::Link;
-use reticulum_rs::transport::hash::AddressHash;
 
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -81,7 +81,10 @@ impl Connection {
     fn new_split(read_buf: Arc<RwLock<Vec<u8>>>, write_buf: Arc<RwLock<Vec<u8>>>) -> Self {
         Self {
             id: NEXT_CONN_ID.fetch_add(1, Ordering::SeqCst),
-            inner: ConnectionInner::Memory { read_buf, write_buf },
+            inner: ConnectionInner::Memory {
+                read_buf,
+                write_buf,
+            },
         }
     }
 
@@ -349,8 +352,8 @@ mod tests {
         // Regression test: two push_read_data calls must not be merged into one read.
         let (link, link_id) = make_test_link();
         let conn = Connection::new_from_link(link, link_id);
-        conn.push_read_data(b"\x82\x00\x01host:80").await;   // simulated TypeNewConn
-        conn.push_read_data(b"\x00\x00\x01hello").await;     // simulated data packet
+        conn.push_read_data(b"\x82\x00\x01host:80").await; // simulated TypeNewConn
+        conn.push_read_data(b"\x00\x00\x01hello").await; // simulated data packet
 
         let mut buf = [0u8; 200];
         let n = conn.read(&mut buf).await;

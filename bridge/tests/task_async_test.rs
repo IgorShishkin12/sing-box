@@ -3,14 +3,21 @@ use sing_box_reticulum_bridge;
 
 fn init() {
     let config = std::ffi::CString::new("{}").unwrap();
-    assert_eq!(sing_box_reticulum_bridge::c_api::reticulum_init(config.as_ptr()), 0);
+    assert_eq!(
+        sing_box_reticulum_bridge::c_api::reticulum_init(config.as_ptr()),
+        0
+    );
 }
 
 fn poll_until_done(task_id: i32, max_attempts: u32) -> Result<u64, String> {
     let mut result_out: *mut u8 = std::ptr::null_mut();
     let mut len_out: usize = 0;
     for _ in 0..max_attempts {
-        let ret = sing_box_reticulum_bridge::c_api::reticulum_poll(task_id, &mut result_out, &mut len_out);
+        let ret = sing_box_reticulum_bridge::c_api::reticulum_poll(
+            task_id,
+            &mut result_out,
+            &mut len_out,
+        );
         match ret {
             1 => {
                 let bytes = unsafe { std::slice::from_raw_parts(result_out, len_out) };
@@ -46,7 +53,11 @@ fn test_dial_unknown_dest_returns_error() {
     assert!(task_id >= 0, "dial should return a non-negative task ID");
 
     let result = poll_until_done(task_id, 1000);
-    assert!(result.is_err(), "dial to unknown destination should fail, got {:?}", result);
+    assert!(
+        result.is_err(),
+        "dial to unknown destination should fail, got {:?}",
+        result
+    );
 
     sing_box_reticulum_bridge::c_api::reticulum_shutdown();
 }
@@ -85,9 +96,8 @@ fn test_multiple_dials_return_distinct_task_ids() {
 
     let mut task_ids = vec![];
     for i in 0u32..5 {
-        let dest = std::ffi::CString::new(
-            format!("{:032x}", i as u128 * 0x1111111111111111u128)
-        ).unwrap();
+        let dest =
+            std::ffi::CString::new(format!("{:032x}", i as u128 * 0x1111111111111111u128)).unwrap();
         let task_id = sing_box_reticulum_bridge::c_api::reticulum_dial(dest.as_ptr());
         assert!(task_id >= 0);
         task_ids.push(task_id);

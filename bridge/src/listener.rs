@@ -1,8 +1,8 @@
+use reticulum_rs::transport::destination::SingleInputDestination;
+use reticulum_rs::transport::hash::AddressHash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
-use reticulum_rs::transport::destination::SingleInputDestination;
-use reticulum_rs::transport::hash::AddressHash;
 
 use crate::connection::Connection;
 
@@ -22,7 +22,10 @@ impl std::fmt::Debug for Listener {
             .field("id", &self.id)
             .field("hash", &self.hash)
             .field("accept_queue", &self.accept_queue)
-            .field("destination", &self.destination.as_ref().map(|_| "Some(...)"))
+            .field(
+                "destination",
+                &self.destination.as_ref().map(|_| "Some(...)"),
+            )
             .field("destination_hash", &self.destination_hash)
             .finish()
     }
@@ -37,6 +40,12 @@ impl Clone for Listener {
             destination: self.destination.clone(),
             destination_hash: self.destination_hash.clone(),
         }
+    }
+}
+
+impl Default for Listener {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -171,8 +180,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_listener_with_destination() {
-        use reticulum_rs::transport::destination::SingleInputDestination;
         use reticulum_rs::transport::destination::DestinationName;
+        use reticulum_rs::transport::destination::SingleInputDestination;
         use reticulum_rs::transport::identity::PrivateIdentity;
 
         let identity = PrivateIdentity::new_from_rand(rand_core::OsRng);

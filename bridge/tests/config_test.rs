@@ -31,7 +31,10 @@ fn test_config_valid_json_minimal() {
     let config = cfg.unwrap();
     assert!(config.identity_path.is_none());
     assert!(config.storage_path.is_none());
-    assert!(config.interfaces.is_empty(), "interfaces should default to empty vec");
+    assert!(
+        config.interfaces.is_empty(),
+        "interfaces should default to empty vec"
+    );
 }
 
 #[test]

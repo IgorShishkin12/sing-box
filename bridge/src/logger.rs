@@ -25,8 +25,8 @@ struct MsgVisitor {
 impl tracing::field::Visit for MsgVisitor {
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         match field.name() {
-            "message"                    => self.message = value.to_string(),
-            "log.module_path"            => self.module = value.to_string(),
+            "message" => self.message = value.to_string(),
+            "log.module_path" => self.module = value.to_string(),
             // "log.file"                   => self.file = value.to_string(),
             _ => {}
         }
@@ -48,18 +48,17 @@ impl<S: Subscriber> Layer<S> for CLogLayer {
 
         let level: u8 = match *event.metadata().level() {
             Level::ERROR => 1,
-            Level::WARN  => 2,
-            Level::INFO  => 3,
+            Level::WARN => 2,
+            Level::INFO => 3,
             Level::DEBUG => 4,
             Level::TRACE => 5,
         };
         let mut visitor = MsgVisitor::default();
         event.record(&mut visitor);
 
-        let (Ok(c_target), Ok(c_msg)) = (
-            CString::new(visitor.module),
-            CString::new(visitor.message),
-        ) else {
+        let (Ok(c_target), Ok(c_msg)) =
+            (CString::new(visitor.module), CString::new(visitor.message))
+        else {
             return;
         };
 

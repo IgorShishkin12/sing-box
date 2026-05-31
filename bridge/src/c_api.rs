@@ -68,7 +68,6 @@ pub extern "C" fn reticulum_set_log_callback(
     }
 }
 
-
 /// Get the destination hash for a given name.
 /// The caller must free `*hash` with reticulum_free after use.
 /// Returns 0 on success, -1 if the name is unknown.
@@ -355,10 +354,7 @@ pub extern "C" fn reticulum_get_listener_hash(listener_handle: u64) -> *mut c_ch
         match store.get_listener(listener_handle).await {
             Some(listener) => {
                 let hash = listener.destination_hash().await;
-                match hash {
-                    Some(h) => Some(h.to_hex_string()),
-                    None => None,
-                }
+                hash.map(|h| h.to_hex_string())
             }
             None => None,
         }
@@ -408,7 +404,11 @@ pub extern "C" fn reticulum_accept(listener_handle: u64) -> i32 {
                 Some(listener) => match listener.accept_wait(ACCEPT_TIMEOUT).await {
                     Some(conn) => {
                         let handle = store.insert_connection(conn).await;
-                        log::debug!("accept: listener={} → conn handle={}", listener_handle, handle);
+                        log::debug!(
+                            "accept: listener={} → conn handle={}",
+                            listener_handle,
+                            handle
+                        );
                         registry
                             .complete(
                                 task_id,

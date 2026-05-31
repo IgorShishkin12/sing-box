@@ -63,10 +63,19 @@ mod tests {
     #[tokio::test]
     async fn test_task_registry_insert_and_get() {
         let registry = TaskRegistry::new();
-        let result = TaskResult::Done { handle: 42, data: vec![1, 2, 3] };
+        let result = TaskResult::Done {
+            handle: 42,
+            data: vec![1, 2, 3],
+        };
         let id = registry.insert(result.clone()).await;
         let retrieved = registry.get_and_remove(id).await;
-        assert!(matches!(retrieved, Some(TaskResult::Done { handle: 42, data: _ })));
+        assert!(matches!(
+            retrieved,
+            Some(TaskResult::Done {
+                handle: 42,
+                data: _
+            })
+        ));
         // Should be removed
         let again = registry.get_and_remove(id).await;
         assert!(again.is_none());
@@ -80,17 +89,33 @@ mod tests {
         let retrieved = registry.get_and_remove(id).await;
         assert!(retrieved.is_none());
         // Complete it
-        let completed = registry.complete(id, TaskResult::Done { handle: 99, data: vec![] }).await;
+        let completed = registry
+            .complete(
+                id,
+                TaskResult::Done {
+                    handle: 99,
+                    data: vec![],
+                },
+            )
+            .await;
         assert!(completed);
         // Now should be retrievable
         let retrieved = registry.get_and_remove(id).await;
-        assert!(matches!(retrieved, Some(TaskResult::Done { handle: 99, data: _ })));
+        assert!(matches!(
+            retrieved,
+            Some(TaskResult::Done {
+                handle: 99,
+                data: _
+            })
+        ));
     }
 
     #[tokio::test]
     async fn test_task_registry_error_result() {
         let registry = TaskRegistry::new();
-        let result = TaskResult::Error { message: "test error".to_string() };
+        let result = TaskResult::Error {
+            message: "test error".to_string(),
+        };
         let id = registry.insert(result).await;
         let retrieved = registry.get_and_remove(id).await;
         assert!(matches!(retrieved, Some(TaskResult::Error { message: _ })));
