@@ -32,33 +32,27 @@ func isControl(b byte) bool { return b&0x80 != 0 }
 
 // encodeDataByte packs fragmentation info for a data packet into the lower 7 bits.
 //
-// Bit layout: 0b0_[totalCode 3 bits]_[partIndex 4 bits]
-// totalCode: 0→1 part, 1→2, ..., 6→7, 7→16
-// partIndex: 0-indexed (0 = first fragment)
+// Bit layout: 0b0_[isLast 1 bit]_[partIndex 6 bits]
+// isLast: 1 if this is the final fragment, 0 otherwise
+// partIndex: 0-indexed (0 = first fragment), supports up to 64 fragments
 //
 // Panics on out-of-range inputs.
 func encodeDataByte(totalParts, partIndex int) byte {
-	if totalParts < 1 || totalParts > 16 || partIndex < 0 || partIndex >= totalParts {
+	if totalParts < 1 || totalParts > 64 || partIndex < 0 || partIndex >= totalParts {
 		panic(fmt.Sprintf("encodeDataByte: invalid totalParts=%d partIndex=%d", totalParts, partIndex))
 	}
-	var totalCode int
-	if totalParts <= 7 {
-		totalCode = totalParts - 1
-	} else {
-		totalCode = 7
+	isLast := 0
+	if partIndex == totalParts-1 {
+		isLast = 1
 	}
-	return byte((totalCode << 4) | partIndex)
+	return byte((isLast << 6) | (partIndex & 0x3F))
 }
 
 // decodeDataByte extracts fragmentation info from a data-packet type byte.
-func decodeDataByte(b byte) (totalParts, partIndex int) {
-	totalCode := int((b >> 4) & 0x07)
-	partIndex = int(b & 0x0F)
-	if totalCode == 7 {
-		totalParts = 16
-	} else {
-		totalParts = totalCode + 1
-	}
+// Returns isLast (true if final fragment) and the 0-indexed partIndex.
+func decodeDataByte(b byte) (isLast bool, partIndex int) {
+	isLast = (b>>6)&1 != 0
+	partIndex = int(b & 0x3F)
 	return
 }
 
@@ -68,8 +62,8 @@ type muxPacket struct {
 	connID   uint16
 	payload  []byte
 	// Decoded fragmentation fields; valid only when !isControl(typeByte).
-	totalParts int
-	partIndex  int // 0-indexed
+	isLast    bool // true if this is the final fragment
+	partIndex int  // 0-indexed
 }
 
 // encodePacket serialises a muxPacket to wire bytes (header + payload, no framing).
@@ -93,7 +87,7 @@ func decodePacket(b []byte) (muxPacket, error) {
 		payload:  append([]byte(nil), b[3:]...),
 	}
 	if !isControl(p.typeByte) {
-		p.totalParts, p.partIndex = decodeDataByte(p.typeByte)
+		p.isLast, p.partIndex = decodeDataByte(p.typeByte)
 	}
 	return p, nil
 }
@@ -119,33 +113,38 @@ func fragment(data []byte) [][]byte {
 // fragBuffer accumulates fragments for one logical message.
 // Only accessed from the readLoop goroutine; no locking needed.
 type fragBuffer struct {
-	typ        byte
-	totalParts int
-	parts      [][]byte
-	received   int
+	parts   [][]byte
+	gotLast bool
+	lastIdx int
 }
 
-// addPart records one fragment. Returns the assembled payload and true when complete.
-func (fb *fragBuffer) addPart(typ byte, partIndex, totalParts int, data []byte) ([]byte, bool) {
-	if fb.totalParts == 0 {
-		fb.typ = typ
-		fb.totalParts = totalParts
-		fb.parts = make([][]byte, totalParts)
+// addPart records one fragment. Returns the assembled payload and true when the final
+// fragment has been received and all preceding parts are present.
+func (fb *fragBuffer) addPart(partIndex int, isLast bool, data []byte) ([]byte, bool) {
+	for len(fb.parts) <= partIndex {
+		fb.parts = append(fb.parts, nil)
 	}
-	if partIndex < 0 || partIndex >= len(fb.parts) {
-		return nil, false // invalid; discard
+	if fb.parts[partIndex] == nil {
+		fb.parts[partIndex] = append([]byte(nil), data...)
 	}
-	fb.parts[partIndex] = append([]byte(nil), data...)
-	fb.received++
-	if fb.received == fb.totalParts {
-		assembled := make([]byte, 0, fb.totalParts*maxFragPayload)
-		for _, p := range fb.parts {
-			assembled = append(assembled, p...)
+	if isLast {
+		fb.gotLast = true
+		fb.lastIdx = partIndex
+	}
+	if !fb.gotLast {
+		return nil, false
+	}
+	for i := 0; i <= fb.lastIdx; i++ {
+		if i >= len(fb.parts) || fb.parts[i] == nil {
+			return nil, false
 		}
-		*fb = fragBuffer{} // reset for reuse
-		return assembled, true
 	}
-	return nil, false
+	assembled := make([]byte, 0, (fb.lastIdx+1)*maxFragPayload)
+	for i := 0; i <= fb.lastIdx; i++ {
+		assembled = append(assembled, fb.parts[i]...)
+	}
+	*fb = fragBuffer{}
+	return assembled, true
 }
 
 // muxSession manages one Reticulum connection and multiplexes virtual connections.
@@ -225,8 +224,8 @@ func (s *muxSession) writeCtrl(typ byte, id uint16, payload []byte) error {
 func (s *muxSession) writeData(id uint16, data []byte) error {
 	parts := fragment(data)
 	n := len(parts)
-	if n > 16 {
-		return fmt.Errorf("mux: payload requires %d fragments (max 16)", n)
+	if n > 64 {
+		return fmt.Errorf("mux: payload requires %d fragments (max 64)", n)
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -310,7 +309,7 @@ func (s *muxSession) readLoop() {
 			fb = &fragBuffer{}
 			fragBufs[pkt.connID] = fb
 		}
-		assembled, done := fb.addPart(pkt.typeByte, pkt.partIndex, pkt.totalParts, pkt.payload)
+		assembled, done := fb.addPart(pkt.partIndex, pkt.isLast, pkt.payload)
 		if !done {
 			continue
 		}

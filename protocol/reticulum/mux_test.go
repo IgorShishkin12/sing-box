@@ -13,32 +13,37 @@ import (
 // --- encodeDataByte / decodeDataByte ---
 
 func TestEncodeDataByte_single(t *testing.T) {
-	// total=1, partIdx=0 → totalCode=0, partCode=0 → 0x00
-	require.Equal(t, byte(0x00), encodeDataByte(1, 0))
+	// total=1, partIdx=0 → isLast=1, partIndex=0 → 0x40
+	require.Equal(t, byte(0x40), encodeDataByte(1, 0))
 }
 
 func TestEncodeDataByte_twoOfThree(t *testing.T) {
-	// total=3 → totalCode=2; partIdx=1 → (2<<4)|1 = 0x21
-	require.Equal(t, byte(0x21), encodeDataByte(3, 1))
+	// total=3, partIdx=1 → isLast=0, partIndex=1 → 0x01
+	require.Equal(t, byte(0x01), encodeDataByte(3, 1))
 }
 
 func TestDecodeDataByte_zero(t *testing.T) {
-	total, idx := decodeDataByte(0x00)
-	require.Equal(t, 1, total)
+	// 0x00: isLast=false, partIndex=0
+	isLast, idx := decodeDataByte(0x00)
+	require.False(t, isLast)
 	require.Equal(t, 0, idx)
 }
 
 func TestDecodeDataByte_multipart(t *testing.T) {
-	total, idx := decodeDataByte(0x21)
-	require.Equal(t, 3, total)
+	// middle of a 3-part message: isLast=false, partIndex=1
+	b := encodeDataByte(3, 1)
+	isLast, idx := decodeDataByte(b)
+	require.False(t, isLast)
 	require.Equal(t, 1, idx)
 }
 
 func TestDecodeDataByte_max(t *testing.T) {
-	// 0x70 = 0b0111_0000 → totalCode=7 → 16 parts; partIdx=0
-	total, idx := decodeDataByte(0x70)
-	require.Equal(t, 16, total)
-	require.Equal(t, 0, idx)
+	// last of 64 parts: isLast=true, partIndex=63 → 0x7F
+	b := encodeDataByte(64, 63)
+	require.Equal(t, byte(0x7F), b)
+	isLast, idx := decodeDataByte(b)
+	require.True(t, isLast)
+	require.Equal(t, 63, idx)
 }
 
 func TestIsControl(t *testing.T) {
@@ -53,15 +58,15 @@ func TestIsControl(t *testing.T) {
 func TestEncodeDecodePacket_data(t *testing.T) {
 	payload := []byte("hello")
 	p := muxPacket{
-		typeByte:   0x00, // single-frag data: totalCode=0, partIdx=0
-		connID:     0x1234,
-		payload:    payload,
-		totalParts: 1,
-		partIndex:  0,
+		typeByte:  encodeDataByte(1, 0), // single-frag: isLast=true, partIndex=0 → 0x40
+		connID:    0x1234,
+		payload:   payload,
+		isLast:    true,
+		partIndex: 0,
 	}
 	encoded := encodePacket(p)
 	require.Len(t, encoded, muxHeaderSize+len(payload))
-	require.Equal(t, byte(0x00), encoded[0])
+	require.Equal(t, byte(0x40), encoded[0])
 	require.Equal(t, byte(0x12), encoded[1])
 	require.Equal(t, byte(0x34), encoded[2])
 	require.Equal(t, payload, encoded[3:])
@@ -71,7 +76,7 @@ func TestEncodeDecodePacket_data(t *testing.T) {
 	require.Equal(t, p.typeByte, decoded.typeByte)
 	require.Equal(t, p.connID, decoded.connID)
 	require.Equal(t, payload, decoded.payload)
-	require.Equal(t, 1, decoded.totalParts)
+	require.True(t, decoded.isLast)
 	require.Equal(t, 0, decoded.partIndex)
 }
 
@@ -146,7 +151,7 @@ func TestFragment_empty(t *testing.T) {
 
 func TestFragBuffer_singlePart(t *testing.T) {
 	fb := &fragBuffer{}
-	assembled, done := fb.addPart(0x00, 0, 1, []byte("hello"))
+	assembled, done := fb.addPart(0, true, []byte("hello"))
 	require.True(t, done)
 	require.Equal(t, []byte("hello"), assembled)
 }
@@ -154,15 +159,15 @@ func TestFragBuffer_singlePart(t *testing.T) {
 func TestFragBuffer_multiPart(t *testing.T) {
 	fb := &fragBuffer{}
 
-	assembled, done := fb.addPart(0x00, 0, 3, []byte("hel"))
+	assembled, done := fb.addPart(0, false, []byte("hel"))
 	require.False(t, done)
 	require.Nil(t, assembled)
 
-	assembled, done = fb.addPart(0x00, 1, 3, []byte("lo "))
+	assembled, done = fb.addPart(1, false, []byte("lo "))
 	require.False(t, done)
 	require.Nil(t, assembled)
 
-	assembled, done = fb.addPart(0x00, 2, 3, []byte("world"))
+	assembled, done = fb.addPart(2, true, []byte("world"))
 	require.True(t, done)
 	require.Equal(t, []byte("hello world"), assembled)
 }
