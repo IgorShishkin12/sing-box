@@ -94,7 +94,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-          targets: ${{ inputs.target || 'x86_64-unknown-linux-gnu' }}
+          target: ${{ inputs.target || 'x86_64-unknown-linux-gnu' }}
 
       - name: Build bridge (${{ inputs.profile || 'release' }})
         run: |
@@ -109,13 +109,13 @@ jobs:
         id: set-lib-path
         run: |
           PROFILE="${{ inputs.profile || 'release' }}"
-          echo "lib-path=sing-box/bridge/target/${{ inputs.target || 'x86_64-unknown-linux-gnu' }}/${PROFILE}/libsing_box_reticulum_bridge.a" >> "$GITHUB_OUTPUT"
+          echo "lib-path=bridge/target/${{ inputs.target || 'x86_64-unknown-linux-gnu' }}/${PROFILE}/libsing_box_reticulum_bridge.a" >> "$GITHUB_OUTPUT"
 
       - name: Upload bridge static library
         uses: actions/upload-artifact@v4
         with:
           name: libsing_box_reticulum_bridge-${{ inputs.target || 'x86_64-unknown-linux-gnu' }}-${{ inputs.profile || 'release' }}
-          path: sing-box/bridge/target/${{ inputs.target || 'x86_64-unknown-linux-gnu' }}/${{ inputs.profile || 'release' }}/libsing_box_reticulum_bridge.a
+          path: bridge/target/${{ inputs.target || 'x86_64-unknown-linux-gnu' }}/${{ inputs.profile || 'release' }}/libsing_box_reticulum_bridge.a
           if-no-files-found: error
           retention-days: 1
 
@@ -134,7 +134,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-          targets: aarch64-linux-android
+          target: aarch64-linux-android
 
       - name: Setup Android NDK
         id: setup-ndk

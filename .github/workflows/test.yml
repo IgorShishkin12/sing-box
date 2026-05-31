@@ -52,6 +52,17 @@ jobs:
         shell: bash
         run: go test -v -tags "$BUILD_TAGS" -ldflags "$LDFLAGS_SHARED" ./...
 
+  e2e:
+    name: E2E tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+      - name: Run e2e tests
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: bash e2e/runner.sh
+
   build_bridge:
     name: Build Rust bridge
     uses: ./.github/workflows/bridge.yml
@@ -74,7 +85,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: libsing_box_reticulum_bridge-x86_64-unknown-linux-gnu-release
-          path: sing-box/bridge/target/x86_64-unknown-linux-gnu/release/
+          path: bridge/target/x86_64-unknown-linux-gnu/release/
       - name: Set build tags and ldflags
         run: |
           echo "BUILD_TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS),with_reticulum" >> "$GITHUB_ENV"
