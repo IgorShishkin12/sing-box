@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"sync"
-	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -101,24 +100,21 @@ func (h *Outbound) getOrCreateSession(ctx context.Context, destHash string) (*mu
 
 	h.logger.DebugContext(ctx, "opening new mux session to ", destHash)
 
-	taskID, err := BridgeDial(destHash)
+	_, resultCh, err := BridgeDial(destHash)
 	if err != nil {
 		return nil, err
 	}
 
-	deadline, ok := ctx.Deadline()
-	timeout := 30 * time.Second
-	if ok {
-		timeout = time.Until(deadline)
-		if timeout <= 0 {
-			return nil, context.DeadlineExceeded
-		}
+	var connID uint64
+	select {
+	case connID = <-resultCh:
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-
-	handle, err := BridgePollTask(taskID, timeout)
-	if err != nil {
-		return nil, err
+	if connID == 0 {
+		return nil, ErrBridgeDialFailed
 	}
+	handle := connID
 
 	localName := "outbound"
 	if h.options.Name != "" {

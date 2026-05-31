@@ -1,39 +1,46 @@
 package reticulum
 
 import (
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/log"
 )
 
-// BridgePollTask polls for task completion with a timeout.
-// Returns the handle (8 bytes LE) on success, or an error.
-func BridgePollTask(taskID int, timeout time.Duration) (uint64, error) {
-	deadline := time.Now().Add(timeout)
-	for {
-		done, result, err := BridgePoll(taskID)
-		if err != nil {
-			return 0, err
-		}
-		if done {
-			if len(result) != 8 {
-				return 0, fmt.Errorf("unexpected result length: %d", len(result))
-			}
-			return uint64(result[0]) | uint64(result[1])<<8 | uint64(result[2])<<16 | uint64(result[3])<<24 |
-				uint64(result[4])<<32 | uint64(result[5])<<40 | uint64(result[6])<<48 | uint64(result[7])<<56, nil
-		}
-		if time.Now().After(deadline) {
-			return 0, context.DeadlineExceeded
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+// connEntry holds the per-connection async state.
+// dataCh carries inbound packets (one Reticulum packet per send).
+// done is closed when the connection is torn down from either side.
+type connEntry struct {
+	ch   chan []byte
+	done chan struct{}
+	once sync.Once
 }
+
+// connDataChans maps conn_id → *connEntry for the async callback model.
+// Populated by newReticulumConn, consumed/closed by goOnData/goOnClose.
+var connDataChans sync.Map // uint64 → *connEntry
+
+// acceptEvent is delivered via globalAcceptCh when Rust fires on_accept.
+type acceptEvent struct {
+	listenerID uint64
+	connID     uint64
+	peerHash   string
+}
+
+// globalAcceptCh receives inbound connection events from the Rust on_accept callback.
+var globalAcceptCh = make(chan acceptEvent, 256)
+
+// pendingDials maps task_id → chan uint64 for the on_connect callback.
+var pendingDials sync.Map // uint64 → chan uint64
+
+// nextDialTask is the monotonically increasing task ID counter for dials.
+var nextDialTask sync.Mutex // protects nextDialTaskSeq
+var nextDialTaskSeq uint64
 
 type reticulumAddr struct {
 	network string
@@ -44,47 +51,77 @@ func (a reticulumAddr) Network() string { return a.network }
 func (a reticulumAddr) String() string  { return a.str }
 
 // reticulumConn implements net.Conn using the Reticulum bridge.
+// Read blocks until a packet arrives via the on_data callback (no polling).
 type reticulumConn struct {
-	handle uint64
-	// local/remote addresses are synthetic since Reticulum is destination-based
+	handle     uint64
+	entry      *connEntry
+	pending    []byte // leftover bytes from last dataCh receive
 	localAddr  net.Addr
 	remoteAddr net.Addr
 	logger     log.ContextLogger
 }
 
-func newReticulumConn(handle uint64, localName, remoteName string, logger log.ContextLogger) net.Conn {
+func newReticulumConn(handle uint64, localName, remoteName string, logger log.ContextLogger) *reticulumConn {
+	// Reuse any entry pre-created by goOnData (data may arrive before this call
+	// when the Rust data reader starts ahead of the Go accept-loop goroutine).
+	actual, _ := connDataChans.LoadOrStore(handle, &connEntry{
+		ch:   make(chan []byte, 256),
+		done: make(chan struct{}),
+	})
+	entry := actual.(*connEntry)
 	return &reticulumConn{
 		handle:     handle,
+		entry:      entry,
 		localAddr:  reticulumAddr{network: "reticulum", str: localName},
 		remoteAddr: reticulumAddr{network: "reticulum", str: remoteName},
 		logger:     logger,
 	}
 }
 
+// Read implements net.Conn. Blocks until a full Reticulum packet arrives.
+// Each call returns exactly one packet (message-boundary semantics required
+// by framedConn's reader goroutine).
 func (c *reticulumConn) Read(b []byte) (int, error) {
 	if c.handle == 0 {
 		return 0, io.ErrClosedPipe
 	}
-	for {
-		n := BridgeRead(c.handle, b)
-		if n < 0 {
-			if c.logger != nil {
-				c.logger.Trace("BridgeRead: handle=", c.handle, " EOF")
-			}
-			return 0, io.EOF // connection closed
+	// Serve any leftover bytes from the previous packet first.
+	if len(c.pending) > 0 {
+		n := copy(b, c.pending)
+		c.pending = c.pending[n:]
+		return n, nil
+	}
+	select {
+	case chunk := <-c.entry.ch:
+		if c.logger != nil {
+			c.logger.Trace("reticulumConn.Read: handle=", c.handle, " n=", len(chunk), " data=", fmt.Sprintf("%q", chunk))
 		}
-		if n > 0 {
-			if c.logger != nil {
-				c.logger.Trace("BridgeRead: handle=", c.handle, " n=", n, " data=", fmt.Sprintf("%q", b[:n]))
+		n := copy(b, chunk)
+		if n < len(chunk) {
+			c.pending = make([]byte, len(chunk)-n)
+			copy(c.pending, chunk[n:])
+		}
+		return n, nil
+	case <-c.entry.done:
+		// Drain any packets that arrived just before the close signal.
+		select {
+		case chunk := <-c.entry.ch:
+			n := copy(b, chunk)
+			if n < len(chunk) {
+				c.pending = make([]byte, len(chunk)-n)
+				copy(c.pending, chunk[n:])
 			}
 			return n, nil
+		default:
 		}
-		time.Sleep(5 * time.Millisecond)
+		if c.logger != nil {
+			c.logger.Trace("reticulumConn.Read: handle=", c.handle, " EOF")
+		}
+		return 0, io.EOF
 	}
 }
 
 // writeDestHeader writes a 2-byte big-endian length followed by the address string.
-// Format: uint16 length + UTF-8 "host:port".
 func writeDestHeader(w io.Writer, addr string) error {
 	b := []byte(addr)
 	hdr := make([]byte, 2)
@@ -120,16 +157,9 @@ func (c *reticulumConn) Write(b []byte) (int, error) {
 	if c.logger != nil {
 		c.logger.Trace("BridgeWrite: handle=", c.handle, " len=", len(b), " data=", fmt.Sprintf("%q", b))
 	}
-	// reticulum_write always writes all bytes or returns -1; partial writes cannot occur.
 	n := BridgeWrite(c.handle, b)
 	if n < 0 {
-		if c.logger != nil {
-			c.logger.Trace("BridgeWrite: handle=", c.handle, " error")
-		}
 		return 0, errors.New("write error")
-	}
-	if c.logger != nil {
-		c.logger.Trace("BridgeWrite: handle=", c.handle, " written=", n)
 	}
 	return n, nil
 }
@@ -138,23 +168,17 @@ func (c *reticulumConn) Close() error {
 	if c.handle == 0 {
 		return nil
 	}
-	BridgeClose(c.handle)
+	handle := c.handle
 	c.handle = 0
+	connDataChans.Delete(handle)
+	c.entry.once.Do(func() { close(c.entry.done) })
+	BridgeClose(handle)
 	return nil
 }
 
 func (c *reticulumConn) LocalAddr() net.Addr  { return c.localAddr }
 func (c *reticulumConn) RemoteAddr() net.Addr { return c.remoteAddr }
 
-func (c *reticulumConn) SetDeadline(t time.Time) error {
-	// Not implemented in the stub; return nil to avoid breaking callers.
-	return nil
-}
-
-func (c *reticulumConn) SetReadDeadline(t time.Time) error {
-	return nil
-}
-
-func (c *reticulumConn) SetWriteDeadline(t time.Time) error {
-	return nil
-}
+func (c *reticulumConn) SetDeadline(_ time.Time) error      { return nil }
+func (c *reticulumConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (c *reticulumConn) SetWriteDeadline(_ time.Time) error { return nil }

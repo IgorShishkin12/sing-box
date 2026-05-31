@@ -27,7 +27,6 @@ use reticulum_rs::runtime::ReceivedData;
 use reticulum_rs::transport::PacketContext;
 
 use crate::config::{ReticulumConfig, ReticulumInterface};
-use crate::connection::Connection;
 use crate::listener::Listener;
 use crate::runtime;
 
@@ -349,12 +348,13 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
 
 /// Register a service `SingleInputDestination` with the global Transport.
 ///
-/// Spawns a background task that monitors `in_link_events`, filtering only
-/// for links whose destination hash matches this service dest, and pushes
-/// those connections into `listener`'s accept queue.
+/// Spawns a background task that monitors `in_link_events` and fires
+/// `call_on_accept(listener_handle, conn_id, peer_hash)` for each incoming
+/// link whose destination hash matches this service dest.
 ///
 /// Returns `(address_hash, Arc<Mutex<SingleInputDestination>>)`.
 pub async fn register_listener_destination(
+    listener_handle: u64,
     listener: Arc<Listener>,
     identity: PrivateIdentity,
     app_name: String,
@@ -376,7 +376,7 @@ pub async fn register_listener_destination(
         address_hash, app_name, aspect
     );
 
-    let listener_clone = listener.clone();
+    let store = crate::store::global_store();
     let service_hash = address_hash;
 
     tokio::spawn(async move {
@@ -408,26 +408,25 @@ pub async fn register_listener_destination(
                                 guard.peer_identity().address_hash
                             };
                             log::info!("service link activated: id={} peer={}", event.id, peer_hash);
-                            // Subscribe to in_link_events now (before sending our identify)
-                            // so we catch the peer's PeerIdentified event when it fires.
-                            // The client sends its identify only after its link activates,
-                            // which happens after we've already subscribed here.
                             let mut peer_events = {
                                 let tp = transport.lock().await;
                                 tp.in_link_events()
                             };
-                            // Subscribe to data events separately for the data reader.
                             let data_rx = {
                                 let tp = transport.lock().await;
                                 tp.received_data_events()
                             };
-                            // Exchange identify packets; peer's verified hash → identified_peer.
                             let identified = exchange_identify_on_link(&link, event.id, &mut peer_events).await;
-                            let conn = Connection::new_from_link(link.clone(), event.id, Some(peer_hash), identified);
-                            spawn_link_data_reader(conn.clone(), event.id, data_rx);
-                            listener_clone.push_connection(conn).await;
+                            let conn = crate::connection::Connection::new_from_link(link.clone(), event.id, Some(peer_hash), identified);
+                            let conn_id = store.insert_connection(conn).await;
+                            spawn_link_data_reader(conn_id, event.id, data_rx);
+                            crate::c_api::call_on_accept(
+                                listener_handle, conn_id,
+                                &peer_hash.to_hex_string(),
+                            );
+                            // Keep listener alive; suppress unused-var warning.
+                            let _ = &listener;
                         }
-                        // Links for the discovery dest or other dests are ignored here.
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -617,18 +616,13 @@ pub async fn exchange_identify_on_link(
     }
 }
 
-/// Spawn a background task that forwards inbound link data into a connection's
-/// read buffer.
+/// Spawn a background task that fires `on_data` / `on_close` callbacks for
+/// inbound link data packets.
 ///
-/// Intercepts `PacketContext::LinkIdentify` packets and logs the peer's verified
-/// identity instead of forwarding them to Go.
-///
-/// `data_rx` must already be subscribed to the transport's `received_data_events`
-/// channel **before** this function is called — typically before the link request
-/// is sent — so that no data packets are lost to the broadcast-channel race where
-/// the server starts writing before the reader has subscribed.
+/// `data_rx` must be subscribed to `received_data_events` **before** the link
+/// is created so no packets are lost to the broadcast-channel race.
 pub fn spawn_link_data_reader(
-    conn: Connection,
+    conn_id: u64,
     link_id: AddressHash,
     mut data_rx: broadcast::Receiver<ReceivedData>,
 ) {
@@ -639,11 +633,12 @@ pub fn spawn_link_data_reader(
                     if data.destination == link_id
                         && data.context != Some(PacketContext::LinkIdentify)
                     {
-                        conn.push_read_data(data.data.as_slice()).await;
+                        crate::c_api::call_on_data(conn_id, data.data.as_slice());
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => {
-                    log::warn!("data event channel closed");
+                    log::warn!("data event channel closed for conn {}", conn_id);
+                    crate::c_api::call_on_close(conn_id);
                     break;
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,

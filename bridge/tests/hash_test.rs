@@ -4,7 +4,7 @@ use std::ffi::CString;
 /// Helper: init with fresh runtime for each test
 fn bridge_init() {
     let config = std::ffi::CString::new("{}").unwrap();
-    let ret = sing_box_reticulum_bridge::c_api::reticulum_init(config.as_ptr());
+    let ret = sing_box_reticulum_bridge::c_api::reticulum_init(config.as_ptr(), None, None, None, None);
     assert_eq!(ret, 0);
 }
 

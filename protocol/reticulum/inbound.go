@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
@@ -43,14 +42,13 @@ func RegisterInbound(registry *inbound.Registry) {
 
 type Inbound struct {
 	inbound.Adapter
-	router       adapter.Router
-	logger       log.ContextLogger
-	options      option.ReticulumInboundOptions
-	listenerTask int
-	listenerHdl  uint64
-	accepting    bool
-	mu           sync.Mutex
-	closed       bool
+	router      adapter.Router
+	logger      log.ContextLogger
+	options     option.ReticulumInboundOptions
+	listenerHdl uint64
+	mu          sync.Mutex
+	closed      bool
+	doneCh      chan struct{}
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ReticulumInboundOptions) (adapter.Inbound, error) {
@@ -59,6 +57,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		router:  router,
 		logger:  logger,
 		options: options,
+		doneCh:  make(chan struct{}),
 	}, nil
 }
 
@@ -92,20 +91,13 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 		return fmt.Errorf("bridge init failed: %w", err)
 	}
 
-	taskID, err := BridgeListen(listenHash)
+	handle, err := BridgeListen(listenHash)
 	if err != nil {
 		return fmt.Errorf("bridge listen failed: %w", err)
 	}
-	h.listenerTask = taskID
-
-	handle, err := BridgePollTask(taskID, 30*time.Second)
-	if err != nil {
-		return fmt.Errorf("listener poll failed: %w", err)
-	}
 	h.listenerHdl = handle
 
-	h.logger.Info("reticulum inbound: listener ready")
-	h.accepting = true
+	h.logger.Info("reticulum inbound: listener ready, handle=", handle)
 
 	go h.acceptLoop()
 	return nil
@@ -113,37 +105,26 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 
 func (h *Inbound) acceptLoop() {
 	for {
-		h.mu.Lock()
-		if h.closed || !h.accepting {
-			h.mu.Unlock()
+		select {
+		case <-h.doneCh:
 			return
+		case ev := <-globalAcceptCh:
+			if ev.listenerID != h.listenerHdl {
+				// Not for us — put back and yield so other listeners can pick it up.
+				select {
+				case globalAcceptCh <- ev:
+				default:
+				}
+				continue
+			}
+			go h.handleConn(ev.connID)
 		}
-		h.mu.Unlock()
-
-		taskID, err := BridgeAccept(h.listenerHdl)
-		if err != nil {
-			h.logger.Error("accept error: ", err)
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		// BridgeAccept is non-blocking (returns a task ID immediately), so we keep
-		// BridgePollTask in the loop to avoid spinning and flooding the bridge with
-		// thousands of pending accept tasks. Once a handle is resolved, auth and
-		// session handling run in a goroutine so the loop can immediately register
-		// the next accept before the current connection finishes auth.
-		handle, err := BridgePollTask(taskID, 30*time.Second)
-		if err != nil {
-			h.logger.Error("poll after accept failed: ", err)
-			continue
-		}
-
-		go h.handleConn(handle)
 	}
 }
 
-func (h *Inbound) handleConn(handle uint64) {
-	h.logger.Debug("accepted connection, handle=", handle)
+func (h *Inbound) handleConn(connID uint64) {
+	h.logger.Debug("accepted connection, handle=", connID)
+	handle := connID
 
 	raw := newReticulumConn(handle, "inbound", fmt.Sprintf("listener-%d", h.listenerHdl), h.logger)
 	fc := newFramedConn(raw)
@@ -199,7 +180,7 @@ func (h *Inbound) Close() error {
 		return nil
 	}
 	h.closed = true
-	h.accepting = false
+	close(h.doneCh)
 	if h.listenerHdl != 0 {
 		BridgeClose(h.listenerHdl)
 	}
