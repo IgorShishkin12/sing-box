@@ -1,8 +1,8 @@
-name: retv2e2e-auto
+name: retv2e2e
 
 services:
-  e2e-server-auto:
-    image: retv2e2e-server
+  e2e-server:
+    image: retv2e2e-server:latest
     command: >
       -c "
         sum-server &
@@ -19,23 +19,23 @@ services:
       test: ["CMD-SHELL", "pgrep -x sing-box > /dev/null 2>&1 || exit 1"]
       interval: 5s
       timeout: 5s
-      retries: 18
+      retries: 12
       start_period: 30s
 
-  e2e-client-auto:
+  e2e-client:
     image: retv2e2e-client
     command: >
       -c "
         sing-box run -c /etc/sing-box/config.json &
         e2e-loadtest --socks 127.0.0.1:1080 --url http://127.0.0.1:8080 &&
-        echo 'AUTO E2E TESTS PASSED'
+        echo 'ALL E2E TESTS PASSED'
       "
     volumes:
       - ./configs/client-auto.json:/etc/sing-box/config.json:ro
     networks:
       - e2e-net
     depends_on:
-      e2e-server-auto:
+      e2e-server:
         condition: service_healthy
 
 networks:
