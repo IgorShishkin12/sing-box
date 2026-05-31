@@ -19,9 +19,7 @@ fn test_listen_returns_handle() {
     let handle = unsafe { reticulum_listen(hash.as_ptr()) };
     // The listen may succeed or fail depending on runtime state, but must not panic.
     if handle > 0 {
-        unsafe {
-            reticulum_close(handle as u64);
-        }
+        reticulum_close(handle as u64);
     } else {
         eprintln!(
             "listen returned {} (acceptable in test environment)",
@@ -29,7 +27,5 @@ fn test_listen_returns_handle() {
         );
     }
 
-    unsafe {
-        reticulum_shutdown();
-    }
+    reticulum_shutdown();
 }

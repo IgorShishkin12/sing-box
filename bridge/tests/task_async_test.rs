@@ -52,9 +52,7 @@ fn test_dial_unknown_dest_returns_error() {
         "dial to unknown dest should fire on_connect with conn_id=0"
     );
 
-    unsafe {
-        reticulum_shutdown();
-    }
+    reticulum_shutdown();
 }
 
 /// Listen succeeds (returns a positive handle) without network interfaces.
@@ -68,9 +66,9 @@ fn test_listen_succeeds_without_network() {
     let listen_hash = std::ffi::CString::new("rln://listen-hash-no-net").unwrap();
     let handle = unsafe { reticulum_listen(listen_hash.as_ptr()) };
     match handle {
-        h if h > 0 => unsafe {
+        h if h > 0 => {
             reticulum_close(h as u64);
-        },
+        }
         _ => {
             eprintln!(
                 "listen failed (acceptable without network): handle={}",
@@ -79,9 +77,7 @@ fn test_listen_succeeds_without_network() {
         }
     }
 
-    unsafe {
-        reticulum_shutdown();
-    }
+    reticulum_shutdown();
 }
 
 // Mutex to serialise the multi-dial test's shared static.
@@ -125,7 +121,5 @@ fn test_multiple_dials_fire_callbacks() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 
-    unsafe {
-        reticulum_shutdown();
-    }
+    reticulum_shutdown();
 }

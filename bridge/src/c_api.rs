@@ -62,6 +62,10 @@ pub(crate) fn call_on_close(conn_id: u64) {
 /// be safe to call from a non-Go-started OS thread (keep them minimal: just
 /// write to a channel and return).
 /// Returns 0 on success, -1 on error.
+/// config_json must not be NULL; always provide at least "{}" for defaults.
+///
+/// # Safety
+/// `config_json` must be a valid, non-null, null-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn reticulum_init(
     config_json: *const c_char,
@@ -149,6 +153,8 @@ pub extern "C" fn reticulum_shutdown() {
 
 /// Dial a destination hash. Non-blocking; fires `on_connect(task_id, conn_id)`
 /// when done (`conn_id == 0` on failure).
+/// # Safety
+/// `destination_hash` must be a valid, non-null, null-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn reticulum_dial(task_id: u64, destination_hash: *const c_char) {
     if destination_hash.is_null() {
@@ -213,6 +219,8 @@ pub unsafe extern "C" fn reticulum_dial(task_id: u64, destination_hash: *const c
 
 /// Listen on a hash. Blocks until the listener is registered.
 /// Returns the listener handle (>0) on success, -1 on error.
+/// # Safety
+/// `listen_hash` must be a valid, non-null, null-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i64 {
     if listen_hash.is_null() {
@@ -289,6 +297,9 @@ pub unsafe extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i64 {
 // ---------------------------------------------------------------------------
 
 /// Write data to a connection. Returns bytes written or -1 on error.
+///
+/// # Safety
+/// `data` must be a valid pointer to at least `len` initialized bytes.
 #[no_mangle]
 pub unsafe extern "C" fn reticulum_write(conn_handle: u64, data: *const u8, len: usize) -> i32 {
     if data.is_null() || len == 0 {
@@ -314,6 +325,9 @@ pub unsafe extern "C" fn reticulum_write(conn_handle: u64, data: *const u8, len:
 }
 
 /// Close a connection or listener handle.
+///
+/// # Safety
+/// `buffer` must be a valid pointer to a writable buffer of at least `max_len` bytes.
 #[no_mangle]
 pub extern "C" fn reticulum_close(handle: u64) {
     log::debug!("close handle={}", handle);
@@ -381,6 +395,9 @@ pub extern "C" fn reticulum_get_transport_hash() -> *mut c_char {
 // ---------------------------------------------------------------------------
 
 /// Register a name→hash mapping. Returns 0 on success, -1 on error.
+///
+/// # Safety
+/// `name` and `hash` must be valid, null-terminated C strings or null pointers.
 #[no_mangle]
 pub unsafe extern "C" fn reticulum_register_name(name: *const c_char, hash: *const c_char) -> i32 {
     if name.is_null() || hash.is_null() {
@@ -403,6 +420,10 @@ pub unsafe extern "C" fn reticulum_register_name(name: *const c_char, hash: *con
 
 /// Get the hash for a registered name. Caller must free with reticulum_free.
 /// Returns 0 in the out-param on success, -1 if the name is unknown.
+///
+/// # Safety
+/// `hash` must be a valid pointer to a `*mut c_char`. `name` must be a valid
+/// null-terminated C string or null pointer.
 #[no_mangle]
 pub unsafe extern "C" fn get_hash(hash: *mut *mut c_char, name: *const c_char) -> i32 {
     if hash.is_null() || name.is_null() {
@@ -431,6 +452,8 @@ pub unsafe extern "C" fn get_hash(hash: *mut *mut c_char, name: *const c_char) -
 
 /// Resolve a service name to its address hash via network announcements.
 /// Caller must free the returned string with reticulum_free. Returns NULL on timeout.
+/// # Safety
+/// `name` must be a valid, non-null, null-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
     if name.is_null() {
