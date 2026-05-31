@@ -113,6 +113,9 @@ jobs:
           else
             cargo build --target ${{ inputs.target || 'x86_64-unknown-linux-gnu' }}
           fi
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
 
       - name: Set library path output
         id: set-lib-path
