@@ -14,7 +14,7 @@ use tokio::sync::{broadcast, watch};
 use tokio::sync::Mutex;
 
 use rand_core::OsRng;
-use reticulum_rs::transport::destination::link::{Link, LinkEvent, LinkStatus};
+use reticulum_rs::transport::destination::link::{Link, LinkEvent, LinkEventData, LinkStatus};
 use reticulum_rs::transport::destination::{DestinationDesc, DestinationName, SingleInputDestination};
 use reticulum_rs::transport::hash::AddressHash;
 use reticulum_rs::transport::identity::{Identity, PrivateIdentity};
@@ -408,14 +408,21 @@ pub async fn register_listener_destination(
                                 guard.peer_identity().address_hash
                             };
                             log::info!("service link activated: id={} peer={}", event.id, peer_hash);
-                            // Subscribe BEFORE identify so we don't miss the peer's
-                            // LinkIdentify packet.
-                            let mut data_rx = {
+                            // Subscribe to in_link_events now (before sending our identify)
+                            // so we catch the peer's PeerIdentified event when it fires.
+                            // The client sends its identify only after its link activates,
+                            // which happens after we've already subscribed here.
+                            let mut peer_events = {
+                                let tp = transport.lock().await;
+                                tp.in_link_events()
+                            };
+                            // Subscribe to data events separately for the data reader.
+                            let data_rx = {
                                 let tp = transport.lock().await;
                                 tp.received_data_events()
                             };
                             // Exchange identify packets; peer's verified hash → identified_peer.
-                            let identified = exchange_identify_on_link(&link, event.id, &mut data_rx).await;
+                            let identified = exchange_identify_on_link(&link, event.id, &mut peer_events).await;
                             let conn = Connection::new_from_link(link.clone(), event.id, Some(peer_hash), identified);
                             spawn_link_data_reader(conn.clone(), event.id, data_rx);
                             listener_clone.push_connection(conn).await;
@@ -521,13 +528,16 @@ pub async fn wait_for_service_announce(name: &str, timeout: Duration) -> Option<
 // Data reader
 // ---------------------------------------------------------------------------
 
-/// Send our transport identity as a `LinkIdentify` (0xFB) packet on the given link.
-///
-/// Logs our own identity and, once the peer's identify arrives via `received_data_events`,
-/// logs theirs too. Both appear as:
 /// Exchange link identify packets with the peer and return the peer's verified
 /// transport identity hash. Both sides are expected to call this concurrently
 /// right after link activation.
+///
+/// The library handles `PacketContext::LinkIdentify` (0xFB) internally and fires
+/// `LinkEvent::PeerIdentified` — it never appears in `received_data_events`.
+/// Therefore this function listens on the transport link-event channel, not the
+/// data channel. Callers must subscribe to `in_link_events` (server) or
+/// `out_link_events` (client) **before** the link activates so that the event
+/// is buffered and not missed.
 ///
 /// Logs:
 ///   my_identity:   addr=… encrypt=… sign=…
@@ -538,7 +548,7 @@ pub async fn wait_for_service_announce(name: &str, timeout: Duration) -> Option<
 pub async fn exchange_identify_on_link(
     link: &Arc<Mutex<Link>>,
     link_id: AddressHash,
-    data_rx: &mut broadcast::Receiver<ReceivedData>,
+    link_events: &mut broadcast::Receiver<LinkEventData>,
 ) -> Option<AddressHash> {
     let transport_id = get_transport_identity()?;
 
@@ -569,7 +579,9 @@ pub async fn exchange_identify_on_link(
         }
     }
 
-    // Wait for peer's LinkIdentify packet (no application data expected yet).
+    // Wait for the library to fire LinkEvent::PeerIdentified on this link.
+    // The library decrypts the peer's LinkIdentify packet internally and posts
+    // this event — it does NOT forward the raw packet to received_data_events.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -582,30 +594,23 @@ pub async fn exchange_identify_on_link(
                 log::warn!("identify: timeout waiting for peer identify on link {}", link_id);
                 return None;
             }
-            result = data_rx.recv() => {
+            result = link_events.recv() => {
                 match result {
-                    Ok(data) if data.destination == link_id
-                        && data.context == Some(PacketContext::LinkIdentify) =>
-                    {
-                        match parse_link_identify_payload(data.data.as_slice(), &link_id) {
-                            Some(peer_id) => {
-                                log::info!(
-                                    "peer_identity: addr={} encrypt={} sign={}",
-                                    peer_id.address_hash,
-                                    hex::encode(peer_id.public_key_bytes()),
-                                    hex::encode(peer_id.verifying_key_bytes()),
-                                );
-                                return Some(peer_id.address_hash);
-                            }
-                            None => {
-                                log::warn!("identify: peer identify packet failed verification");
-                                return None;
-                            }
+                    Ok(event) if event.id == link_id => {
+                        if let LinkEvent::PeerIdentified(identity) = event.event {
+                            log::info!(
+                                "peer_identity: addr={} encrypt={} sign={}",
+                                identity.address_hash,
+                                hex::encode(identity.public_key_bytes()),
+                                hex::encode(identity.verifying_key_bytes()),
+                            );
+                            return Some(identity.address_hash);
                         }
+                        // Other events on this link (e.g. Data, KeepAlive) — skip.
                     }
-                    Ok(_) => continue, // skip — no app data expected during identify
+                    Ok(_) => {} // event for a different link — skip
                     Err(broadcast::error::RecvError::Closed) => return None,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {} // catch up
                 }
             }
         }

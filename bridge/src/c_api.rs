@@ -165,11 +165,21 @@ pub extern "C" fn reticulum_dial(destination_hash: *const c_char) -> i32 {
     runtime::block_on(async move {
         match crate::transport::get_transport() {
             Some(transport) => {
-                // Subscribe to data events BEFORE dialing so we capture packets
-                // that arrive the instant the link activates on the server side.
-                let mut data_rx = {
+                // Subscribe to data events and link events BEFORE dialing.
+                // data_rx: feeds spawn_link_data_reader — must not be consumed
+                //          during the identify exchange (that would silently drop
+                //          auth messages that arrive before identify completes).
+                // link_events: used by exchange_identify_on_link to catch
+                //              LinkEvent::PeerIdentified. Subscribing before the
+                //              link is created ensures the event is buffered even
+                //              if the server sends its identify during activation.
+                let data_rx = {
                     let tp = transport.lock().await;
                     tp.received_data_events()
+                };
+                let mut link_events = {
+                    let tp = transport.lock().await;
+                    tp.out_link_events()
                 };
                 match crate::transport::dial_and_wait(&dest).await {
                     Ok((link, link_id)) => {
@@ -177,7 +187,7 @@ pub extern "C" fn reticulum_dial(destination_hash: *const c_char) -> i32 {
                         log::info!("outbound link active: id={} peer={}", link_id, peer_hash);
                         // Exchange identify packets using PacketContext::LinkIdentify (0xFB).
                         let identified = crate::transport::exchange_identify_on_link(
-                            &link, link_id, &mut data_rx
+                            &link, link_id, &mut link_events
                         ).await;
                         let conn = crate::connection::Connection::new_from_link(
                             link, link_id, Some(peer_hash), identified
