@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::runtime::{Builder, Runtime};
@@ -114,6 +115,21 @@ where
         IN_BLOCK_ON.with(|cell| cell.set(false));
     }
     result
+}
+
+/// Spawn a future on the runtime without blocking the calling thread.
+///
+/// Panics if the runtime is not initialized. Call `init_runtime` first.
+pub fn spawn<F>(f: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let guard = lock_runtime();
+    guard
+        .as_ref()
+        .expect("runtime not initialized; call reticulum_init first")
+        .spawn(f)
 }
 
 /// Shutdown the bridge runtime.

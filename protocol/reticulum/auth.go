@@ -1,24 +1,22 @@
-// Package reticulum implements a mutual password authentication handshake for
-// Reticulum bridge connections.
+// Package reticulum implements symmetric mutual authentication for Reticulum bridge connections.
 //
-// Protocol (server speaks first):
+// Protocol (2 concurrent rounds, 1 RTT total):
 //
-//	Server → Client: "SBRT-AUTH-1\n" + hex(salt_s, 32 bytes) + "\n"
-//	Client → Server: hex(salt_c, 32 bytes) + "\n" + hex(HMAC-SHA256(password, salt_s)) + "\n"
-//	Server verifies; if wrong → returns error (caller should close the connection).
-//	Server → Client: "OK\n" + hex(HMAC-SHA256(password, salt_c)) + "\n"
-//	Client verifies; if wrong → returns error.
+//	Both → Both: [TypeRequestAuth=0x84][salt: 32 bytes]           Round 1: exchange challenges
+//	Both → Both: [TypeResponseAuth=0x85][HMAC-SHA256: 32 bytes]   Round 2: prove knowledge
+//
+//	HMAC = HMAC-SHA256(key=password, data=ownID || peerSalt)
+//
+// ownID and peerID are Reticulum identity address hashes obtained from the bridge.
+// Including them in the HMAC binds the proof to a specific identity, preventing
+// cross-connection replay even if salts collide.
 package reticulum
 
 import (
-	"bufio"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"io"
-	"strings"
 	"time"
 )
 
@@ -30,156 +28,82 @@ func generateSalt() ([]byte, error) {
 	return salt, err
 }
 
-func computeHMAC(password string, salt []byte) []byte {
-	mac := hmac.New(sha256.New, []byte(password))
-	mac.Write(salt)
-	return mac.Sum(nil)
+// macBound computes HMAC-SHA256(key=password, data=ownID||peerSalt).
+// ownID is the sender's own identity hash string; peerSalt is the challenge received from the peer.
+func macBound(password, ownID string, peerSalt []byte) []byte {
+	h := hmac.New(sha256.New, []byte(password))
+	h.Write([]byte(ownID))
+	h.Write(peerSalt)
+	return h.Sum(nil)
 }
 
-func writeLine(w io.Writer, line string) error {
-	_, err := fmt.Fprintf(w, "%s\n", line)
-	return err
-}
-
-// readLine reads one '\n'-terminated line with a fixed timeout.
-func readLine(r *bufio.Reader) (string, error) {
-	type result struct {
-		line string
-		err  error
+// Auth performs symmetric mutual password authentication with identity binding.
+//
+// ownID is this side's identity hash (transport hash or service destination hash).
+// peerID is the peer's identity hash (from BridgeConnPeerHash or the known destination hash).
+//
+// Round 1: both sides concurrently send TypeRequestAuth + 32-byte random salt.
+// Round 2: both sides concurrently send TypeResponseAuth + HMAC-SHA256(password, ownID, peerSalt).
+// Each side verifies the peer's HMAC by recomputing HMAC(password, peerID, ownSalt).
+//
+// Returns nil on success. On failure the caller should close the connection.
+func Auth(rw AuthIO, password, ownID, peerID string) error {
+	ownSalt, err := generateSalt()
+	if err != nil {
+		return fmt.Errorf("generate salt: %w", err)
 	}
-	ch := make(chan result, 1)
+
+	type readResult struct {
+		typeByte byte
+		data     []byte
+		err      error
+	}
+
+	// Round 1: send TypeRequestAuth+salt and receive peer's concurrently.
+	r1 := make(chan readResult, 1)
 	go func() {
-		line, err := r.ReadString('\n')
-		if err != nil {
-			ch <- result{err: err}
-			return
-		}
-		ch <- result{line: strings.TrimRight(line, "\r\n")}
+		typB, data, err := rw.ReadMsg()
+		r1 <- readResult{typB, data, err}
 	}()
-	select {
-	case res := <-ch:
-		return res.line, res.err
-	case <-time.After(authTimeout):
-		return "", fmt.Errorf("auth timeout")
+	if err := rw.WriteMsg(TypeRequestAuth, ownSalt); err != nil {
+		return fmt.Errorf("send round1: %w", err)
 	}
-}
+	res := <-r1
+	if res.err != nil {
+		return fmt.Errorf("recv round1: %w", res.err)
+	}
+	if res.typeByte != TypeRequestAuth {
+		return fmt.Errorf("round1: expected TypeRequestAuth (0x%02x), got 0x%02x", TypeRequestAuth, res.typeByte)
+	}
+	if len(res.data) != 32 {
+		return fmt.Errorf("round1: bad length %d (want 32)", len(res.data))
+	}
+	peerSalt := res.data
 
-// ServerAuth runs the server side of the mutual password authentication.
-//
-// It generates a random salt, sends it to the client together with the
-// protocol header, reads the client's salt and HMAC response, verifies
-// the HMAC, and if correct sends back its own HMAC proof.
-//
-// Returns nil on success. On failure the caller should close the connection.
-func ServerAuth(rw io.ReadWriter, password string) error {
-	r := bufio.NewReader(rw)
-
-	saltS, err := generateSalt()
-	if err != nil {
-		return fmt.Errorf("generate server salt: %w", err)
+	// Round 2: send TypeResponseAuth+MAC and receive peer's concurrently.
+	ownMAC := macBound(password, ownID, peerSalt)
+	r2 := make(chan readResult, 1)
+	go func() {
+		typB, data, err := rw.ReadMsg()
+		r2 <- readResult{typB, data, err}
+	}()
+	if err := rw.WriteMsg(TypeResponseAuth, ownMAC); err != nil {
+		return fmt.Errorf("send round2: %w", err)
 	}
-
-	if err := writeLine(rw, "SBRT-AUTH-1"); err != nil {
-		return fmt.Errorf("write header: %w", err)
+	res = <-r2
+	if res.err != nil {
+		return fmt.Errorf("recv round2: %w", res.err)
 	}
-	if err := writeLine(rw, hex.EncodeToString(saltS)); err != nil {
-		return fmt.Errorf("write server salt: %w", err)
+	if res.typeByte != TypeResponseAuth {
+		return fmt.Errorf("round2: expected TypeResponseAuth (0x%02x), got 0x%02x", TypeResponseAuth, res.typeByte)
 	}
-
-	saltCHex, err := readLine(r)
-	if err != nil {
-		return fmt.Errorf("read client salt: %w", err)
-	}
-	saltC, err := hex.DecodeString(saltCHex)
-	if err != nil || len(saltC) != 32 {
-		return fmt.Errorf("invalid client salt")
+	if len(res.data) != 32 {
+		return fmt.Errorf("round2: bad length %d (want 32)", len(res.data))
 	}
 
-	clientHMACHex, err := readLine(r)
-	if err != nil {
-		return fmt.Errorf("read client HMAC: %w", err)
+	expected := macBound(password, peerID, ownSalt)
+	if !hmac.Equal(res.data, expected) {
+		return fmt.Errorf("authentication failed")
 	}
-	clientHMACBytes, err := hex.DecodeString(clientHMACHex)
-	if err != nil {
-		return fmt.Errorf("invalid client HMAC hex")
-	}
-
-	expected := computeHMAC(password, saltS)
-	if !hmac.Equal(clientHMACBytes, expected) {
-		return fmt.Errorf("wrong password")
-	}
-
-	if err := writeLine(rw, "OK"); err != nil {
-		return fmt.Errorf("write OK: %w", err)
-	}
-	serverHMAC := computeHMAC(password, saltC)
-	if err := writeLine(rw, hex.EncodeToString(serverHMAC)); err != nil {
-		return fmt.Errorf("write server HMAC: %w", err)
-	}
-
-	return nil
-}
-
-// ClientAuth runs the client side of the mutual password authentication.
-//
-// It reads the server's header and salt, sends its own salt and HMAC
-// response, reads the server's OK and HMAC proof, and verifies it.
-//
-// Returns nil on success. On failure the caller should close the connection.
-func ClientAuth(rw io.ReadWriter, password string) error {
-	r := bufio.NewReader(rw)
-
-	header, err := readLine(r)
-	if err != nil {
-		return fmt.Errorf("read header: %w", err)
-	}
-	if header != "SBRT-AUTH-1" {
-		return fmt.Errorf("unexpected protocol header: %q", header)
-	}
-
-	saltSHex, err := readLine(r)
-	if err != nil {
-		return fmt.Errorf("read server salt: %w", err)
-	}
-	saltS, err := hex.DecodeString(saltSHex)
-	if err != nil || len(saltS) != 32 {
-		return fmt.Errorf("invalid server salt")
-	}
-
-	saltC, err := generateSalt()
-	if err != nil {
-		return fmt.Errorf("generate client salt: %w", err)
-	}
-
-	clientHMAC := computeHMAC(password, saltS)
-	if err := writeLine(rw, hex.EncodeToString(saltC)); err != nil {
-		return fmt.Errorf("write client salt: %w", err)
-	}
-	if err := writeLine(rw, hex.EncodeToString(clientHMAC)); err != nil {
-		return fmt.Errorf("write client HMAC: %w", err)
-	}
-
-	status, err := readLine(r)
-	if err != nil {
-		return fmt.Errorf("read server status: %w", err)
-	}
-	if status != "OK" {
-		return fmt.Errorf("rejected by server")
-	}
-
-	serverHMACHex, err := readLine(r)
-	if err != nil {
-		return fmt.Errorf("read server HMAC: %w", err)
-	}
-	serverHMACBytes, err := hex.DecodeString(serverHMACHex)
-	if err != nil {
-		return fmt.Errorf("invalid server HMAC hex")
-	}
-
-	expected := computeHMAC(password, saltC)
-	if !hmac.Equal(serverHMACBytes, expected) {
-		return fmt.Errorf("server has wrong password")
-	}
-
 	return nil
 }

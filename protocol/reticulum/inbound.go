@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
@@ -43,14 +42,13 @@ func RegisterInbound(registry *inbound.Registry) {
 
 type Inbound struct {
 	inbound.Adapter
-	router       adapter.Router
-	logger       log.ContextLogger
-	options      option.ReticulumInboundOptions
-	listenerTask int
-	listenerHdl  uint64
-	accepting    bool
-	mu           sync.Mutex
-	closed       bool
+	router      adapter.Router
+	logger      log.ContextLogger
+	options     option.ReticulumInboundOptions
+	listenerHdl uint64
+	mu          sync.Mutex
+	closed      bool
+	doneCh      chan struct{}
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.ReticulumInboundOptions) (adapter.Inbound, error) {
@@ -59,6 +57,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		router:  router,
 		logger:  logger,
 		options: options,
+		doneCh:  make(chan struct{}),
 	}, nil
 }
 
@@ -92,20 +91,13 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 		return fmt.Errorf("bridge init failed: %w", err)
 	}
 
-	taskID, err := BridgeListen(listenHash)
+	handle, err := BridgeListen(listenHash)
 	if err != nil {
 		return fmt.Errorf("bridge listen failed: %w", err)
 	}
-	h.listenerTask = taskID
-
-	handle, err := BridgePollTask(taskID, 30*time.Second)
-	if err != nil {
-		return fmt.Errorf("listener poll failed: %w", err)
-	}
 	h.listenerHdl = handle
 
-	h.logger.Info("reticulum inbound: listener ready")
-	h.accepting = true
+	h.logger.Info("reticulum inbound: listener ready, handle=", handle)
 
 	go h.acceptLoop()
 	return nil
@@ -113,41 +105,51 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 
 func (h *Inbound) acceptLoop() {
 	for {
-		h.mu.Lock()
-		if h.closed || !h.accepting {
-			h.mu.Unlock()
+		select {
+		case <-h.doneCh:
 			return
-		}
-		h.mu.Unlock()
-
-		taskID, err := BridgeAccept(h.listenerHdl)
-		if err != nil {
-			h.logger.Error("accept error: ", err)
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		handle, err := BridgePollTask(taskID, 30*time.Second)
-		if err != nil {
-			h.logger.Error("poll after accept failed: ", err)
-			continue
-		}
-
-		h.logger.Debug("accepted connection, handle=", handle)
-
-		conn := newReticulumConn(handle, "inbound", fmt.Sprintf("listener-%d", h.listenerHdl), h.logger)
-
-		if h.options.Password != "" {
-			if err := ServerAuth(conn, h.options.Password); err != nil {
-				h.logger.Error("reticulum auth failed: ", err)
-				conn.Close()
+		case ev := <-globalAcceptCh:
+			if ev.listenerID != h.listenerHdl {
+				// Not for us — put back and yield so other listeners can pick it up.
+				select {
+				case globalAcceptCh <- ev:
+				default:
+				}
 				continue
 			}
+			go h.handleConn(ev.connID)
 		}
-
-		session := newMuxSessionServer(conn, h.logger)
-		go h.handleSession(session)
 	}
+}
+
+func (h *Inbound) handleConn(connID uint64) {
+	h.logger.Debug("accepted connection, handle=", connID)
+	handle := connID
+
+	raw := newReticulumConn(handle, "inbound", fmt.Sprintf("listener-%d", h.listenerHdl), h.logger)
+	fc := newFramedConn(raw)
+
+	if h.options.Password != "" {
+		ownID, err := BridgeTransportHash()
+		if err != nil {
+			h.logger.Warn("auth: own identity unavailable: ", err)
+			ownID = ""
+		}
+		peerID, err := BridgeConnIdentifiedPeer(handle)
+		if err != nil {
+			h.logger.Warn("auth: peer identity unavailable (identify exchange may have failed): ", err)
+			peerID = ""
+		}
+		if err := Auth(fc, h.options.Password, ownID, peerID); err != nil {
+			h.logger.Error("reticulum auth failed: ", err)
+			fc.Close()
+			return
+		}
+	}
+	fc.OpenGate()
+
+	session := newMuxSessionServer(fc, h.logger)
+	h.handleSession(session)
 }
 
 // handleSession dispatches incoming virtual connections from a mux session.
@@ -178,7 +180,7 @@ func (h *Inbound) Close() error {
 		return nil
 	}
 	h.closed = true
-	h.accepting = false
+	close(h.doneCh)
 	if h.listenerHdl != 0 {
 		BridgeClose(h.listenerHdl)
 	}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"sync"
-	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
@@ -101,39 +100,48 @@ func (h *Outbound) getOrCreateSession(ctx context.Context, destHash string) (*mu
 
 	h.logger.DebugContext(ctx, "opening new mux session to ", destHash)
 
-	taskID, err := BridgeDial(destHash)
+	_, resultCh, err := BridgeDial(destHash)
 	if err != nil {
 		return nil, err
 	}
 
-	deadline, ok := ctx.Deadline()
-	timeout := 30 * time.Second
-	if ok {
-		timeout = time.Until(deadline)
-		if timeout <= 0 {
-			return nil, context.DeadlineExceeded
-		}
+	var connID uint64
+	select {
+	case connID = <-resultCh:
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-
-	handle, err := BridgePollTask(taskID, timeout)
-	if err != nil {
-		return nil, err
+	if connID == 0 {
+		return nil, ErrBridgeDialFailed
 	}
+	handle := connID
 
 	localName := "outbound"
 	if h.options.Name != "" {
 		localName = h.options.Name
 	}
 	raw := newReticulumConn(handle, localName, destHash, h.logger)
+	fc := newFramedConn(raw)
 
 	if h.options.Password != "" {
-		if err := ClientAuth(raw, h.options.Password); err != nil {
-			raw.Close()
+		ownID, err := BridgeTransportHash()
+		if err != nil {
+			h.logger.WarnContext(ctx, "auth: own identity unavailable: ", err)
+			ownID = ""
+		}
+		peerID, err := BridgeConnIdentifiedPeer(handle)
+		if err != nil {
+			h.logger.WarnContext(ctx, "auth: peer identity unavailable (identify exchange may have failed): ", err)
+			peerID = ""
+		}
+		if err := Auth(fc, h.options.Password, ownID, peerID); err != nil {
+			fc.Close()
 			return nil, fmt.Errorf("reticulum auth failed: %w", err)
 		}
 	}
+	fc.OpenGate()
 
-	h.session = newMuxSessionClient(raw, h.logger)
+	h.session = newMuxSessionClient(fc, h.logger)
 	h.logger.InfoContext(ctx, "mux session established to ", destHash)
 	return h.session, nil
 }

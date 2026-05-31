@@ -16,7 +16,7 @@ libc = "0.2"
 rand_core = "0.6"
 sha2 = "0.10"
 hex = "0.4"
-reticulum-rs = { git = "https://github.com/IgorShishkin12/LXMF-rs", branch = "switch_to_tracing", features = ["core", "transport"] }
+reticulum-rs = { git = "https://github.com/IgorShishkin12/LXMF-rs", branch = "main", features = ["core", "transport"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 tracing-log = "0.2"

@@ -654,7 +654,7 @@ dependencies = [
 [[package]]
 name = "reticulum-rs"
 version = "0.2.0"
-source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=switch_to_tracing#ddcb35097697a00763207da16baf913b9e021846"
+source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=main#6563eda113c2d87abf47baf1caa78a70b029dd4a"
 dependencies = [
  "reticulum-rs-core",
  "reticulum-rs-transport",
@@ -663,7 +663,7 @@ dependencies = [
 [[package]]
 name = "reticulum-rs-core"
 version = "0.2.0"
-source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=switch_to_tracing#ddcb35097697a00763207da16baf913b9e021846"
+source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=main#6563eda113c2d87abf47baf1caa78a70b029dd4a"
 dependencies = [
  "aes",
  "cbc",
@@ -683,7 +683,7 @@ dependencies = [
 [[package]]
 name = "reticulum-rs-transport"
 version = "0.2.0"
-source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=switch_to_tracing#ddcb35097697a00763207da16baf913b9e021846"
+source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=main#6563eda113c2d87abf47baf1caa78a70b029dd4a"
 dependencies = [
  "aes",
  "bzip2",

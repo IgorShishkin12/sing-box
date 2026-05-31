@@ -15,7 +15,7 @@ use tokio::sync::{broadcast, watch};
 
 use rand_core::OsRng;
 use reticulum_rs::runtime::ReceivedData;
-use reticulum_rs::transport::destination::link::{Link, LinkEvent, LinkStatus};
+use reticulum_rs::transport::destination::link::{Link, LinkEvent, LinkEventData, LinkStatus};
 use reticulum_rs::transport::destination::{
     DestinationDesc, DestinationName, SingleInputDestination,
 };
@@ -26,9 +26,9 @@ use reticulum_rs::transport::iface::tcp_server::TcpServer;
 use reticulum_rs::transport::iface::udp::UdpInterface;
 use reticulum_rs::transport::iface::InterfaceManager;
 use reticulum_rs::transport::transport::{Transport, TransportConfig};
+use reticulum_rs::transport::PacketContext;
 
 use crate::config::{ReticulumConfig, ReticulumInterface};
-use crate::connection::Connection;
 use crate::listener::Listener;
 use crate::runtime;
 
@@ -43,36 +43,82 @@ const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(5);
 /// Global Transport singleton.
 static TRANSPORT: OnceCell<Arc<Mutex<Transport>>> = OnceCell::new();
 
+/// Full transport-level identity, set once during `init_transport`.
+static TRANSPORT_IDENTITY: OnceCell<Arc<PrivateIdentity>> = OnceCell::new();
+
+/// Address hash of the transport-level identity, set once during `init_transport`.
+static TRANSPORT_IDENTITY_HASH: OnceCell<AddressHash> = OnceCell::new();
+
 /// Get a reference to the global Transport, if initialized.
 pub fn get_transport() -> Option<&'static Arc<Mutex<Transport>>> {
     TRANSPORT.get()
 }
 
+/// Returns the hex-encoded transport identity address hash, or `None` before init.
+pub fn get_transport_identity_hash() -> Option<String> {
+    TRANSPORT_IDENTITY_HASH.get().map(|h| h.to_hex_string())
+}
+
+/// Returns a reference to the full transport-level private identity, or `None` before init.
+pub fn get_transport_identity() -> Option<&'static Arc<PrivateIdentity>> {
+    TRANSPORT_IDENTITY.get()
+}
+
+// ---------------------------------------------------------------------------
+// Link identify helpers (mirrors Python RNS link.identify())
+// ---------------------------------------------------------------------------
+
+/// Build an identify payload for sending on a link.
+///
+/// Format (128 bytes total):
+///   [encrypt_key: 32][sign_key: 32][sig_over(link_id||encrypt_key||sign_key): 64]
+///
+/// The signature binds the identity claim to this specific link_id, preventing
+/// replay on a different link.
+pub fn build_link_identify_payload(identity: &PrivateIdentity, link_id: &AddressHash) -> Vec<u8> {
+    let id = identity.as_identity();
+    let mut keys = Vec::with_capacity(64);
+    keys.extend_from_slice(id.public_key_bytes());
+    keys.extend_from_slice(id.verifying_key_bytes());
+
+    let mut signed_data = Vec::with_capacity(16 + 64);
+    signed_data.extend_from_slice(link_id.as_slice());
+    signed_data.extend_from_slice(&keys);
+    let sig = identity.sign(&signed_data);
+
+    let mut payload = Vec::with_capacity(128);
+    payload.extend_from_slice(&keys);
+    payload.extend_from_slice(&sig.to_bytes());
+    payload
+}
+
+/// Parse and verify an identify payload received on a link.
+///
+/// Returns the verified `Identity` on success, or `None` if the payload is
+/// malformed or the signature does not verify.
+pub fn parse_link_identify_payload(payload: &[u8], link_id: &AddressHash) -> Option<Identity> {
+    if payload.len() < 128 {
+        return None;
+    }
+    let encrypt_key = &payload[..32];
+    let sign_key = &payload[32..64];
+    let sig_bytes: &[u8; 64] = payload[64..128].try_into().ok()?;
+
+    let identity = Identity::new_from_slices(encrypt_key, sign_key);
+
+    let mut signed_data = Vec::with_capacity(16 + 64);
+    signed_data.extend_from_slice(link_id.as_slice());
+    signed_data.extend_from_slice(&payload[..64]);
+
+    if !reticulum_rs::transport::identity::lxmf_verify(&identity, &signed_data, sig_bytes) {
+        return None;
+    }
+    Some(identity)
+}
+
 // ---------------------------------------------------------------------------
 // Identity helpers
 // ---------------------------------------------------------------------------
-
-/// Derive a deterministic `PrivateIdentity` from a name string.
-///
-/// Used **only** for the discovery destination whose hash both server and
-/// client can compute independently from the service name. Do not use this
-/// for the actual service destination (which must use a random, persisted
-/// identity).
-pub fn derive_discovery_identity(name: &str) -> PrivateIdentity {
-    PrivateIdentity::new_from_name(name)
-}
-
-/// Compute the address-hash hex string for the discovery destination of `name`.
-///
-/// Both server and client can call this independently. The result is the hash
-/// the client dials to "knock" and tell the server to announce the real service
-/// destination.
-pub fn discovery_hash_for_name(name: &str) -> String {
-    let identity = derive_discovery_identity(name);
-    let dest_name = DestinationName::new("sing-box-reticulum", &format!("discovery.{}", name));
-    let dest = SingleInputDestination::new(identity, dest_name);
-    dest.desc.address_hash.to_hex_string()
-}
 
 /// Load a persisted service identity from `<config_dir>/<name>-service.key`,
 /// or create and save a new random one if the file does not exist.
@@ -297,7 +343,16 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
             return Err(e);
         }
     };
-    log::info!("identity resolved: addr={}", identity.address_hash());
+    {
+        let id = identity.as_identity();
+        log::info!(
+            "transport identity: addr={} encrypt_key={} sign_key={}",
+            id.address_hash,
+            hex::encode(id.public_key_bytes()),
+            hex::encode(id.verifying_key_bytes()),
+        );
+    }
+    let _ = TRANSPORT_IDENTITY_HASH.set(*identity.address_hash());
 
     // 3. Build ratchet store path
     let ratchet_store = Some(std::path::PathBuf::from(&cfg_dir).join("ratchet_store.db"));
@@ -328,6 +383,7 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
     log::info!("Transport initialized successfully");
 
     let _ = TRANSPORT.set(Arc::new(Mutex::new(transport)));
+    let _ = TRANSPORT_IDENTITY.set(Arc::new(identity));
     Ok(())
 }
 
@@ -337,12 +393,13 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
 
 /// Register a service `SingleInputDestination` with the global Transport.
 ///
-/// Spawns a background task that monitors `in_link_events`, filtering only
-/// for links whose destination hash matches this service dest, and pushes
-/// those connections into `listener`'s accept queue.
+/// Spawns a background task that monitors `in_link_events` and fires
+/// `call_on_accept(listener_handle, conn_id, peer_hash)` for each incoming
+/// link whose destination hash matches this service dest.
 ///
 /// Returns `(address_hash, Arc<Mutex<SingleInputDestination>>)`.
 pub async fn register_listener_destination(
+    listener_handle: u64,
     listener: Arc<Listener>,
     identity: PrivateIdentity,
     app_name: String,
@@ -369,7 +426,7 @@ pub async fn register_listener_destination(
         aspect
     );
 
-    let listener_clone = listener.clone();
+    let store = crate::store::global_store();
     let service_hash = address_hash;
 
     tokio::spawn(async move {
@@ -396,22 +453,41 @@ pub async fn register_listener_destination(
                         };
 
                         if link_dest_hash == service_hash {
+                            let peer_hash = {
+                                let guard = link.lock().await;
+                                guard.peer_identity().address_hash
+                            };
                             log::info!(
                                 "service link activated: id={} peer={}",
                                 event.id,
-                                event.address_hash
+                                peer_hash
                             );
-                            // Subscribe BEFORE push_connection so no data sent by the
-                            // client immediately after link setup is missed.
+                            let mut peer_events = {
+                                let tp = transport.lock().await;
+                                tp.in_link_events()
+                            };
                             let data_rx = {
                                 let tp = transport.lock().await;
                                 tp.received_data_events()
                             };
-                            let conn = Connection::new_from_link(link.clone(), event.id);
-                            spawn_link_data_reader(conn.clone(), event.id, data_rx);
-                            listener_clone.push_connection(conn).await;
+                            let identified =
+                                exchange_identify_on_link(&link, event.id, &mut peer_events).await;
+                            let conn = crate::connection::Connection::new_from_link(
+                                link.clone(),
+                                event.id,
+                                Some(peer_hash),
+                                identified,
+                            );
+                            let conn_id = store.insert_connection(conn).await;
+                            spawn_link_data_reader(conn_id, event.id, data_rx);
+                            crate::c_api::call_on_accept(
+                                listener_handle,
+                                conn_id,
+                                &peer_hash.to_hex_string(),
+                            );
+                            // Keep listener alive; suppress unused-var warning.
+                            let _ = &listener;
                         }
-                        // Links for the discovery dest or other dests are ignored here.
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -430,7 +506,7 @@ pub async fn register_listener_destination(
 }
 
 // ---------------------------------------------------------------------------
-// Discovery destination (deterministic identity, triggers service announce)
+// Service announcement
 // ---------------------------------------------------------------------------
 
 /// Send service destination announcements in a loop.
@@ -468,109 +544,6 @@ pub async fn start_service_announce_loop(
     }
     log::info!("service announce loop finished for name='{}'", name);
 }
-
-/// Register a discovery destination for `name` and spawn a background task
-/// that watches for incoming links on it.
-///
-/// When a client "knocks" (dials the discovery dest), the task starts a
-/// `start_service_announce_loop` to broadcast the service dest's hash.
-/// When the service connection is established, the announce loop stops.
-pub async fn register_discovery_destination(
-    name: String,
-    service_dest: Arc<Mutex<SingleInputDestination>>,
-    service_hash: AddressHash,
-) -> Result<AddressHash, &'static str> {
-    let transport = get_transport().ok_or("Transport not initialized")?;
-
-    let disc_identity = derive_discovery_identity(&name);
-    let disc_dest_name = DestinationName::new("sing-box-reticulum", &format!("discovery.{}", name));
-
-    let (disc_hash, mut link_events) = {
-        let mut tp = transport.lock().await;
-        let dest = tp.add_destination(disc_identity, disc_dest_name).await;
-        let hash = {
-            let d = dest.lock().await;
-            d.desc.address_hash
-        };
-        let events = tp.in_link_events();
-        (hash, events)
-    };
-
-    log::info!(
-        "registered discovery destination: addr={} name='{}'",
-        disc_hash,
-        name
-    );
-
-    tokio::spawn(async move {
-        let mut stop_tx: Option<watch::Sender<bool>> = None;
-
-        loop {
-            match link_events.recv().await {
-                Ok(event) => {
-                    if !matches!(event.event, LinkEvent::Activated) {
-                        continue;
-                    }
-                    let tp_arc = match get_transport() {
-                        Some(t) => t,
-                        None => break,
-                    };
-
-                    let link = {
-                        let tp = tp_arc.lock().await;
-                        tp.find_in_link(&event.id).await
-                    };
-
-                    let link_dest = match link {
-                        Some(l) => {
-                            let guard = l.lock().await;
-                            guard.destination().address_hash
-                        }
-                        None => continue,
-                    };
-
-                    if link_dest == disc_hash {
-                        // Client knocked — (re)start the service announce loop.
-                        log::info!("discovery knock received for name='{}'", name);
-                        if let Some(tx) = stop_tx.take() {
-                            let _ = tx.send(true);
-                        }
-                        let (tx, rx) = watch::channel(false);
-                        stop_tx = Some(tx);
-                        let dest_clone = service_dest.clone();
-                        let name_clone = name.clone();
-                        tokio::spawn(async move {
-                            start_service_announce_loop(dest_clone, name_clone, rx).await;
-                        });
-                    } else if link_dest == service_hash {
-                        // Real service connection established — stop announcing.
-                        log::info!(
-                            "service link established, stopping announce for name='{}'",
-                            name
-                        );
-                        if let Some(tx) = stop_tx.take() {
-                            let _ = tx.send(true);
-                        }
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    log::warn!("discovery link event channel closed");
-                    break;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    log::warn!("discovery link event lagged by {}", n);
-                    continue;
-                }
-            }
-        }
-    });
-
-    Ok(disc_hash)
-}
-
-// ---------------------------------------------------------------------------
-// Client-side discovery
-// ---------------------------------------------------------------------------
 
 /// Wait for an announce from the network where `app_data == name`.
 ///
@@ -611,73 +584,112 @@ pub async fn wait_for_service_announce(name: &str, timeout: Duration) -> Option<
     }
 }
 
-/// Dial the discovery destination for `name` to signal the server that a client
-/// is looking for it ("knock").
-///
-/// The discovery destination has a deterministic identity both sides can compute,
-/// so no prior announce is needed. The call returns after the link is sent or
-/// after a brief timeout — errors are non-fatal because the knock is best-effort.
-pub async fn dial_discovery_and_wait(name: &str) -> Result<(), &'static str> {
-    let transport = get_transport().ok_or("Transport not initialized")?;
-
-    let disc_private = derive_discovery_identity(name);
-    let disc_public: Identity = *disc_private.as_identity();
-    let disc_dest_name = DestinationName::new("sing-box-reticulum", &format!("discovery.{}", name));
-    let disc_hash_str = discovery_hash_for_name(name);
-    let disc_hash =
-        AddressHash::new_from_hex_string(&disc_hash_str).map_err(|_| "invalid discovery hash")?;
-
-    let desc = DestinationDesc {
-        identity: disc_public,
-        address_hash: disc_hash,
-        name: disc_dest_name,
-    };
-
-    log::info!("sending discovery knock for name='{}'", name);
-
-    let link = {
-        let tp = transport.lock().await;
-        tp.link(desc).await
-    };
-
-    // Wait briefly for link activation (best effort — we don't need confirmation).
-    let start = tokio::time::Instant::now();
-    let knock_timeout = Duration::from_secs(5);
-
-    loop {
-        if start.elapsed() >= knock_timeout {
-            log::warn!("discovery knock timed out for name='{}'", name);
-            return Ok(());
-        }
-        let status = { link.lock().await.status() };
-        match status {
-            LinkStatus::Active | LinkStatus::Closed | LinkStatus::Stale => {
-                log::info!(
-                    "discovery knock completed (status={:?}) for name='{}'",
-                    status,
-                    name
-                );
-                return Ok(());
-            }
-            _ => {}
-        }
-        tokio::time::sleep(DIAL_POLL_INTERVAL).await;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Data reader
 // ---------------------------------------------------------------------------
 
-/// Spawn a background task that forwards inbound link data into a connection's
-/// read buffer.
+/// Exchange link identify packets with the peer and return the peer's verified
+/// transport identity hash. Both sides are expected to call this concurrently
+/// right after link activation.
 ///
-/// `data_rx` must already be subscribed to the transport's `received_data_events`
-/// channel **before** this function is called — typically before the link request
-/// is sent — so that no data packets are lost to the broadcast-channel race where
-/// the server starts writing before the reader has subscribed.
+/// The library handles `PacketContext::LinkIdentify` (0xFB) internally and fires
+/// `LinkEvent::PeerIdentified` — it never appears in `received_data_events`.
+/// Therefore this function listens on the transport link-event channel, not the
+/// data channel. Callers must subscribe to `in_link_events` (server) or
+/// `out_link_events` (client) **before** the link activates so that the event
+/// is buffered and not missed.
+///
+/// Logs:
+///   my_identity:   addr=… encrypt=… sign=…
+///   peer_identity: addr=… encrypt=… sign=…
+///
+/// Returns `None` if the local identity is unavailable, the identify packet
+/// cannot be sent, or the peer's identify does not arrive within 5 seconds.
+pub async fn exchange_identify_on_link(
+    link: &Arc<Mutex<Link>>,
+    link_id: AddressHash,
+    link_events: &mut broadcast::Receiver<LinkEventData>,
+) -> Option<AddressHash> {
+    let transport_id = get_transport_identity()?;
+
+    let my_id = transport_id.as_identity();
+    log::info!(
+        "my_identity: addr={} encrypt={} sign={}",
+        my_id.address_hash,
+        hex::encode(my_id.public_key_bytes()),
+        hex::encode(my_id.verifying_key_bytes()),
+    );
+
+    // Send our identify packet using PacketContext::LinkIdentify (0xFB).
+    let payload = build_link_identify_payload(transport_id, &link_id);
+    let (packet, iface) = {
+        let guard = link.lock().await;
+        let pkt = match guard.identify_packet(&payload) {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("identify: failed to build packet: {:?}", e);
+                return None;
+            }
+        };
+        (pkt, guard.ingress_iface())
+    };
+    if let Some(tp) = get_transport() {
+        let tp = tp.lock().await;
+        if let Some(iface) = iface {
+            tp.send_direct(iface, packet).await;
+        } else {
+            tp.send_broadcast(packet, None).await;
+        }
+    }
+
+    // Wait for the library to fire LinkEvent::PeerIdentified on this link.
+    // The library decrypts the peer's LinkIdentify packet internally and posts
+    // this event — it does NOT forward the raw packet to received_data_events.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            log::warn!(
+                "identify: timeout waiting for peer identify on link {}",
+                link_id
+            );
+            return None;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(remaining) => {
+                log::warn!("identify: timeout waiting for peer identify on link {}", link_id);
+                return None;
+            }
+            result = link_events.recv() => {
+                match result {
+                    Ok(event) if event.id == link_id => {
+                        if let LinkEvent::PeerIdentified(identity) = event.event {
+                            log::info!(
+                                "peer_identity: addr={} encrypt={} sign={}",
+                                identity.address_hash,
+                                hex::encode(identity.public_key_bytes()),
+                                hex::encode(identity.verifying_key_bytes()),
+                            );
+                            return Some(identity.address_hash);
+                        }
+                        // Other events on this link (e.g. Data, KeepAlive) — skip.
+                    }
+                    Ok(_) => {} // event for a different link — skip
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                    Err(broadcast::error::RecvError::Lagged(_)) => {} // catch up
+                }
+            }
+        }
+    }
+}
+
+/// Spawn a background task that fires `on_data` / `on_close` callbacks for
+/// inbound link data packets.
+///
+/// `data_rx` must be subscribed to `received_data_events` **before** the link
+/// is created so no packets are lost to the broadcast-channel race.
 pub fn spawn_link_data_reader(
-    conn: Connection,
+    conn_id: u64,
     link_id: AddressHash,
     mut data_rx: broadcast::Receiver<ReceivedData>,
 ) {
@@ -685,12 +697,15 @@ pub fn spawn_link_data_reader(
         loop {
             match data_rx.recv().await {
                 Ok(data) => {
-                    if data.destination == link_id {
-                        conn.push_read_data(data.data.as_slice()).await;
+                    if data.destination == link_id
+                        && data.context != Some(PacketContext::LinkIdentify)
+                    {
+                        crate::c_api::call_on_data(conn_id, data.data.as_slice());
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => {
-                    log::warn!("data event channel closed");
+                    log::warn!("data event channel closed for conn {}", conn_id);
+                    crate::c_api::call_on_close(conn_id);
                     break;
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -842,17 +857,6 @@ mod tests {
             Err(msg) => assert_eq!(msg, "Transport not initialized"),
             Ok(_) => panic!("expected error"),
         }
-    }
-
-    #[test]
-    fn test_discovery_hash_deterministic() {
-        let h1 = discovery_hash_for_name("e2e-sum-server");
-        let h2 = discovery_hash_for_name("e2e-sum-server");
-        assert_eq!(h1, h2);
-        assert_eq!(h1.len(), 32); // 16 bytes → 32 hex chars
-
-        let h3 = discovery_hash_for_name("other-server");
-        assert_ne!(h1, h3);
     }
 
     #[test]
