@@ -17,7 +17,7 @@ use rand_core::OsRng;
 use reticulum_rs::transport::destination::link::{Link, LinkEvent, LinkStatus};
 use reticulum_rs::transport::destination::{DestinationDesc, DestinationName, SingleInputDestination};
 use reticulum_rs::transport::hash::AddressHash;
-use reticulum_rs::transport::identity::{Identity, PrivateIdentity};
+use reticulum_rs::transport::identity::PrivateIdentity;
 use reticulum_rs::transport::iface::tcp_client::TcpClient;
 use reticulum_rs::transport::iface::tcp_server::TcpServer;
 use reticulum_rs::transport::iface::udp::UdpInterface;
@@ -49,28 +49,6 @@ pub fn get_transport() -> Option<&'static Arc<Mutex<Transport>>> {
 // ---------------------------------------------------------------------------
 // Identity helpers
 // ---------------------------------------------------------------------------
-
-/// Derive a deterministic `PrivateIdentity` from a name string.
-///
-/// Used **only** for the discovery destination whose hash both server and
-/// client can compute independently from the service name. Do not use this
-/// for the actual service destination (which must use a random, persisted
-/// identity).
-pub fn derive_discovery_identity(name: &str) -> PrivateIdentity {
-    PrivateIdentity::new_from_name(name)
-}
-
-/// Compute the address-hash hex string for the discovery destination of `name`.
-///
-/// Both server and client can call this independently. The result is the hash
-/// the client dials to "knock" and tell the server to announce the real service
-/// destination.
-pub fn discovery_hash_for_name(name: &str) -> String {
-    let identity = derive_discovery_identity(name);
-    let dest_name = DestinationName::new("sing-box-reticulum", &format!("discovery.{}", name));
-    let dest = SingleInputDestination::new(identity, dest_name);
-    dest.desc.address_hash.to_hex_string()
-}
 
 /// Load a persisted service identity from `<config_dir>/<name>-service.key`,
 /// or create and save a new random one if the file does not exist.
@@ -379,7 +357,7 @@ pub async fn register_listener_destination(
 }
 
 // ---------------------------------------------------------------------------
-// Discovery destination (deterministic identity, triggers service announce)
+// Service announcement
 // ---------------------------------------------------------------------------
 
 /// Send service destination announcements in a loop.
@@ -418,106 +396,6 @@ pub async fn start_service_announce_loop(
     log::info!("service announce loop finished for name='{}'", name);
 }
 
-/// Register a discovery destination for `name` and spawn a background task
-/// that watches for incoming links on it.
-///
-/// When a client "knocks" (dials the discovery dest), the task starts a
-/// `start_service_announce_loop` to broadcast the service dest's hash.
-/// When the service connection is established, the announce loop stops.
-pub async fn register_discovery_destination(
-    name: String,
-    service_dest: Arc<Mutex<SingleInputDestination>>,
-    service_hash: AddressHash,
-) -> Result<AddressHash, &'static str> {
-    let transport = get_transport().ok_or("Transport not initialized")?;
-
-    let disc_identity = derive_discovery_identity(&name);
-    let disc_dest_name =
-        DestinationName::new("sing-box-reticulum", &format!("discovery.{}", name));
-
-    let (disc_hash, mut link_events) = {
-        let mut tp = transport.lock().await;
-        let dest = tp.add_destination(disc_identity, disc_dest_name).await;
-        let hash = { let d = dest.lock().await; d.desc.address_hash };
-        let events = tp.in_link_events();
-        (hash, events)
-    };
-
-    log::info!(
-        "registered discovery destination: addr={} name='{}'",
-        disc_hash, name
-    );
-
-    tokio::spawn(async move {
-        let mut stop_tx: Option<watch::Sender<bool>> = None;
-
-        loop {
-            match link_events.recv().await {
-                Ok(event) => {
-                    if !matches!(event.event, LinkEvent::Activated) {
-                        continue;
-                    }
-                    let tp_arc = match get_transport() {
-                        Some(t) => t,
-                        None => break,
-                    };
-
-                    let link = {
-                        let tp = tp_arc.lock().await;
-                        tp.find_in_link(&event.id).await
-                    };
-
-                    let link_dest = match link {
-                        Some(l) => {
-                            let guard = l.lock().await;
-                            guard.destination().address_hash
-                        }
-                        None => continue,
-                    };
-
-                    if link_dest == disc_hash {
-                        // Client knocked — (re)start the service announce loop.
-                        log::info!("discovery knock received for name='{}'", name);
-                        if let Some(tx) = stop_tx.take() {
-                            let _ = tx.send(true);
-                        }
-                        let (tx, rx) = watch::channel(false);
-                        stop_tx = Some(tx);
-                        let dest_clone = service_dest.clone();
-                        let name_clone = name.clone();
-                        tokio::spawn(async move {
-                            start_service_announce_loop(dest_clone, name_clone, rx).await;
-                        });
-                    } else if link_dest == service_hash {
-                        // Real service connection established — stop announcing.
-                        log::info!(
-                            "service link established, stopping announce for name='{}'",
-                            name
-                        );
-                        if let Some(tx) = stop_tx.take() {
-                            let _ = tx.send(true);
-                        }
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    log::warn!("discovery link event channel closed");
-                    break;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    log::warn!("discovery link event lagged by {}", n);
-                    continue;
-                }
-            }
-        }
-    });
-
-    Ok(disc_hash)
-}
-
-// ---------------------------------------------------------------------------
-// Client-side discovery
-// ---------------------------------------------------------------------------
-
 /// Wait for an announce from the network where `app_data == name`.
 ///
 /// Returns the hex-encoded service destination address hash on success, or
@@ -554,60 +432,6 @@ pub async fn wait_for_service_announce(name: &str, timeout: Duration) -> Option<
                 }
             }
         }
-    }
-}
-
-/// Dial the discovery destination for `name` to signal the server that a client
-/// is looking for it ("knock").
-///
-/// The discovery destination has a deterministic identity both sides can compute,
-/// so no prior announce is needed. The call returns after the link is sent or
-/// after a brief timeout — errors are non-fatal because the knock is best-effort.
-pub async fn dial_discovery_and_wait(name: &str) -> Result<(), &'static str> {
-    let transport = get_transport().ok_or("Transport not initialized")?;
-
-    let disc_private = derive_discovery_identity(name);
-    let disc_public: Identity = *disc_private.as_identity();
-    let disc_dest_name =
-        DestinationName::new("sing-box-reticulum", &format!("discovery.{}", name));
-    let disc_hash_str = discovery_hash_for_name(name);
-    let disc_hash =
-        AddressHash::new_from_hex_string(&disc_hash_str).map_err(|_| "invalid discovery hash")?;
-
-    let desc = DestinationDesc {
-        identity: disc_public,
-        address_hash: disc_hash,
-        name: disc_dest_name,
-    };
-
-    log::info!("sending discovery knock for name='{}'", name);
-
-    let link = {
-        let tp = transport.lock().await;
-        tp.link(desc).await
-    };
-
-    // Wait briefly for link activation (best effort — we don't need confirmation).
-    let start = tokio::time::Instant::now();
-    let knock_timeout = Duration::from_secs(5);
-
-    loop {
-        if start.elapsed() >= knock_timeout {
-            log::warn!("discovery knock timed out for name='{}'", name);
-            return Ok(());
-        }
-        let status = { link.lock().await.status() };
-        match status {
-            LinkStatus::Active | LinkStatus::Closed | LinkStatus::Stale => {
-                log::info!(
-                    "discovery knock completed (status={:?}) for name='{}'",
-                    status, name
-                );
-                return Ok(());
-            }
-            _ => {}
-        }
-        tokio::time::sleep(DIAL_POLL_INTERVAL).await;
     }
 }
 
@@ -787,17 +611,6 @@ mod tests {
             Err(msg) => assert_eq!(msg, "Transport not initialized"),
             Ok(_) => panic!("expected error"),
         }
-    }
-
-    #[test]
-    fn test_discovery_hash_deterministic() {
-        let h1 = discovery_hash_for_name("e2e-sum-server");
-        let h2 = discovery_hash_for_name("e2e-sum-server");
-        assert_eq!(h1, h2);
-        assert_eq!(h1.len(), 32); // 16 bytes → 32 hex chars
-
-        let h3 = discovery_hash_for_name("other-server");
-        assert_ne!(h1, h3);
     }
 
     #[test]

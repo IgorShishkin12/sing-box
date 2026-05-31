@@ -275,18 +275,8 @@ pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i32 {
                     Ok((service_hash, service_dest_arc)) => {
                         listener_arc.set_destination_hash(service_hash).await;
 
-                        if let Err(e) = crate::transport::register_discovery_destination(
-                            listen_name.clone(),
-                            service_dest_arc.clone(),
-                            service_hash,
-                        )
-                        .await
                         {
-                            log::warn!("discovery dest registration failed: {}", e);
-                        }
-
-                        {
-                            let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+                            let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
                             let dest_clone = service_dest_arc.clone();
                             let name_clone = listen_name.clone();
                             tokio::spawn(async move {
@@ -295,10 +285,7 @@ pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i32 {
                                 )
                                 .await;
                             });
-                            tokio::spawn(async move {
-                                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
-                                let _ = stop_tx.send(true);
-                            });
+                            // _stop_tx dropped here — loop runs continuously
                         }
 
                         let handle = store.insert_listener((*listener_arc).clone()).await;
@@ -577,8 +564,8 @@ pub extern "C" fn reticulum_free(ptr: *mut u8) {
 
 /// Resolve a human-readable service name to its address hash via the Reticulum network.
 ///
-/// Repeatedly knocks on the discovery destination and waits for the server to announce
-/// the real service hash. Up to 3 attempts with exponential backoff (3s → 6s → 12s).
+/// Waits for the server's periodic announce packet whose app_data matches `name`.
+/// Up to 3 attempts with a short backoff between them.
 ///
 /// The caller must free the returned string with reticulum_free.
 /// Returns NULL on timeout or if transport is not initialized.
@@ -594,8 +581,8 @@ pub extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
 
     use std::time::Duration;
 
-    // Server re-announces every 5s; 8s gives one full cycle as margin.
-    const ANNOUNCE_WAIT: Duration = Duration::from_secs(8);
+    // Server announces every 5s; 15s covers 3 full cycles with margin.
+    const ANNOUNCE_WAIT: Duration = Duration::from_secs(15);
     const MAX_ATTEMPTS: u32 = 3;
     const INITIAL_BACKOFF: Duration = Duration::from_secs(3);
 
@@ -613,14 +600,6 @@ pub extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(30));
             }
-
-            let knock_name = name_str.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                if let Err(e) = crate::transport::dial_discovery_and_wait(&knock_name).await {
-                    log::warn!("discovery knock failed: {}", e);
-                }
-            });
 
             if let Some(hash) =
                 crate::transport::wait_for_service_announce(&name_str, ANNOUNCE_WAIT).await
