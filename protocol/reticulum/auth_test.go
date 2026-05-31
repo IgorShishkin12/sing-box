@@ -14,23 +14,24 @@ type chanAuthIO struct {
 	done chan struct{}
 }
 
-func (c *chanAuthIO) ReadMsg() ([]byte, error) {
+func (c *chanAuthIO) ReadMsg() (byte, []byte, error) {
 	select {
 	case msg, ok := <-c.in:
 		if !ok {
-			return nil, io.EOF
+			return 0, nil, io.EOF
 		}
-		return msg, nil
+		return msg[0], msg[1:], nil
 	case <-c.done:
-		return nil, io.ErrClosedPipe
+		return 0, nil, io.ErrClosedPipe
 	}
 }
 
-func (c *chanAuthIO) WriteMsg(b []byte) error {
-	cpy := make([]byte, len(b))
-	copy(cpy, b)
+func (c *chanAuthIO) WriteMsg(typeByte byte, payload []byte) error {
+	msg := make([]byte, 1+len(payload))
+	msg[0] = typeByte
+	copy(msg[1:], payload)
 	select {
-	case c.out <- cpy:
+	case c.out <- msg:
 		return nil
 	case <-c.done:
 		return io.ErrClosedPipe
@@ -115,7 +116,7 @@ func TestAuth_ShortRound1(t *testing.T) {
 	errs := make(chan error, 2)
 	go func() { errs <- Auth(a, "password", "identity-a", "") }()
 	go func() {
-		_ = b.WriteMsg([]byte("short")) // only 5 bytes, want 64
+		_ = b.WriteMsg(TypeRequestAuth, []byte("short")) // only 5 bytes, want 32
 		b.ReadMsg()                     //nolint:errcheck  drain so side a's write doesn't stall
 		errs <- nil
 	}()

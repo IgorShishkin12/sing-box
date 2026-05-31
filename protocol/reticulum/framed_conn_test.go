@@ -69,36 +69,64 @@ func (c *chanConn) SetWriteDeadline(time.Time) error { return nil }
 
 // --- framed_conn tests ---
 
-// TestFramedConn_AuthCtrlRouting verifies TypeAuthCtrl messages are delivered via ReadMsg.
+// TestFramedConn_AuthCtrlRouting verifies TypeRequestAuth and TypeResponseAuth
+// messages are delivered via ReadMsg with the correct type byte.
 func TestFramedConn_AuthCtrlRouting(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		typeByte byte
+	}{
+		{"TypeRequestAuth", TypeRequestAuth},
+		{"TypeResponseAuth", TypeResponseAuth},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			peerConn, myConn := newChanConnPair()
+			fc := newFramedConn(myConn)
+			defer fc.Close()
+
+			want := []byte("hello-auth")
+			go func() {
+				peerConn.Write(append([]byte{tc.typeByte}, want...))
+			}()
+
+			gotType, got, err := fc.ReadMsg()
+			require.NoError(t, err)
+			require.Equal(t, tc.typeByte, gotType)
+			require.Equal(t, want, got)
+		})
+	}
+}
+
+// TestFramedConn_TypeAuthCtrlGoesToData verifies the old TypeAuthCtrl (0x80) is no longer
+// routed to the auth channel — it falls through to dataCh like any other mux control byte.
+func TestFramedConn_TypeAuthCtrlGoesToData(t *testing.T) {
 	peerConn, myConn := newChanConnPair()
 	fc := newFramedConn(myConn)
 	defer fc.Close()
+	fc.OpenGate()
 
-	want := []byte("hello-auth")
-	go func() {
-		msg := append([]byte{TypeAuthCtrl}, want...)
-		peerConn.Write(msg)
-	}()
+	msg := append([]byte{TypeAuthCtrl}, []byte("stale")...)
+	peerConn.Write(msg)
 
-	got, err := fc.ReadMsg()
+	buf := make([]byte, 64)
+	n, err := fc.Read(buf)
 	require.NoError(t, err)
-	require.Equal(t, want, got)
+	require.Equal(t, msg, buf[:n])
 }
 
-// TestFramedConn_WriteMsgPrependsTypeAuthCtrl verifies WriteMsg prefixes TypeAuthCtrl.
-func TestFramedConn_WriteMsgPrependsTypeAuthCtrl(t *testing.T) {
+// TestFramedConn_WriteMsgSendsTypeByte verifies WriteMsg prefixes the given type byte.
+func TestFramedConn_WriteMsgSendsTypeByte(t *testing.T) {
 	peerConn, myConn := newChanConnPair()
 	fc := newFramedConn(myConn)
 	defer fc.Close()
 
 	payload := []byte("auth-payload")
-	require.NoError(t, fc.WriteMsg(payload))
+	require.NoError(t, fc.WriteMsg(TypeRequestAuth, payload))
 
 	buf := make([]byte, 64)
 	n, err := peerConn.Read(buf)
 	require.NoError(t, err)
-	require.Equal(t, TypeAuthCtrl, buf[0])
+	require.Equal(t, TypeRequestAuth, buf[0])
 	require.Equal(t, payload, buf[1:n])
 }
 
@@ -204,13 +232,14 @@ func TestFramedConn_AuthAndDataInterleaved(t *testing.T) {
 	fc := newFramedConn(myConn)
 	defer fc.Close()
 
-	// Send auth message, then data message.
-	peerConn.Write(append([]byte{TypeAuthCtrl}, []byte("challenge")...))
+	// Send auth message (TypeRequestAuth), then data message.
+	peerConn.Write(append([]byte{TypeRequestAuth}, []byte("challenge")...))
 	peerConn.Write([]byte{0x40, 0x00, 0x02, 'd'})
 
-	// Auth arrives via ReadMsg.
-	msg, err := fc.ReadMsg()
+	// Auth arrives via ReadMsg with the correct type byte.
+	gotType, msg, err := fc.ReadMsg()
 	require.NoError(t, err)
+	require.Equal(t, TypeRequestAuth, gotType)
 	require.Equal(t, []byte("challenge"), msg)
 
 	// Data is buffered; won't arrive until gate opens.

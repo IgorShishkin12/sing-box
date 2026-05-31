@@ -8,10 +8,12 @@ import (
 	"time"
 )
 
-// AuthIO sends and receives binary auth messages over a typed control channel.
+// AuthIO sends and receives binary auth messages over typed control channels.
+// The type byte distinguishes round 1 (TypeRequestAuth) from round 2 (TypeResponseAuth),
+// so either side can detect and reject messages that arrive out of sequence.
 type AuthIO interface {
-	ReadMsg() ([]byte, error)
-	WriteMsg([]byte) error
+	ReadMsg() (typeByte byte, payload []byte, err error)
+	WriteMsg(typeByte byte, payload []byte) error
 }
 
 // framedConn wraps a message-boundary net.Conn and demultiplexes by type byte.
@@ -68,9 +70,9 @@ func (fc *framedConn) readLoop() {
 		msg := make([]byte, n)
 		copy(msg, buf[:n])
 
-		if msg[0] == TypeAuthCtrl {
+		if msg[0] == TypeRequestAuth || msg[0] == TypeResponseAuth {
 			select {
-			case fc.ctrlCh <- msg[1:]:
+			case fc.ctrlCh <- msg: // include type byte so ReadMsg can verify sequence
 			case <-fc.done:
 				return
 			}
@@ -126,25 +128,27 @@ func (fc *framedConn) Write(b []byte) (int, error) {
 	return fc.inner.Write(b)
 }
 
-// ReadMsg reads one TypeAuthCtrl message payload. Blocks with authTimeout.
-func (fc *framedConn) ReadMsg() ([]byte, error) {
+// ReadMsg reads one auth control message. Returns the type byte (TypeRequestAuth or
+// TypeResponseAuth) and payload. Blocks with authTimeout.
+func (fc *framedConn) ReadMsg() (byte, []byte, error) {
 	select {
 	case msg, ok := <-fc.ctrlCh:
 		if !ok {
-			return nil, io.EOF
+			return 0, nil, io.EOF
 		}
-		return msg, nil
+		return msg[0], msg[1:], nil
 	case <-fc.done:
-		return nil, io.ErrClosedPipe
+		return 0, nil, io.ErrClosedPipe
 	case <-time.After(authTimeout):
-		return nil, fmt.Errorf("auth timeout")
+		return 0, nil, fmt.Errorf("auth timeout")
 	}
 }
 
-// WriteMsg sends payload as a TypeAuthCtrl message.
-func (fc *framedConn) WriteMsg(payload []byte) error {
+// WriteMsg sends payload as an auth control message with the given type byte
+// (TypeRequestAuth for round 1, TypeResponseAuth for round 2).
+func (fc *framedConn) WriteMsg(typeByte byte, payload []byte) error {
 	msg := make([]byte, 1+len(payload))
-	msg[0] = TypeAuthCtrl
+	msg[0] = typeByte
 	copy(msg[1:], payload)
 	_, err := fc.inner.Write(msg)
 	return err

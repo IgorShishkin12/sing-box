@@ -52,41 +52,48 @@ func Auth(rw AuthIO, password, ownID, peerID string) error {
 	}
 
 	type readResult struct {
+		typeByte byte
 		data []byte
 		err  error
 	}
 
-	// Round 1: send salt(32) and receive peer's salt concurrently.
+	// Round 1: send TypeRequestAuth+salt(32) and receive peer's concurrently.
 	r1 := make(chan readResult, 1)
 	go func() {
-		data, err := rw.ReadMsg()
-		r1 <- readResult{data, err}
+		typB, data, err := rw.ReadMsg()
+		r1 <- readResult{typB, data, err}
 	}()
-	if err := rw.WriteMsg(ownSalt); err != nil {
+	if err := rw.WriteMsg(TypeRequestAuth, ownSalt); err != nil {
 		return fmt.Errorf("send round1: %w", err)
 	}
 	res := <-r1
 	if res.err != nil {
 		return fmt.Errorf("recv round1: %w", res.err)
 	}
+	if res.typeByte != TypeRequestAuth {
+		return fmt.Errorf("round1: expected TypeRequestAuth (0x%02x), got 0x%02x", TypeRequestAuth, res.typeByte)
+	}
 	if len(res.data) != 32 {
 		return fmt.Errorf("round1 length %d (want 32)", len(res.data))
 	}
 	peerSalt := res.data
 
-	// Round 2: send HMAC(password, peerSalt || ownID) and receive peer's MAC concurrently.
+	// Round 2: send TypeResponseAuth+MAC and receive peer's concurrently.
 	ownMAC := macBound(password, peerSalt, []byte(ownID))
 	r2 := make(chan readResult, 1)
 	go func() {
-		data, err := rw.ReadMsg()
-		r2 <- readResult{data, err}
+		typB, data, err := rw.ReadMsg()
+		r2 <- readResult{typB, data, err}
 	}()
-	if err := rw.WriteMsg(ownMAC); err != nil {
+	if err := rw.WriteMsg(TypeResponseAuth, ownMAC); err != nil {
 		return fmt.Errorf("send round2: %w", err)
 	}
 	res = <-r2
 	if res.err != nil {
 		return fmt.Errorf("recv round2: %w", res.err)
+	}
+	if res.typeByte != TypeResponseAuth {
+		return fmt.Errorf("round2: expected TypeResponseAuth (0x%02x), got 0x%02x", TypeResponseAuth, res.typeByte)
 	}
 	if len(res.data) != 32 {
 		return fmt.Errorf("round2 length %d (want 32)", len(res.data))
