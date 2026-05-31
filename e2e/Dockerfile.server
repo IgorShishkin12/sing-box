@@ -1,73 +1,40 @@
-FROM alpine:3.20 AS copy_shenanigans
-
-COPY . /workspace/sing-box
-WORKDIR /workspace/sing-box
-
-RUN find . -type f -name '*_test.go' -delete
-RUN find . -type f -name '*_test.rs' -delete
-# RUN find . -type f -name 'Dockerfile.*' -delete
-# RUN find . -type f -name 'docker-compose.*' -delete
-RUN rm -rf ./bridge/target ./.github ./sing-box
-
-
-
-FROM alpine:3.20 AS copy_git_shenanigans
-RUN apk add --no-cache git
-COPY --from=copy_shenanigans /workspace/sing-box /workspace/sing-box
-WORKDIR /workspace/sing-box
-RUN git add . && git -c user.email="a@a.com" -c user.name="a" commit -q -m "this message is needed to find commit later on in build 0667351b4867feb55992599d58469b0d43f10ef3"
-RUN git checkout 0667351b4867feb55992599d58469b0d43f10ef3 && git clean -fdx
-
-FROM copy_git_shenanigans as copy_git_shenanigans_without_git
-RUN rm -rf .git
-
-
 FROM golang:1.24-alpine AS builder
 
 RUN apk add --no-cache rust cargo build-base git
 
-COPY ./go.mod ./go.sum /workspace/sing-box/
-
 WORKDIR /workspace/sing-box
-RUN go mod download
 
-COPY --from=copy_git_shenanigans_without_git /workspace/sing-box/bridge /workspace/sing-box/bridge
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
-# Build Rust bridge (release for static linking)
-RUN cd bridge && cargo build --release
+COPY . .
 
-COPY --from=copy_git_shenanigans_without_git /workspace/sing-box /workspace/sing-box
+# Rust bridge — incremental via cache mount; copy only the .a into the layer
+# so CGO can find it at bridge/target/release/ without the full target tree.
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/tmp/cargo-target \
+    CARGO_TARGET_DIR=/tmp/cargo-target \
+    cargo build --release --manifest-path bridge/Cargo.toml && \
+    mkdir -p bridge/target/release && \
+    cp /tmp/cargo-target/release/libsing_box_reticulum_bridge.a bridge/target/release/
 
-# Build sing-box with reticulum support
-RUN export COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown") && \
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
     export VERSION=$(go run ./cmd/internal/read_tag 2>/dev/null || echo "dev") && \
     export TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS) && \
     export LDFLAGS_SHARED=$(cat release/LDFLAGS) && \
     CGO_ENABLED=1 \
-    go build -v -trimpath -tags "$TAGS,with_reticulum" \
+    go build -trimpath -tags "$TAGS,with_reticulum" \
         -o /usr/local/bin/sing-box \
         -ldflags "-X \"github.com/sagernet/sing-box/constant.Version=$VERSION\" $LDFLAGS_SHARED -s -w -buildid=" \
         ./cmd/sing-box/
 
-COPY --from=copy_git_shenanigans /workspace/sing-box/.git /workspace/sing-box/.git
-RUN git checkout $(git log --all --grep="this message is needed to find commit later on in build 0667351b4867feb55992599d58469b0d43f10ef3" --format="%H" -1)
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    go build -o /usr/local/bin/sum-server ./e2e/sumserver/
 
-RUN cd bridge && cargo build --release
-
-# Build sing-box with reticulum support
-RUN export COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown") && \
-    export VERSION=$(go run ./cmd/internal/read_tag 2>/dev/null || echo "dev") && \
-    export TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS) && \
-    export LDFLAGS_SHARED=$(cat release/LDFLAGS) && \
-    CGO_ENABLED=1 \
-    go build -v -trimpath -tags "$TAGS,with_reticulum" \
-        -o /usr/local/bin/sing-box \
-        -ldflags "-X \"github.com/sagernet/sing-box/constant.Version=$VERSION\" $LDFLAGS_SHARED -s -w -buildid=" \
-        ./cmd/sing-box/
-# Build sum-server
-COPY --from=copy_shenanigans /workspace/sing-box/e2e /workspace/sing-box/e2e
-
-RUN go build -o /usr/local/bin/sum-server ./e2e/sumserver/
 
 FROM alpine:3.20
 
