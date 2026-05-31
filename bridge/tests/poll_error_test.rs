@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 #[test]
 fn test_poll_error_returns_message() {
     let config = std::ffi::CString::new("{}").unwrap();
-    let ret = sing_box_reticulum_bridge::c_api::reticulum_init(config.as_ptr());
+    let ret = unsafe { sing_box_reticulum_bridge::c_api::reticulum_init(config.as_ptr()) };
     assert_eq!(ret, 0, "bridge init should succeed");
 
     // Accept on an invalid listener handle (0) — this should fail.
@@ -18,11 +18,9 @@ fn test_poll_error_returns_message() {
     let mut final_ret = 0i32;
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        let ret = sing_box_reticulum_bridge::c_api::reticulum_poll(
-            task_id,
-            &mut result_out,
-            &mut len_out,
-        );
+        let ret = unsafe {
+            sing_box_reticulum_bridge::c_api::reticulum_poll(task_id, &mut result_out, &mut len_out)
+        };
         if ret != 0 {
             final_ret = ret;
             break;
@@ -60,7 +58,9 @@ fn test_poll_error_returns_message() {
 fn test_poll_invalid_task_id() {
     let mut result_out: *mut u8 = std::ptr::null_mut();
     let mut len_out: usize = 0;
-    let ret = sing_box_reticulum_bridge::c_api::reticulum_poll(-1, &mut result_out, &mut len_out);
+    let ret = unsafe {
+        sing_box_reticulum_bridge::c_api::reticulum_poll(-1, &mut result_out, &mut len_out)
+    };
     assert_eq!(ret, -1, "poll with negative task ID should return -1");
     assert!(
         result_out.is_null(),

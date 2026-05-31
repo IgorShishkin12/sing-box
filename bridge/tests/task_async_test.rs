@@ -4,7 +4,7 @@ use sing_box_reticulum_bridge;
 fn init() {
     let config = std::ffi::CString::new("{}").unwrap();
     assert_eq!(
-        sing_box_reticulum_bridge::c_api::reticulum_init(config.as_ptr()),
+        unsafe { sing_box_reticulum_bridge::c_api::reticulum_init(config.as_ptr()) },
         0
     );
 }
@@ -13,11 +13,9 @@ fn poll_until_done(task_id: i32, max_attempts: u32) -> Result<u64, String> {
     let mut result_out: *mut u8 = std::ptr::null_mut();
     let mut len_out: usize = 0;
     for _ in 0..max_attempts {
-        let ret = sing_box_reticulum_bridge::c_api::reticulum_poll(
-            task_id,
-            &mut result_out,
-            &mut len_out,
-        );
+        let ret = unsafe {
+            sing_box_reticulum_bridge::c_api::reticulum_poll(task_id, &mut result_out, &mut len_out)
+        };
         match ret {
             1 => {
                 let bytes = unsafe { std::slice::from_raw_parts(result_out, len_out) };
@@ -49,7 +47,7 @@ fn test_dial_unknown_dest_returns_error() {
     init();
 
     let dest = std::ffi::CString::new("aabbccdd00112233445566778899aabb").unwrap();
-    let task_id = sing_box_reticulum_bridge::c_api::reticulum_dial(dest.as_ptr());
+    let task_id = unsafe { sing_box_reticulum_bridge::c_api::reticulum_dial(dest.as_ptr()) };
     assert!(task_id >= 0, "dial should return a non-negative task ID");
 
     let result = poll_until_done(task_id, 1000);
@@ -69,7 +67,8 @@ fn test_listen_succeeds_without_network() {
     init();
 
     let listen_hash = std::ffi::CString::new("rln://listen-hash-no-net").unwrap();
-    let task_id = sing_box_reticulum_bridge::c_api::reticulum_listen(listen_hash.as_ptr());
+    let task_id =
+        unsafe { sing_box_reticulum_bridge::c_api::reticulum_listen(listen_hash.as_ptr()) };
     assert!(task_id >= 0, "listen should return a non-negative task ID");
 
     let result = poll_until_done(task_id, 1000);
@@ -98,7 +97,7 @@ fn test_multiple_dials_return_distinct_task_ids() {
     for i in 0u32..5 {
         let dest =
             std::ffi::CString::new(format!("{:032x}", i as u128 * 0x1111111111111111u128)).unwrap();
-        let task_id = sing_box_reticulum_bridge::c_api::reticulum_dial(dest.as_ptr());
+        let task_id = unsafe { sing_box_reticulum_bridge::c_api::reticulum_dial(dest.as_ptr()) };
         assert!(task_id >= 0);
         task_ids.push(task_id);
     }

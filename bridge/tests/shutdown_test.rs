@@ -2,7 +2,7 @@ use serial_test::serial;
 
 fn init() {
     let config = std::ffi::CString::new("{}").unwrap();
-    let ret = sing_box_reticulum_bridge::c_api::reticulum_init(config.as_ptr());
+    let ret = unsafe { sing_box_reticulum_bridge::c_api::reticulum_init(config.as_ptr()) };
     assert_eq!(ret, 0);
 }
 
@@ -41,7 +41,7 @@ fn test_shutdown_then_dial_returns_error() {
 
     // Dial without re-init — transport is not available, should error
     let dest = std::ffi::CString::new("aabbccdd00112233445566778899aabb").unwrap();
-    let task_id = sing_box_reticulum_bridge::c_api::reticulum_dial(dest.as_ptr());
+    let task_id = unsafe { sing_box_reticulum_bridge::c_api::reticulum_dial(dest.as_ptr()) };
     assert!(
         task_id >= 0,
         "dial should return a task ID even without transport"
@@ -51,11 +51,9 @@ fn test_shutdown_then_dial_returns_error() {
     let mut len_out: usize = 0;
     let mut attempts = 0;
     loop {
-        let ret = sing_box_reticulum_bridge::c_api::reticulum_poll(
-            task_id,
-            &mut result_out,
-            &mut len_out,
-        );
+        let ret = unsafe {
+            sing_box_reticulum_bridge::c_api::reticulum_poll(task_id, &mut result_out, &mut len_out)
+        };
         if ret == -1 {
             if !result_out.is_null() {
                 sing_box_reticulum_bridge::c_api::reticulum_free(result_out);

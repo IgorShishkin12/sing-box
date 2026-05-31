@@ -12,7 +12,7 @@ fn poll_task(task_id: i32, timeout: Duration) -> Result<u64, String> {
         }
         let mut result_out: *mut u8 = ptr::null_mut();
         let mut len_out: usize = 0;
-        let status = reticulum_poll(task_id, &mut result_out, &mut len_out);
+        let status = unsafe { reticulum_poll(task_id, &mut result_out, &mut len_out) };
         match status {
             1 => {
                 let bytes = unsafe { std::slice::from_raw_parts(result_out, len_out) };
@@ -40,7 +40,7 @@ fn poll_task(task_id: i32, timeout: Duration) -> Result<u64, String> {
 #[test]
 fn test_accept_invalid_handle() {
     let config = CString::new("{}").unwrap();
-    let ret = reticulum_init(config.as_ptr());
+    let ret = unsafe { reticulum_init(config.as_ptr()) };
     assert_eq!(ret, 0, "bridge init should succeed");
 
     // Handle 99999 doesn't exist — the spawned task should fail immediately.
