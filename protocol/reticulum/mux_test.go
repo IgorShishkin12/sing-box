@@ -324,4 +324,3 @@ func TestMuxSession_idExhaustion(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "exhausted")
 }
-

@@ -8,9 +8,9 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	"github.com/sagernet/sing-box/adapter/outbound"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	C "github.com/sagernet/sing-box/constant"
 	"github.com/stretchr/testify/require"
 )
 
@@ -90,5 +90,3 @@ func TestRegisterOutboundAddsTypeToRegistry(t *testing.T) {
 	reg := outbound.NewRegistry()
 	RegisterOutbound(reg)
 }
-
-

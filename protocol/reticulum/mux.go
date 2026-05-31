@@ -75,7 +75,6 @@ func encodePacket(p muxPacket) []byte {
 	return buf
 }
 
-
 // decodePacket parses wire bytes into a muxPacket.
 func decodePacket(b []byte) (muxPacket, error) {
 	if len(b) < muxHeaderSize {
@@ -371,8 +370,8 @@ type muxConn struct {
 	session *muxSession
 	dest    string
 
-	readCh    chan []byte  // assembled message payloads; never closed (use done instead)
-	readBuf   []byte      // leftover bytes from the last readCh receive
+	readCh    chan []byte   // assembled message payloads; never closed (use done instead)
+	readBuf   []byte        // leftover bytes from the last readCh receive
 	done      chan struct{} // closed exactly once via closeOnce
 	closeOnce sync.Once
 

@@ -32,8 +32,6 @@ var (
 // bridgeLoggerVal holds the log.ContextLogger set by BridgeSetLogger.
 var bridgeLoggerVal atomic.Value // stores log.ContextLogger
 
-
-
 //export goOnLog
 func goOnLog(level C.uint8_t, target *C.char, message *C.char) {
 	logger, _ := bridgeLoggerVal.Load().(log.ContextLogger)
@@ -56,14 +54,12 @@ func goOnLog(level C.uint8_t, target *C.char, message *C.char) {
 	}
 }
 
-
 // BridgeSetLogger wires the Go log.ContextLogger into the Rust log callback.
 // Call before BridgeInit to capture early initialisation events.
 func BridgeSetLogger(logger log.ContextLogger) {
 	bridgeLoggerVal.Store(logger)
 	C.reticulum_set_log_callback(C.reticulum_log_fn(C.goOnLog))
 }
-
 
 // BridgeInit initializes the Rust bridge with a JSON config string.
 // Only the first call crosses the CGO boundary; subsequent callers get the
@@ -112,7 +108,6 @@ func BridgeAccept(listenerHandle uint64) (int, error) {
 	}
 	return taskID, nil
 }
-
 
 // BridgeGetListenerHash gets the address hash of a listener as a hex string.
 // Returns the hash string, or an error if the listener is not found.
@@ -226,4 +221,3 @@ func BridgeResolveName(name string) (string, error) {
 	defer C.reticulum_free(unsafe.Pointer(hashStr))
 	return C.GoString(hashStr), nil
 }
-
