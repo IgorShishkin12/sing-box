@@ -4,7 +4,7 @@ Rust bridge crate providing a C FFI layer between the [sing-box](https://github.
 
 ## Features
 
-- **`real-reticulum`** (default): Enables integration with the actual `reticulum-rs` transport layer. Without this feature, the crate compiles with stub/mock implementations suitable for unit testing.
+- ~~**`real-reticulum`**~~: **Deprecated and removed.** The reticulum transport layer is now always compiled in; there is no longer a stub/mock alternative controlled by this flag.
 
 ## Building
 
@@ -33,7 +33,7 @@ The `with_reticulum` Go build tag gates the bridge code. Without it, stub implem
 
 ```bash
 # Rust tests
-cargo test --features real-reticulum -- --test-threads=1
+cargo test -- --test-threads=1
 
 # Go tests (requires bridge static library)
 CGO_ENABLED=1 go test -v -tags with_reticulum ./protocol/reticulum/...
@@ -105,7 +105,7 @@ cargo build --target aarch64-linux-android
 ### CI
 
 The GitHub Actions workflow (`.github/workflows/bridge.yml`) automatically:
-- Runs tests without and with the `real-reticulum` feature on every push/PR
+- Runs tests without default features and with default features on every push/PR
 - Cross-compiles for Android `aarch64` using the NDK installed via `nttld/setup-ndk@v1`
 - Can be called as a reusable workflow from other workflows (e.g., `build.yml`, `linux.yml`, `docker.yml`)
 
