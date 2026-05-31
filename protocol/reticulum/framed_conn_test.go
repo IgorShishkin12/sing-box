@@ -69,7 +69,7 @@ func (c *chanConn) SetWriteDeadline(time.Time) error { return nil }
 
 // --- framed_conn tests ---
 
-// TestFramedConn_AuthCtrlRouting verifies TypeAuthCtrl messages are delivered via ReadMsg.
+// TestFramedConn_AuthCtrlRouting verifies TypeRequestAuth messages are delivered via ReadMsg.
 func TestFramedConn_AuthCtrlRouting(t *testing.T) {
 	peerConn, myConn := newChanConnPair()
 	fc := newFramedConn(myConn)
@@ -77,29 +77,51 @@ func TestFramedConn_AuthCtrlRouting(t *testing.T) {
 
 	want := []byte("hello-auth")
 	go func() {
-		msg := append([]byte{TypeAuthCtrl}, want...)
+		msg := append([]byte{TypeRequestAuth}, want...)
 		peerConn.Write(msg)
 	}()
 
-	got, err := fc.ReadMsg()
+	typB, got, err := fc.ReadMsg()
 	require.NoError(t, err)
+	require.Equal(t, TypeRequestAuth, typB)
 	require.Equal(t, want, got)
 }
 
-// TestFramedConn_WriteMsgPrependsTypeAuthCtrl verifies WriteMsg prefixes TypeAuthCtrl.
-func TestFramedConn_WriteMsgPrependsTypeAuthCtrl(t *testing.T) {
+// TestFramedConn_WriteMsgPrependsTypeByte verifies WriteMsg prefixes the given type byte.
+func TestFramedConn_WriteMsgPrependsTypeByte(t *testing.T) {
 	peerConn, myConn := newChanConnPair()
 	fc := newFramedConn(myConn)
 	defer fc.Close()
 
 	payload := []byte("auth-payload")
-	require.NoError(t, fc.WriteMsg(payload))
+	require.NoError(t, fc.WriteMsg(TypeRequestAuth, payload))
 
 	buf := make([]byte, 64)
 	n, err := peerConn.Read(buf)
 	require.NoError(t, err)
-	require.Equal(t, TypeAuthCtrl, buf[0])
+	require.Equal(t, TypeRequestAuth, buf[0])
 	require.Equal(t, payload, buf[1:n])
+}
+
+// TestFramedConn_TypeResponseAuthRouting verifies TypeResponseAuth also routes to ctrlCh.
+func TestFramedConn_TypeResponseAuthRouting(t *testing.T) {
+	peerConn, myConn := newChanConnPair()
+	fc := newFramedConn(myConn)
+	defer fc.Close()
+
+	want := make([]byte, 32)
+	for i := range want {
+		want[i] = byte(i)
+	}
+	go func() {
+		msg := append([]byte{TypeResponseAuth}, want...)
+		peerConn.Write(msg)
+	}()
+
+	typB, got, err := fc.ReadMsg()
+	require.NoError(t, err)
+	require.Equal(t, TypeResponseAuth, typB)
+	require.Equal(t, want, got)
 }
 
 // TestFramedConn_DataBlockedUntilGate verifies Read blocks before OpenGate.
@@ -108,7 +130,7 @@ func TestFramedConn_DataBlockedUntilGate(t *testing.T) {
 	fc := newFramedConn(myConn)
 	defer fc.Close()
 
-	// Send a data packet (non-TypeAuthCtrl first byte) from the peer.
+	// Send a data packet (non-auth first byte) from the peer.
 	dataMsg := []byte{0x40, 0x00, 0x01, 'h', 'i'} // e.g. a mux data packet
 	peerConn.Write(dataMsg)
 
@@ -204,14 +226,15 @@ func TestFramedConn_AuthAndDataInterleaved(t *testing.T) {
 	fc := newFramedConn(myConn)
 	defer fc.Close()
 
-	// Send auth message, then data message.
-	peerConn.Write(append([]byte{TypeAuthCtrl}, []byte("challenge")...))
+	// Send auth message (TypeRequestAuth), then data message.
+	peerConn.Write(append([]byte{TypeRequestAuth}, []byte("challenge")...))
 	peerConn.Write([]byte{0x40, 0x00, 0x02, 'd'})
 
 	// Auth arrives via ReadMsg.
-	msg, err := fc.ReadMsg()
+	typB, payload, err := fc.ReadMsg()
 	require.NoError(t, err)
-	require.Equal(t, []byte("challenge"), msg)
+	require.Equal(t, TypeRequestAuth, typB)
+	require.Equal(t, []byte("challenge"), payload)
 
 	// Data is buffered; won't arrive until gate opens.
 	fc.OpenGate()

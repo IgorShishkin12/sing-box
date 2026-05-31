@@ -149,7 +149,17 @@ func (h *Inbound) handleConn(handle uint64) {
 	fc := newFramedConn(raw)
 
 	if h.options.Password != "" {
-		if err := ServerAuth(fc, h.options.Password); err != nil {
+		ownID, err := BridgeTransportHash()
+		if err != nil {
+			h.logger.Warn("auth: own identity unavailable: ", err)
+			ownID = ""
+		}
+		peerID, err := BridgeConnIdentifiedPeer(handle)
+		if err != nil {
+			h.logger.Warn("auth: peer identity unavailable (identify exchange may have failed): ", err)
+			peerID = ""
+		}
+		if err := Auth(fc, h.options.Password, ownID, peerID); err != nil {
 			h.logger.Error("reticulum auth failed: ", err)
 			fc.Close()
 			return

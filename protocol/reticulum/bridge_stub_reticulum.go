@@ -227,3 +227,37 @@ func BridgeResolveName(name string) (string, error) {
 	return C.GoString(hashStr), nil
 }
 
+// BridgeConnIdentifiedPeer returns the verified persistent transport identity
+// hash of the remote peer, obtained from the LinkIdentify exchange.
+func BridgeConnIdentifiedPeer(connHandle uint64) (string, error) {
+	hashStr := C.reticulum_get_conn_identified_peer(C.uint64_t(connHandle))
+	if hashStr == nil {
+		return "", ErrBridgeConnIdentifyFailed
+	}
+	defer C.reticulum_free(unsafe.Pointer(hashStr))
+	return C.GoString(hashStr), nil
+}
+
+// BridgeConnPeerHash returns the peer's identity address hash for a connection.
+// This is the hash of the remote peer's link identity (link.peer_identity()).
+// Returns an error if the connection is not found or the hash is unavailable.
+func BridgeConnPeerHash(connHandle uint64) (string, error) {
+	hashStr := C.reticulum_get_conn_peer_hash(C.uint64_t(connHandle))
+	if hashStr == nil {
+		return "", ErrBridgeConnPeerHashFailed
+	}
+	defer C.reticulum_free(unsafe.Pointer(hashStr))
+	return C.GoString(hashStr), nil
+}
+
+// BridgeTransportHash returns the local transport identity address hash,
+// set at reticulum_init time. Returns an error if the transport is not initialized.
+func BridgeTransportHash() (string, error) {
+	hashStr := C.reticulum_get_transport_hash()
+	if hashStr == nil {
+		return "", ErrBridgeTransportHashFailed
+	}
+	defer C.reticulum_free(unsafe.Pointer(hashStr))
+	return C.GoString(hashStr), nil
+}
+

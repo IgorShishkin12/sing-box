@@ -68,6 +68,41 @@ int32_t reticulum_accept(uint64_t listener_handle);
 char* reticulum_get_listener_hash(uint64_t listener_handle);
 
 /*
+ * Get the peer's identity address hash for a connection (from link.peer_identity()).
+ * The caller must free the returned string with reticulum_free.
+ * Returns NULL if the connection is not found or peer hash is unavailable.
+ */
+char* reticulum_get_conn_peer_hash(uint64_t conn_handle);
+
+/*
+ * Get the verified persistent transport identity hash of the remote peer,
+ * obtained from the LinkIdentify (0xFB) exchange after link activation.
+ * Returns NULL if the exchange did not complete or failed verification.
+ */
+char* reticulum_get_conn_identified_peer(uint64_t conn_handle);
+
+/*
+ * Get the local transport identity address hash (set at reticulum_init time).
+ * The caller must free the returned string with reticulum_free.
+ * Returns NULL if the transport is not initialized.
+ */
+char* reticulum_get_transport_hash(void);
+
+/*
+ * Build an identify payload for the local transport identity bound to a connection's link ID.
+ * Returns hex-encoded 128-byte payload, or NULL on failure.
+ * The caller must free the returned string with reticulum_free.
+ */
+char* reticulum_get_conn_identify_payload(uint64_t conn_handle);
+
+/*
+ * Verify a received identify payload (hex-encoded) against a connection's link ID.
+ * On success returns "addr=<hex>,encrypt=<hex>,sign=<hex>"; on failure returns NULL.
+ * The caller must free the returned string with reticulum_free.
+ */
+char* reticulum_verify_identify_payload(uint64_t conn_handle, const char* payload_hex);
+
+/*
  * Close a connection or listener handle.
  */
 void reticulum_close(uint64_t handle);

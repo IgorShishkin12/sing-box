@@ -71,4 +71,19 @@ func BridgeResolveName(name string) (string, error) {
 	return "", ErrBridgeNotAvailable
 }
 
+// BridgeConnIdentifiedPeer is a stub that returns an error when the with_reticulum build tag is not set.
+func BridgeConnIdentifiedPeer(connHandle uint64) (string, error) {
+	return "", ErrBridgeNotAvailable
+}
+
+// BridgeConnPeerHash is a stub that returns an error when the with_reticulum build tag is not set.
+func BridgeConnPeerHash(connHandle uint64) (string, error) {
+	return "", ErrBridgeNotAvailable
+}
+
+// BridgeTransportHash is a stub that returns an error when the with_reticulum build tag is not set.
+func BridgeTransportHash() (string, error) {
+	return "", ErrBridgeNotAvailable
+}
+
 var ErrBridgeNotAvailable = errors.New("reticulum bridge not available: build with -tags with_reticulum")

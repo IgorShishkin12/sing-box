@@ -128,7 +128,17 @@ func (h *Outbound) getOrCreateSession(ctx context.Context, destHash string) (*mu
 	fc := newFramedConn(raw)
 
 	if h.options.Password != "" {
-		if err := ClientAuth(fc, h.options.Password); err != nil {
+		ownID, err := BridgeTransportHash()
+		if err != nil {
+			h.logger.WarnContext(ctx, "auth: own identity unavailable: ", err)
+			ownID = ""
+		}
+		peerID, err := BridgeConnIdentifiedPeer(handle)
+		if err != nil {
+			h.logger.WarnContext(ctx, "auth: peer identity unavailable (identify exchange may have failed): ", err)
+			peerID = ""
+		}
+		if err := Auth(fc, h.options.Password, ownID, peerID); err != nil {
 			fc.Close()
 			return nil, fmt.Errorf("reticulum auth failed: %w", err)
 		}

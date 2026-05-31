@@ -1,15 +1,15 @@
-// Package reticulum implements a mutual password authentication handshake for
-// Reticulum bridge connections.
+// Package reticulum implements symmetric mutual authentication for Reticulum bridge connections.
 //
-// Protocol (server speaks first):
+// Protocol (2 concurrent rounds, 1 RTT total):
 //
-//	Server → Client: [0x01][salt_s 32 bytes]                 (version + server salt)
-//	Client → Server: [salt_c 32 bytes][HMAC-SHA256(password, salt_s) 32 bytes]
-//	Server verifies; on failure returns error (caller closes the connection).
-//	Server → Client: [0x00][HMAC-SHA256(password, salt_c) 32 bytes]  (OK + proof)
-//	Client verifies; on failure returns error.
+//	Both → Both: [TypeRequestAuth=0x84][salt: 32 bytes]           Round 1: exchange challenges
+//	Both → Both: [TypeResponseAuth=0x85][HMAC-SHA256: 32 bytes]   Round 2: prove knowledge
 //
-// All messages are exchanged via AuthIO (typed control messages, type byte = TypeAuthCtrl).
+//	HMAC = HMAC-SHA256(key=password, data=ownID || peerSalt)
+//
+// ownID and peerID are Reticulum identity address hashes obtained from the bridge.
+// Including them in the HMAC binds the proof to a specific identity, preventing
+// cross-connection replay even if salts collide.
 package reticulum
 
 import (
@@ -28,106 +28,82 @@ func generateSalt() ([]byte, error) {
 	return salt, err
 }
 
-func computeHMAC(password string, salt []byte) []byte {
-	mac := hmac.New(sha256.New, []byte(password))
-	mac.Write(salt)
-	return mac.Sum(nil)
+// macBound computes HMAC-SHA256(key=password, data=ownID||peerSalt).
+// ownID is the sender's own identity hash string; peerSalt is the challenge received from the peer.
+func macBound(password, ownID string, peerSalt []byte) []byte {
+	h := hmac.New(sha256.New, []byte(password))
+	h.Write([]byte(ownID))
+	h.Write(peerSalt)
+	return h.Sum(nil)
 }
 
-// ServerAuth runs the server side of the mutual password authentication.
+// Auth performs symmetric mutual password authentication with identity binding.
 //
-// Sends a version byte + random salt, reads the client's salt and HMAC,
-// verifies the HMAC, and if correct sends back OK + server HMAC proof.
+// ownID is this side's identity hash (transport hash or service destination hash).
+// peerID is the peer's identity hash (from BridgeConnPeerHash or the known destination hash).
 //
-// Returns nil on success. On failure the caller should close the connection.
-func ServerAuth(rw AuthIO, password string) error {
-	saltS, err := generateSalt()
-	if err != nil {
-		return fmt.Errorf("generate server salt: %w", err)
-	}
-
-	// Msg 1: version=0x01 + server salt (33 bytes).
-	msg1 := make([]byte, 33)
-	msg1[0] = 0x01
-	copy(msg1[1:], saltS)
-	if err := rw.WriteMsg(msg1); err != nil {
-		return fmt.Errorf("write challenge: %w", err)
-	}
-
-	// Msg 2: client salt (32) + HMAC(password, saltS) (32) = 64 bytes.
-	msg2, err := rw.ReadMsg()
-	if err != nil {
-		return fmt.Errorf("read response: %w", err)
-	}
-	if len(msg2) != 64 {
-		return fmt.Errorf("invalid response length: %d (want 64)", len(msg2))
-	}
-	saltC := msg2[:32]
-	clientHMAC := msg2[32:]
-
-	expected := computeHMAC(password, saltS)
-	if !hmac.Equal(clientHMAC, expected) {
-		// Send explicit rejection so the client's ReadMsg unblocks immediately.
-		_ = rw.WriteMsg([]byte{0x01})
-		return fmt.Errorf("wrong password")
-	}
-
-	// Msg 3: 0x00=OK + HMAC(password, saltC) (33 bytes).
-	msg3 := make([]byte, 33)
-	msg3[0] = 0x00
-	copy(msg3[1:], computeHMAC(password, saltC))
-	if err := rw.WriteMsg(msg3); err != nil {
-		return fmt.Errorf("write confirmation: %w", err)
-	}
-	return nil
-}
-
-// ClientAuth runs the client side of the mutual password authentication.
-//
-// Reads the server's challenge, sends client salt + HMAC response,
-// reads the server's OK and verifies the server's HMAC proof.
+// Round 1: both sides concurrently send TypeRequestAuth + 32-byte random salt.
+// Round 2: both sides concurrently send TypeResponseAuth + HMAC-SHA256(password, ownID, peerSalt).
+// Each side verifies the peer's HMAC by recomputing HMAC(password, peerID, ownSalt).
 //
 // Returns nil on success. On failure the caller should close the connection.
-func ClientAuth(rw AuthIO, password string) error {
-	// Msg 1: version byte + server salt.
-	msg1, err := rw.ReadMsg()
+func Auth(rw AuthIO, password, ownID, peerID string) error {
+	ownSalt, err := generateSalt()
 	if err != nil {
-		return fmt.Errorf("read challenge: %w", err)
-	}
-	if len(msg1) != 33 || msg1[0] != 0x01 {
-		return fmt.Errorf("unexpected challenge (len=%d, ver=0x%02x)", len(msg1), msg1[0])
-	}
-	saltS := msg1[1:]
-
-	saltC, err := generateSalt()
-	if err != nil {
-		return fmt.Errorf("generate client salt: %w", err)
+		return fmt.Errorf("generate salt: %w", err)
 	}
 
-	// Msg 2: client salt (32) + HMAC(password, saltS) (32).
-	msg2 := make([]byte, 64)
-	copy(msg2[:32], saltC)
-	copy(msg2[32:], computeHMAC(password, saltS))
-	if err := rw.WriteMsg(msg2); err != nil {
-		return fmt.Errorf("write response: %w", err)
+	type readResult struct {
+		typeByte byte
+		data     []byte
+		err      error
 	}
 
-	// Msg 3: OK byte + HMAC(password, saltC).
-	msg3, err := rw.ReadMsg()
-	if err != nil {
-		return fmt.Errorf("read confirmation: %w", err)
+	// Round 1: send TypeRequestAuth+salt and receive peer's concurrently.
+	r1 := make(chan readResult, 1)
+	go func() {
+		typB, data, err := rw.ReadMsg()
+		r1 <- readResult{typB, data, err}
+	}()
+	if err := rw.WriteMsg(TypeRequestAuth, ownSalt); err != nil {
+		return fmt.Errorf("send round1: %w", err)
 	}
-	if msg3[0] != 0x00 {
-		return fmt.Errorf("rejected by server")
+	res := <-r1
+	if res.err != nil {
+		return fmt.Errorf("recv round1: %w", res.err)
 	}
-	if len(msg3) != 33 {
-		return fmt.Errorf("invalid confirmation length: %d (want 33)", len(msg3))
+	if res.typeByte != TypeRequestAuth {
+		return fmt.Errorf("round1: expected TypeRequestAuth (0x%02x), got 0x%02x", TypeRequestAuth, res.typeByte)
+	}
+	if len(res.data) != 32 {
+		return fmt.Errorf("round1: bad length %d (want 32)", len(res.data))
+	}
+	peerSalt := res.data
+
+	// Round 2: send TypeResponseAuth+MAC and receive peer's concurrently.
+	ownMAC := macBound(password, ownID, peerSalt)
+	r2 := make(chan readResult, 1)
+	go func() {
+		typB, data, err := rw.ReadMsg()
+		r2 <- readResult{typB, data, err}
+	}()
+	if err := rw.WriteMsg(TypeResponseAuth, ownMAC); err != nil {
+		return fmt.Errorf("send round2: %w", err)
+	}
+	res = <-r2
+	if res.err != nil {
+		return fmt.Errorf("recv round2: %w", res.err)
+	}
+	if res.typeByte != TypeResponseAuth {
+		return fmt.Errorf("round2: expected TypeResponseAuth (0x%02x), got 0x%02x", TypeResponseAuth, res.typeByte)
+	}
+	if len(res.data) != 32 {
+		return fmt.Errorf("round2: bad length %d (want 32)", len(res.data))
 	}
 
-	serverHMAC := msg3[1:]
-	expected := computeHMAC(password, saltC)
-	if !hmac.Equal(serverHMAC, expected) {
-		return fmt.Errorf("server has wrong password")
+	expected := macBound(password, peerID, ownSalt)
+	if !hmac.Equal(res.data, expected) {
+		return fmt.Errorf("authentication failed")
 	}
 	return nil
 }

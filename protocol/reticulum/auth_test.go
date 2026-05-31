@@ -11,22 +11,26 @@ type chanAuthIO struct {
 	out chan<- []byte
 }
 
-func (c *chanAuthIO) ReadMsg() ([]byte, error) {
+func (c *chanAuthIO) ReadMsg() (byte, []byte, error) {
 	msg, ok := <-c.in
 	if !ok {
-		return nil, io.EOF
+		return 0, nil, io.EOF
 	}
-	return msg, nil
+	if len(msg) == 0 {
+		return 0, nil, io.EOF
+	}
+	return msg[0], msg[1:], nil
 }
 
-func (c *chanAuthIO) WriteMsg(b []byte) error {
-	cpy := make([]byte, len(b))
-	copy(cpy, b)
-	c.out <- cpy
+func (c *chanAuthIO) WriteMsg(typeByte byte, payload []byte) error {
+	msg := make([]byte, 1+len(payload))
+	msg[0] = typeByte
+	copy(msg[1:], payload)
+	c.out <- msg
 	return nil
 }
 
-// newChanAuthPair returns two paired AuthIO endpoints (server, client).
+// newChanAuthPair returns two paired AuthIO endpoints (a, b).
 func newChanAuthPair() (*chanAuthIO, *chanAuthIO) {
 	ch1 := make(chan []byte, 8)
 	ch2 := make(chan []byte, 8)
@@ -34,10 +38,10 @@ func newChanAuthPair() (*chanAuthIO, *chanAuthIO) {
 }
 
 func TestAuth_Success(t *testing.T) {
-	server, client := newChanAuthPair()
+	a, b := newChanAuthPair()
 	errs := make(chan error, 2)
-	go func() { errs <- ServerAuth(server, "correct-password") }()
-	go func() { errs <- ClientAuth(client, "correct-password") }()
+	go func() { errs <- Auth(a, "password", "id-a", "id-b") }()
+	go func() { errs <- Auth(b, "password", "id-b", "id-a") }()
 	for i := 0; i < 2; i++ {
 		if err := <-errs; err != nil {
 			t.Errorf("unexpected error: %v", err)
@@ -46,11 +50,10 @@ func TestAuth_Success(t *testing.T) {
 }
 
 func TestAuth_WrongPassword(t *testing.T) {
-	server, client := newChanAuthPair()
+	a, b := newChanAuthPair()
 	errs := make(chan error, 2)
-	go func() { errs <- ServerAuth(server, "server-password") }()
-	go func() { errs <- ClientAuth(client, "client-password") }()
-
+	go func() { errs <- Auth(a, "password-a", "id-a", "id-b") }()
+	go func() { errs <- Auth(b, "password-b", "id-b", "id-a") }()
 	errCount := 0
 	for i := 0; i < 2; i++ {
 		if err := <-errs; err != nil {
@@ -62,51 +65,62 @@ func TestAuth_WrongPassword(t *testing.T) {
 	}
 }
 
-func TestAuth_BadChallenge(t *testing.T) {
-	// Client receives a garbage challenge (wrong version byte).
-	server, client := newChanAuthPair()
+func TestAuth_WrongPeerID(t *testing.T) {
+	// Same password but mismatched peer IDs — auth should fail.
+	a, b := newChanAuthPair()
 	errs := make(chan error, 2)
-	go func() {
-		// Send a bad challenge manually.
-		bad := make([]byte, 33)
-		bad[0] = 0xFF // wrong version
-		server.WriteMsg(bad)
-		errs <- nil
-	}()
-	go func() { errs <- ClientAuth(client, "password") }()
-
-	var clientErr error
+	// a thinks peer is "id-wrong", b presents "id-b"
+	go func() { errs <- Auth(a, "password", "id-a", "id-wrong") }()
+	go func() { errs <- Auth(b, "password", "id-b", "id-a") }()
+	errCount := 0
 	for i := 0; i < 2; i++ {
-		err := <-errs
-		if err != nil {
-			clientErr = err
+		if err := <-errs; err != nil {
+			errCount++
 		}
 	}
-	if clientErr == nil {
-		t.Fatal("expected client error for bad challenge, got nil")
+	if errCount == 0 {
+		t.Error("expected at least one error for mismatched peer ID, got none")
 	}
 }
 
-func TestAuth_ServerRejectsShortResponse(t *testing.T) {
-	// Server receives a too-short client response.
-	server, client := newChanAuthPair()
+func TestAuth_ShortSalt(t *testing.T) {
+	// One side sends a salt that is too short.
+	a, b := newChanAuthPair()
 	errs := make(chan error, 2)
-	go func() { errs <- ServerAuth(server, "password") }()
+	go func() { errs <- Auth(a, "password", "id-a", "id-b") }()
 	go func() {
-		// Read the server challenge, send a short response.
-		client.ReadMsg() //nolint:errcheck
-		client.WriteMsg([]byte("short"))
+		// Send a TypeRequestAuth with only 10 bytes (should be 32).
+		b.WriteMsg(TypeRequestAuth, make([]byte, 10)) //nolint:errcheck
 		errs <- nil
 	}()
-
-	var serverErr error
+	var authErr error
 	for i := 0; i < 2; i++ {
-		err := <-errs
-		if err != nil {
-			serverErr = err
+		if err := <-errs; err != nil {
+			authErr = err
 		}
 	}
-	if serverErr == nil {
-		t.Fatal("expected server error for short response, got nil")
+	if authErr == nil {
+		t.Fatal("expected error for short salt, got nil")
+	}
+}
+
+func TestAuth_WrongTypeByte(t *testing.T) {
+	// One side sends the wrong type byte in round 1.
+	a, b := newChanAuthPair()
+	errs := make(chan error, 2)
+	go func() { errs <- Auth(a, "password", "id-a", "id-b") }()
+	go func() {
+		// Send TypeResponseAuth (0x85) instead of TypeRequestAuth (0x84).
+		b.WriteMsg(TypeResponseAuth, make([]byte, 32)) //nolint:errcheck
+		errs <- nil
+	}()
+	var authErr error
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			authErr = err
+		}
+	}
+	if authErr == nil {
+		t.Fatal("expected error for wrong type byte, got nil")
 	}
 }

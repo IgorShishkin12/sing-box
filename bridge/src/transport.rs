@@ -17,13 +17,14 @@ use rand_core::OsRng;
 use reticulum_rs::transport::destination::link::{Link, LinkEvent, LinkStatus};
 use reticulum_rs::transport::destination::{DestinationDesc, DestinationName, SingleInputDestination};
 use reticulum_rs::transport::hash::AddressHash;
-use reticulum_rs::transport::identity::PrivateIdentity;
+use reticulum_rs::transport::identity::{Identity, PrivateIdentity};
 use reticulum_rs::transport::iface::tcp_client::TcpClient;
 use reticulum_rs::transport::iface::tcp_server::TcpServer;
 use reticulum_rs::transport::iface::udp::UdpInterface;
 use reticulum_rs::transport::iface::InterfaceManager;
 use reticulum_rs::transport::transport::{Transport, TransportConfig};
 use reticulum_rs::runtime::ReceivedData;
+use reticulum_rs::transport::PacketContext;
 
 use crate::config::{ReticulumConfig, ReticulumInterface};
 use crate::connection::Connection;
@@ -41,9 +42,77 @@ const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(5);
 /// Global Transport singleton.
 static TRANSPORT: OnceCell<Arc<Mutex<Transport>>> = OnceCell::new();
 
+/// Full transport-level identity, set once during `init_transport`.
+static TRANSPORT_IDENTITY: OnceCell<Arc<PrivateIdentity>> = OnceCell::new();
+
+/// Address hash of the transport-level identity, set once during `init_transport`.
+static TRANSPORT_IDENTITY_HASH: OnceCell<AddressHash> = OnceCell::new();
+
 /// Get a reference to the global Transport, if initialized.
 pub fn get_transport() -> Option<&'static Arc<Mutex<Transport>>> {
     TRANSPORT.get()
+}
+
+/// Returns the hex-encoded transport identity address hash, or `None` before init.
+pub fn get_transport_identity_hash() -> Option<String> {
+    TRANSPORT_IDENTITY_HASH.get().map(|h| h.to_hex_string())
+}
+
+/// Returns a reference to the full transport-level private identity, or `None` before init.
+pub fn get_transport_identity() -> Option<&'static Arc<PrivateIdentity>> {
+    TRANSPORT_IDENTITY.get()
+}
+
+// ---------------------------------------------------------------------------
+// Link identify helpers (mirrors Python RNS link.identify())
+// ---------------------------------------------------------------------------
+
+/// Build an identify payload for sending on a link.
+///
+/// Format (128 bytes total):
+///   [encrypt_key: 32][sign_key: 32][sig_over(link_id||encrypt_key||sign_key): 64]
+///
+/// The signature binds the identity claim to this specific link_id, preventing
+/// replay on a different link.
+pub fn build_link_identify_payload(identity: &PrivateIdentity, link_id: &AddressHash) -> Vec<u8> {
+    let id = identity.as_identity();
+    let mut keys = Vec::with_capacity(64);
+    keys.extend_from_slice(id.public_key_bytes());
+    keys.extend_from_slice(id.verifying_key_bytes());
+
+    let mut signed_data = Vec::with_capacity(16 + 64);
+    signed_data.extend_from_slice(link_id.as_slice());
+    signed_data.extend_from_slice(&keys);
+    let sig = identity.sign(&signed_data);
+
+    let mut payload = Vec::with_capacity(128);
+    payload.extend_from_slice(&keys);
+    payload.extend_from_slice(&sig.to_bytes());
+    payload
+}
+
+/// Parse and verify an identify payload received on a link.
+///
+/// Returns the verified `Identity` on success, or `None` if the payload is
+/// malformed or the signature does not verify.
+pub fn parse_link_identify_payload(payload: &[u8], link_id: &AddressHash) -> Option<Identity> {
+    if payload.len() < 128 {
+        return None;
+    }
+    let encrypt_key = &payload[..32];
+    let sign_key = &payload[32..64];
+    let sig_bytes: &[u8; 64] = payload[64..128].try_into().ok()?;
+
+    let identity = Identity::new_from_slices(encrypt_key, sign_key);
+
+    let mut signed_data = Vec::with_capacity(16 + 64);
+    signed_data.extend_from_slice(link_id.as_slice());
+    signed_data.extend_from_slice(&payload[..64]);
+
+    if !reticulum_rs::transport::identity::lxmf_verify(&identity, &signed_data, sig_bytes) {
+        return None;
+    }
+    Some(identity)
 }
 
 // ---------------------------------------------------------------------------
@@ -230,7 +299,16 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
             return Err(e);
         }
     };
-    log::info!("identity resolved: addr={}", identity.address_hash());
+    {
+        let id = identity.as_identity();
+        log::info!(
+            "transport identity: addr={} encrypt_key={} sign_key={}",
+            id.address_hash,
+            hex::encode(id.public_key_bytes()),
+            hex::encode(id.verifying_key_bytes()),
+        );
+    }
+    let _ = TRANSPORT_IDENTITY_HASH.set(*identity.address_hash());
 
     // 3. Build ratchet store path
     let ratchet_store = Some(std::path::PathBuf::from(&cfg_dir).join("ratchet_store.db"));
@@ -261,6 +339,7 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
     log::info!("Transport initialized successfully");
 
     let _ = TRANSPORT.set(Arc::new(Mutex::new(transport)));
+    let _ = TRANSPORT_IDENTITY.set(Arc::new(identity));
     Ok(())
 }
 
@@ -324,17 +403,20 @@ pub async fn register_listener_destination(
                         };
 
                         if link_dest_hash == service_hash {
-                            log::info!(
-                                "service link activated: id={} peer={}",
-                                event.id, event.address_hash
-                            );
-                            // Subscribe BEFORE push_connection so no data sent by the
-                            // client immediately after link setup is missed.
-                            let data_rx = {
+                            let peer_hash = {
+                                let guard = link.lock().await;
+                                guard.peer_identity().address_hash
+                            };
+                            log::info!("service link activated: id={} peer={}", event.id, peer_hash);
+                            // Subscribe BEFORE identify so we don't miss the peer's
+                            // LinkIdentify packet.
+                            let mut data_rx = {
                                 let tp = transport.lock().await;
                                 tp.received_data_events()
                             };
-                            let conn = Connection::new_from_link(link.clone(), event.id);
+                            // Exchange identify packets; peer's verified hash → identified_peer.
+                            let identified = exchange_identify_on_link(&link, event.id, &mut data_rx).await;
+                            let conn = Connection::new_from_link(link.clone(), event.id, Some(peer_hash), identified);
                             spawn_link_data_reader(conn.clone(), event.id, data_rx);
                             listener_clone.push_connection(conn).await;
                         }
@@ -439,8 +521,102 @@ pub async fn wait_for_service_announce(name: &str, timeout: Duration) -> Option<
 // Data reader
 // ---------------------------------------------------------------------------
 
+/// Send our transport identity as a `LinkIdentify` (0xFB) packet on the given link.
+///
+/// Logs our own identity and, once the peer's identify arrives via `received_data_events`,
+/// logs theirs too. Both appear as:
+/// Exchange link identify packets with the peer and return the peer's verified
+/// transport identity hash. Both sides are expected to call this concurrently
+/// right after link activation.
+///
+/// Logs:
+///   my_identity:   addr=… encrypt=… sign=…
+///   peer_identity: addr=… encrypt=… sign=…
+///
+/// Returns `None` if the local identity is unavailable, the identify packet
+/// cannot be sent, or the peer's identify does not arrive within 5 seconds.
+pub async fn exchange_identify_on_link(
+    link: &Arc<Mutex<Link>>,
+    link_id: AddressHash,
+    data_rx: &mut broadcast::Receiver<ReceivedData>,
+) -> Option<AddressHash> {
+    let transport_id = get_transport_identity()?;
+
+    let my_id = transport_id.as_identity();
+    log::info!(
+        "my_identity: addr={} encrypt={} sign={}",
+        my_id.address_hash,
+        hex::encode(my_id.public_key_bytes()),
+        hex::encode(my_id.verifying_key_bytes()),
+    );
+
+    // Send our identify packet using PacketContext::LinkIdentify (0xFB).
+    let payload = build_link_identify_payload(transport_id, &link_id);
+    let (packet, iface) = {
+        let guard = link.lock().await;
+        let pkt = match guard.identify_packet(&payload) {
+            Ok(p) => p,
+            Err(e) => { log::warn!("identify: failed to build packet: {:?}", e); return None; }
+        };
+        (pkt, guard.ingress_iface())
+    };
+    if let Some(tp) = get_transport() {
+        let tp = tp.lock().await;
+        if let Some(iface) = iface {
+            tp.send_direct(iface, packet).await;
+        } else {
+            tp.send_broadcast(packet, None).await;
+        }
+    }
+
+    // Wait for peer's LinkIdentify packet (no application data expected yet).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            log::warn!("identify: timeout waiting for peer identify on link {}", link_id);
+            return None;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(remaining) => {
+                log::warn!("identify: timeout waiting for peer identify on link {}", link_id);
+                return None;
+            }
+            result = data_rx.recv() => {
+                match result {
+                    Ok(data) if data.destination == link_id
+                        && data.context == Some(PacketContext::LinkIdentify) =>
+                    {
+                        match parse_link_identify_payload(data.data.as_slice(), &link_id) {
+                            Some(peer_id) => {
+                                log::info!(
+                                    "peer_identity: addr={} encrypt={} sign={}",
+                                    peer_id.address_hash,
+                                    hex::encode(peer_id.public_key_bytes()),
+                                    hex::encode(peer_id.verifying_key_bytes()),
+                                );
+                                return Some(peer_id.address_hash);
+                            }
+                            None => {
+                                log::warn!("identify: peer identify packet failed verification");
+                                return None;
+                            }
+                        }
+                    }
+                    Ok(_) => continue, // skip — no app data expected during identify
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        }
+    }
+}
+
 /// Spawn a background task that forwards inbound link data into a connection's
 /// read buffer.
+///
+/// Intercepts `PacketContext::LinkIdentify` packets and logs the peer's verified
+/// identity instead of forwarding them to Go.
 ///
 /// `data_rx` must already be subscribed to the transport's `received_data_events`
 /// channel **before** this function is called — typically before the link request
@@ -455,7 +631,9 @@ pub fn spawn_link_data_reader(
         loop {
             match data_rx.recv().await {
                 Ok(data) => {
-                    if data.destination == link_id {
+                    if data.destination == link_id
+                        && data.context != Some(PacketContext::LinkIdentify)
+                    {
                         conn.push_read_data(data.data.as_slice()).await;
                     }
                 }

@@ -19,6 +19,11 @@ enum ConnectionInner {
     Link {
         link: Arc<Mutex<Link>>,
         link_id: AddressHash,
+        /// Ephemeral link identity hash of the remote peer (from `link.peer_identity()`).
+        peer_hash: Option<AddressHash>,
+        /// Verified persistent transport identity hash of the remote peer,
+        /// obtained from a `LinkIdentify` (0xFB) exchange after link activation.
+        identified_peer: Option<AddressHash>,
         /// TODO: switch bridge to async — remove this queue once BridgeRead is async
         /// and delivers one packet per await. Until then, each push_read_data call
         /// enqueues one Reticulum packet and read pops exactly one, preserving
@@ -54,12 +59,20 @@ impl std::fmt::Debug for Connection {
 
 impl Connection {
     /// Create a connection wrapping a real Reticulum Link.
-    pub fn new_from_link(link: Arc<Mutex<Link>>, link_id: AddressHash) -> Self {
+    /// `peer_hash` should be `link.peer_identity().address_hash` captured after link activation.
+    pub fn new_from_link(
+        link: Arc<Mutex<Link>>,
+        link_id: AddressHash,
+        peer_hash: Option<AddressHash>,
+        identified_peer: Option<AddressHash>,
+    ) -> Self {
         Self {
             id: NEXT_CONN_ID.fetch_add(1, Ordering::SeqCst),
             inner: ConnectionInner::Link {
                 link,
                 link_id,
+                peer_hash,
+                identified_peer,
                 read_buf: Arc::new(RwLock::new(VecDeque::new())),
             },
         }
@@ -192,6 +205,25 @@ impl Connection {
         }
     }
 
+    /// Returns the address hash of the remote peer, as seen by `link.peer_identity()`.
+    pub fn peer_hash(&self) -> Option<AddressHash> {
+        match &self.inner {
+            ConnectionInner::Link { peer_hash, .. } => *peer_hash,
+            #[cfg(test)]
+            ConnectionInner::Memory { .. } => None,
+        }
+    }
+
+    /// Returns the verified persistent transport identity hash of the remote peer,
+    /// obtained from the `LinkIdentify` exchange after link activation.
+    pub fn identified_peer(&self) -> Option<AddressHash> {
+        match &self.inner {
+            ConnectionInner::Link { identified_peer, .. } => *identified_peer,
+            #[cfg(test)]
+            ConnectionInner::Memory { .. } => None,
+        }
+    }
+
     pub fn link(&self) -> Option<Arc<Mutex<Link>>> {
         match &self.inner {
             ConnectionInner::Link { link, .. } => Some(link.clone()),
@@ -300,7 +332,7 @@ mod tests {
     #[tokio::test]
     async fn test_connection_new_from_link() {
         let (link, link_id) = make_test_link();
-        let conn = Connection::new_from_link(link.clone(), link_id);
+        let conn = Connection::new_from_link(link.clone(), link_id, None, None);
         assert_eq!(conn.link_id(), Some(link_id));
         assert!(conn.link().is_some());
     }
@@ -308,7 +340,7 @@ mod tests {
     #[tokio::test]
     async fn test_link_connection_push_read_data() {
         let (link, link_id) = make_test_link();
-        let conn = Connection::new_from_link(link, link_id);
+        let conn = Connection::new_from_link(link, link_id, None, None);
         conn.push_read_data(b"hello link").await;
         let mut buf = [0u8; 10];
         let read = conn.read(&mut buf).await;
@@ -319,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn test_link_connection_push_read_data_multi() {
         let (link, link_id) = make_test_link();
-        let conn = Connection::new_from_link(link, link_id);
+        let conn = Connection::new_from_link(link, link_id, None, None);
         conn.push_read_data(b"abc").await;
         conn.push_read_data(b"def").await;
         conn.push_read_data(b"ghi").await;
@@ -348,7 +380,7 @@ mod tests {
     async fn test_link_connection_message_boundaries() {
         // Regression test: two push_read_data calls must not be merged into one read.
         let (link, link_id) = make_test_link();
-        let conn = Connection::new_from_link(link, link_id);
+        let conn = Connection::new_from_link(link, link_id, None, None);
         conn.push_read_data(b"\x82\x00\x01host:80").await;   // simulated TypeNewConn
         conn.push_read_data(b"\x00\x00\x01hello").await;     // simulated data packet
 
@@ -363,7 +395,7 @@ mod tests {
     #[tokio::test]
     async fn test_link_connection_peek_and_available() {
         let (link, link_id) = make_test_link();
-        let conn = Connection::new_from_link(link, link_id);
+        let conn = Connection::new_from_link(link, link_id, None, None);
         assert_eq!(conn.available().await, 0);
         conn.push_read_data(b"peek test").await;
         assert_eq!(conn.available().await, 9);
@@ -375,7 +407,7 @@ mod tests {
     #[tokio::test]
     async fn test_link_connection_read_empty() {
         let (link, link_id) = make_test_link();
-        let conn = Connection::new_from_link(link, link_id);
+        let conn = Connection::new_from_link(link, link_id, None, None);
         let mut buf = [0u8; 4];
         let read = conn.read(&mut buf).await;
         assert_eq!(read, 0);
@@ -384,7 +416,7 @@ mod tests {
     #[tokio::test]
     async fn test_link_connection_id() {
         let (link, link_id) = make_test_link();
-        let conn = Connection::new_from_link(link, link_id);
+        let conn = Connection::new_from_link(link, link_id, None, None);
         assert!(conn.id() > 0);
         assert_eq!(conn.link_id(), Some(link_id));
     }

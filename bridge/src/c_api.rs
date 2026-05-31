@@ -2,6 +2,7 @@ use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use hex;
 
 use crate::config;
 use crate::listener::Listener;
@@ -166,13 +167,21 @@ pub extern "C" fn reticulum_dial(destination_hash: *const c_char) -> i32 {
             Some(transport) => {
                 // Subscribe to data events BEFORE dialing so we capture packets
                 // that arrive the instant the link activates on the server side.
-                let data_rx = {
+                let mut data_rx = {
                     let tp = transport.lock().await;
                     tp.received_data_events()
                 };
                 match crate::transport::dial_and_wait(&dest).await {
                     Ok((link, link_id)) => {
-                        let conn = crate::connection::Connection::new_from_link(link, link_id);
+                        let peer_hash = { link.lock().await.peer_identity().address_hash };
+                        log::info!("outbound link active: id={} peer={}", link_id, peer_hash);
+                        // Exchange identify packets using PacketContext::LinkIdentify (0xFB).
+                        let identified = crate::transport::exchange_identify_on_link(
+                            &link, link_id, &mut data_rx
+                        ).await;
+                        let conn = crate::connection::Connection::new_from_link(
+                            link, link_id, Some(peer_hash), identified
+                        );
                         crate::transport::spawn_link_data_reader(conn.clone(), link_id, data_rx);
                         let handle = store.insert_connection(conn).await;
                         registry
@@ -351,6 +360,89 @@ pub extern "C" fn reticulum_get_listener_hash(listener_handle: u64) -> *mut c_ch
         }
     });
     match result {
+        Some(hash_str) => {
+            let bytes = hash_str.as_bytes();
+            let len = bytes.len() + 1;
+            unsafe {
+                let ptr = libc::malloc(len) as *mut c_char;
+                if ptr.is_null() {
+                    return std::ptr::null_mut();
+                }
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
+                *ptr.add(bytes.len()) = 0;
+                ptr
+            }
+        }
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Get the peer's identity address hash for a connection (from `link.peer_identity()`).
+/// The caller must free the returned string with reticulum_free.
+/// Returns NULL if the connection is not found or peer hash is unavailable.
+#[no_mangle]
+pub extern "C" fn reticulum_get_conn_peer_hash(conn_handle: u64) -> *mut c_char {
+    let store = global_store();
+    let result: Option<String> = runtime::block_on(async move {
+        store
+            .get_connection(conn_handle)
+            .await
+            .and_then(|conn| conn.peer_hash())
+            .map(|h| h.to_hex_string())
+    });
+    match result {
+        Some(hash_str) => {
+            let bytes = hash_str.as_bytes();
+            let len = bytes.len() + 1;
+            unsafe {
+                let ptr = libc::malloc(len) as *mut c_char;
+                if ptr.is_null() {
+                    return std::ptr::null_mut();
+                }
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
+                *ptr.add(bytes.len()) = 0;
+                ptr
+            }
+        }
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Get the verified persistent identity hash of the remote peer, obtained from
+/// the LinkIdentify (0xFB) exchange. Returns NULL if unavailable.
+/// The caller must free the returned string with reticulum_free.
+#[no_mangle]
+pub extern "C" fn reticulum_get_conn_identified_peer(conn_handle: u64) -> *mut c_char {
+    let store = global_store();
+    let result: Option<String> = runtime::block_on(async move {
+        store
+            .get_connection(conn_handle)
+            .await
+            .and_then(|conn| conn.identified_peer())
+            .map(|h| h.to_hex_string())
+    });
+    match result {
+        Some(hash_str) => {
+            let bytes = hash_str.as_bytes();
+            let len = bytes.len() + 1;
+            unsafe {
+                let ptr = libc::malloc(len) as *mut c_char;
+                if ptr.is_null() { return std::ptr::null_mut(); }
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
+                *ptr.add(bytes.len()) = 0;
+                ptr
+            }
+        }
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Get the local transport identity address hash (set at reticulum_init time).
+/// The caller must free the returned string with reticulum_free.
+/// Returns NULL if the transport is not initialized.
+#[no_mangle]
+pub extern "C" fn reticulum_get_transport_hash() -> *mut c_char {
+    match crate::transport::get_transport_identity_hash() {
         Some(hash_str) => {
             let bytes = hash_str.as_bytes();
             let len = bytes.len() + 1;
