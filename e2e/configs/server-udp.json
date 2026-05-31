@@ -18,7 +18,9 @@
             "name": "Reticulum UDP Server",
             "type": "UDPInterface",
             "listen_ip": "0.0.0.0",
-            "listen_port": 4243
+            "listen_port": 4243,
+            "forward_ip": "e2e-client-udp",
+            "forward_port": 4242
           }
         ]
       }
