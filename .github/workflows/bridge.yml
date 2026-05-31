@@ -28,11 +28,11 @@ on:
       - testing
       - main
     paths:
-      - 'sing-box/bridge/**'
+      - 'bridge/**'
       - '.github/workflows/bridge.yml'
   pull_request:
     paths:
-      - 'sing-box/bridge/**'
+      - 'bridge/**'
       - '.github/workflows/bridge.yml'
 
 concurrency:
@@ -46,7 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: sing-box/bridge
+        working-directory: bridge
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -65,7 +65,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: sing-box/bridge
+        working-directory: bridge
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -83,7 +83,7 @@ jobs:
     runs-on: ${{ inputs.os || 'ubuntu-latest' }}
     defaults:
       run:
-        working-directory: sing-box/bridge
+        working-directory: bridge
     outputs:
       lib-path: ${{ steps.set-lib-path.outputs.lib-path }}
     steps:
@@ -125,7 +125,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: sing-box/bridge
+        working-directory: bridge
     steps:
       - name: Checkout
         uses: actions/checkout@v4
