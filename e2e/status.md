@@ -1,40 +1,35 @@
 # E2E Test Status
 
-## 2026-05-29 — Baseline (Phase 0)
+## 2026-05-31 — Current state
 
-### TCP simple (phase-1 warmup)
-**PASSES** — single sequential connection, auth + sum request succeeds in ~5.5 s.
+### TCP simple
+**PASSES** — single sequential connection, warm-up ~1s.
 
-### TCP Length test
-**PASSES**: 4, 16, 64
-**FAILS** : 512, 128, 118
-Formula of actual length: 10 + n*3 - 2 + 2 = 10 + n*3
+### TCP length test
+**PASSES** — all lengths including 512, 128, 118.
+Fix: fragment encoding rewritten (mux.go). Old 3-bit totalCode field couldn't represent 8–15
+total fragments; replaced with 1-bit isLast + 6-bit partIndex scheme.
 
-### TCP loadtest (phase-2 concurrent, 5 goroutines × 4 requests)
-**FAILS** — 0/20 requests succeed.
+### TCP loadtest (5 goroutines × 4 requests)
+**PASSES** — 20/20 requests succeed.
 
-Symptom (client): `reticulum auth failed: auth: read header: auth timeout`
-Symptom (loadtest): `CONNECT failed: reply code 0x01` (SOCKS5 general error)
+### UDP loadtest
+**PASSES** — blazingly fast.
+Fix: server-udp.json and client-udp.json both have explicit forward_ip/forward_port so the
+UDPInterface is bidirectional (previously server had no forward address and couldn't reply).
 
-Root cause: **serial accept loop in inbound.go**. While the server is handling connection
-N (auth → destHeader → route), no new `BridgeAccept` call is outstanding. The 5 concurrent
-phase-2 connections establish at the Reticulum level (client logs "dial successful" for all)
-but the server only accepts the first one; the other 4 time out after 10 s waiting for the
-`SBRT-AUTH-1` header that the server never sends them.
+### Auto loadtest (AutoInterface / multicast)
+**PASSES** — warm-up ~1.3s, 20/20 requests at ~460 req/s.
+Fix: AutoInterface now uses UDP multicast (239.255.0.1) instead of broadcast (255.255.255.255).
+The underlying socket2 socket never sets SO_BROADCAST, so sends to 255.255.255.255 were
+silently dropped (EACCES). Multicast requires no extra socket options and is reliably flooded
+by Linux bridges (Docker/Podman) when IGMP snooping is off.
 
 ---
 
 ## Phase 1 (framedConn + AuthIO)
-Status: **in progress**
-
-Changes:
-- [ ] 1.1 conn.go: WriteMessage / ReadMessage
-- [ ] 1.2 framed_conn.go
-- [ ] 1.3 auth.go: AuthIO interface
-- [ ] 1.4 trust_store.go
-- [ ] 1.5 inbound.go: framedConn + goroutine-per-conn
-- [ ] 1.6 outbound.go: framedConn + negotiateAuth
-- [ ] 1.7 tests
+Status: **pending** — TCP/UDP/auto tests all pass without it; revisit if concurrent load
+reveals auth-ordering issues at higher concurrency.
 
 ## Phase 2 (async Rust bridge)
 Status: **pending**
