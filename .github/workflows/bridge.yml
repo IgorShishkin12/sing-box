@@ -156,6 +156,14 @@ jobs:
         run: |
           NDK_BIN="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
           echo "$NDK_BIN" >> $GITHUB_PATH
+
+          # NDK r28 wrapper scripts call bare "clang"/"clang++" but only clang-XX exists.
+          # Create the missing symlinks so the wrappers can execute.
+          CLANG_BIN=$(find "$NDK_BIN" -maxdepth 1 -name 'clang-[0-9]*' ! -name '*++*' -type f 2>/dev/null | sort -V | tail -1)
+          [[ -n "$CLANG_BIN" && ! -e "$NDK_BIN/clang" ]] && ln -sf "$CLANG_BIN" "$NDK_BIN/clang"
+          CLANGPP_BIN=$(find "$NDK_BIN" -maxdepth 1 -name 'clang++-[0-9]*' -type f 2>/dev/null | sort -V | tail -1)
+          [[ -n "$CLANGPP_BIN" && ! -e "$NDK_BIN/clang++" ]] && ln -sf "$CLANGPP_BIN" "$NDK_BIN/clang++"
+
           # cc-rs looks for aarch64-linux-android-clang (no API level); create a symlink
           ln -sf "$NDK_BIN/aarch64-linux-android21-clang" "$NDK_BIN/aarch64-linux-android-clang"
 
