@@ -158,8 +158,9 @@ func (h *Inbound) handleSession(s *muxSession) {
 }
 
 // routeVirtualConn routes one virtual connection to the configured destination.
+// mc is closed by sing-box's router when both copy goroutines finish; no explicit
+// Close call needed here.
 func (h *Inbound) routeVirtualConn(mc *muxConn) {
-	defer mc.Close()
 	h.logger.Info("inbound virtual connection to ", mc.dest)
 	if h.router != nil {
 		metadata := adapter.InboundContext{
