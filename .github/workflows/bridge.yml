@@ -167,17 +167,23 @@ jobs:
           # cc-rs looks for aarch64-linux-android-clang (no API level); create a symlink
           ln -sf "$NDK_BIN/aarch64-linux-android21-clang" "$NDK_BIN/aarch64-linux-android-clang"
 
+          # clang driver looks for ld.lld beside its own binary; create it if missing
+          if [[ ! -x "$NDK_BIN/ld.lld" ]]; then
+            LLD=$(find "$NDK_BIN" -maxdepth 1 \( -name 'lld' -o -name 'lld-[0-9]*' \) -type f 2>/dev/null | sort -V | tail -1)
+            [[ -n "$LLD" ]] && ln -sf "$LLD" "$NDK_BIN/ld.lld"
+          fi
+
       - name: Build for Android (debug)
         run: cargo build --target aarch64-linux-android
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          RUSTFLAGS: "-C link-arg=-fPIC"
+          RUSTFLAGS: "-C link-arg=-fPIC -C link-arg=--ld-path=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/ld.lld"
 
       - name: Build for Android (release)
         run: cargo build --target aarch64-linux-android --release
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          RUSTFLAGS: "-C link-arg=-fPIC"
+          RUSTFLAGS: "-C link-arg=-fPIC -C link-arg=--ld-path=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/ld.lld"
 
       - name: List artifacts
         run: |
