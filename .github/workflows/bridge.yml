@@ -96,6 +96,15 @@ jobs:
           toolchain: stable
           target: ${{ inputs.target || 'x86_64-unknown-linux-gnu' }}
 
+      - name: Install cross-compilation toolchain
+        run: |
+          TARGET="${{ inputs.target || 'x86_64-unknown-linux-gnu' }}"
+          case "$TARGET" in
+            aarch64-unknown-linux-gnu)   sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu ;;
+            armv7-unknown-linux-gnueabihf) sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf ;;
+            *) echo "No extra toolchain needed for $TARGET" ;;
+          esac
+
       - name: Build bridge (${{ inputs.profile || 'release' }})
         run: |
           PROFILE="${{ inputs.profile || 'release' }}"
@@ -143,23 +152,23 @@ jobs:
           ndk-version: r28
           local-cache: true
 
-      - name: Make linker wrapper executable
-        run: chmod +x ./scripts/android-linker.sh
+      - name: Set up NDK toolchain
+        run: |
+          NDK_BIN="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "$NDK_BIN" >> $GITHUB_PATH
+          # cc-rs looks for aarch64-linux-android-clang (no API level); create a symlink
+          ln -sf "$NDK_BIN/aarch64-linux-android21-clang" "$NDK_BIN/aarch64-linux-android-clang"
 
       - name: Build for Android (debug)
-        run: |
-          export ANDROID_NDK_HOME="${{ steps.setup-ndk.outputs.ndk-path }}"
-          export PATH="$PWD/scripts:$PATH"
-          cargo build --target aarch64-linux-android
+        run: cargo build --target aarch64-linux-android
         env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           RUSTFLAGS: "-C link-arg=-fPIC"
 
       - name: Build for Android (release)
-        run: |
-          export ANDROID_NDK_HOME="${{ steps.setup-ndk.outputs.ndk-path }}"
-          export PATH="$PWD/scripts:$PATH"
-          cargo build --target aarch64-linux-android --release
+        run: cargo build --target aarch64-linux-android --release
         env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           RUSTFLAGS: "-C link-arg=-fPIC"
 
       - name: List artifacts
