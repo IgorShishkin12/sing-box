@@ -1,19 +1,43 @@
 package reticulum
 
 import (
-	"net"
+	"io"
 	"testing"
 )
 
+// chanAuthIO implements AuthIO using a channel pair; no network needed.
+type chanAuthIO struct {
+	in  <-chan []byte
+	out chan<- []byte
+}
+
+func (c *chanAuthIO) ReadMsg() ([]byte, error) {
+	msg, ok := <-c.in
+	if !ok {
+		return nil, io.EOF
+	}
+	return msg, nil
+}
+
+func (c *chanAuthIO) WriteMsg(b []byte) error {
+	cpy := make([]byte, len(b))
+	copy(cpy, b)
+	c.out <- cpy
+	return nil
+}
+
+// newChanAuthPair returns two paired AuthIO endpoints (server, client).
+func newChanAuthPair() (*chanAuthIO, *chanAuthIO) {
+	ch1 := make(chan []byte, 8)
+	ch2 := make(chan []byte, 8)
+	return &chanAuthIO{in: ch1, out: ch2}, &chanAuthIO{in: ch2, out: ch1}
+}
+
 func TestAuth_Success(t *testing.T) {
-	serverConn, clientConn := net.Pipe()
-	defer serverConn.Close()
-	defer clientConn.Close()
-
+	server, client := newChanAuthPair()
 	errs := make(chan error, 2)
-	go func() { errs <- ServerAuth(serverConn, "correct-password") }()
-	go func() { errs <- ClientAuth(clientConn, "correct-password") }()
-
+	go func() { errs <- ServerAuth(server, "correct-password") }()
+	go func() { errs <- ClientAuth(client, "correct-password") }()
 	for i := 0; i < 2; i++ {
 		if err := <-errs; err != nil {
 			t.Errorf("unexpected error: %v", err)
@@ -22,13 +46,10 @@ func TestAuth_Success(t *testing.T) {
 }
 
 func TestAuth_WrongPassword(t *testing.T) {
-	serverConn, clientConn := net.Pipe()
-	defer serverConn.Close()
-	defer clientConn.Close()
-
+	server, client := newChanAuthPair()
 	errs := make(chan error, 2)
-	go func() { errs <- ServerAuth(serverConn, "server-password") }()
-	go func() { errs <- ClientAuth(clientConn, "client-password") }()
+	go func() { errs <- ServerAuth(server, "server-password") }()
+	go func() { errs <- ClientAuth(client, "client-password") }()
 
 	errCount := 0
 	for i := 0; i < 2; i++ {
@@ -41,18 +62,51 @@ func TestAuth_WrongPassword(t *testing.T) {
 	}
 }
 
-func TestAuth_BadHeader(t *testing.T) {
-	serverConn, clientConn := net.Pipe()
-	defer serverConn.Close()
-	defer clientConn.Close()
-
+func TestAuth_BadChallenge(t *testing.T) {
+	// Client receives a garbage challenge (wrong version byte).
+	server, client := newChanAuthPair()
+	errs := make(chan error, 2)
 	go func() {
-		serverConn.Write([]byte("GARBAGE-HEADER\n"))
-		serverConn.Close()
+		// Send a bad challenge manually.
+		bad := make([]byte, 33)
+		bad[0] = 0xFF // wrong version
+		server.WriteMsg(bad)
+		errs <- nil
+	}()
+	go func() { errs <- ClientAuth(client, "password") }()
+
+	var clientErr error
+	for i := 0; i < 2; i++ {
+		err := <-errs
+		if err != nil {
+			clientErr = err
+		}
+	}
+	if clientErr == nil {
+		t.Fatal("expected client error for bad challenge, got nil")
+	}
+}
+
+func TestAuth_ServerRejectsShortResponse(t *testing.T) {
+	// Server receives a too-short client response.
+	server, client := newChanAuthPair()
+	errs := make(chan error, 2)
+	go func() { errs <- ServerAuth(server, "password") }()
+	go func() {
+		// Read the server challenge, send a short response.
+		client.ReadMsg() //nolint:errcheck
+		client.WriteMsg([]byte("short"))
+		errs <- nil
 	}()
 
-	err := ClientAuth(clientConn, "password")
-	if err == nil {
-		t.Fatal("expected error for bad header, got nil")
+	var serverErr error
+	for i := 0; i < 2; i++ {
+		err := <-errs
+		if err != nil {
+			serverErr = err
+		}
+	}
+	if serverErr == nil {
+		t.Fatal("expected server error for short response, got nil")
 	}
 }

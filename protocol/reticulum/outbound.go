@@ -125,15 +125,17 @@ func (h *Outbound) getOrCreateSession(ctx context.Context, destHash string) (*mu
 		localName = h.options.Name
 	}
 	raw := newReticulumConn(handle, localName, destHash, h.logger)
+	fc := newFramedConn(raw)
 
 	if h.options.Password != "" {
-		if err := ClientAuth(raw, h.options.Password); err != nil {
-			raw.Close()
+		if err := ClientAuth(fc, h.options.Password); err != nil {
+			fc.Close()
 			return nil, fmt.Errorf("reticulum auth failed: %w", err)
 		}
 	}
+	fc.OpenGate()
 
-	h.session = newMuxSessionClient(raw, h.logger)
+	h.session = newMuxSessionClient(fc, h.logger)
 	h.logger.InfoContext(ctx, "mux session established to ", destHash)
 	return h.session, nil
 }

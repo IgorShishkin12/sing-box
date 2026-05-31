@@ -127,27 +127,38 @@ func (h *Inbound) acceptLoop() {
 			continue
 		}
 
+		// BridgeAccept is non-blocking (returns a task ID immediately), so we keep
+		// BridgePollTask in the loop to avoid spinning and flooding the bridge with
+		// thousands of pending accept tasks. Once a handle is resolved, auth and
+		// session handling run in a goroutine so the loop can immediately register
+		// the next accept before the current connection finishes auth.
 		handle, err := BridgePollTask(taskID, 30*time.Second)
 		if err != nil {
 			h.logger.Error("poll after accept failed: ", err)
 			continue
 		}
 
-		h.logger.Debug("accepted connection, handle=", handle)
-
-		conn := newReticulumConn(handle, "inbound", fmt.Sprintf("listener-%d", h.listenerHdl), h.logger)
-
-		if h.options.Password != "" {
-			if err := ServerAuth(conn, h.options.Password); err != nil {
-				h.logger.Error("reticulum auth failed: ", err)
-				conn.Close()
-				continue
-			}
-		}
-
-		session := newMuxSessionServer(conn, h.logger)
-		go h.handleSession(session)
+		go h.handleConn(handle)
 	}
+}
+
+func (h *Inbound) handleConn(handle uint64) {
+	h.logger.Debug("accepted connection, handle=", handle)
+
+	raw := newReticulumConn(handle, "inbound", fmt.Sprintf("listener-%d", h.listenerHdl), h.logger)
+	fc := newFramedConn(raw)
+
+	if h.options.Password != "" {
+		if err := ServerAuth(fc, h.options.Password); err != nil {
+			h.logger.Error("reticulum auth failed: ", err)
+			fc.Close()
+			return
+		}
+	}
+	fc.OpenGate()
+
+	session := newMuxSessionServer(fc, h.logger)
+	h.handleSession(session)
 }
 
 // handleSession dispatches incoming virtual connections from a mux session.
