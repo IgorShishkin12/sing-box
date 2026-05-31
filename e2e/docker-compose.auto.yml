@@ -3,6 +3,9 @@ name: retv2e2e
 services:
   e2e-server:
     image: retv2e2e-server:latest
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile.server
     command: >
       -c "
         sum-server &
@@ -23,7 +26,10 @@ services:
       start_period: 30s
 
   e2e-client:
-    image: retv2e2e-client
+    image: retv2e2e-client:latest
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile.client
     command: >
       -c "
         sing-box run -c /etc/sing-box/config.json &
