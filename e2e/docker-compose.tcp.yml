@@ -1,11 +1,11 @@
-name: retv2e2e-tcp
+name: retv2e2e
 
 services:
   e2e-server:
+    image: retv2e2e-server:latest
     build:
       context: ..
       dockerfile: e2e/Dockerfile.server
-    image: retv2e2e-server
     command: >
       -c "
         sum-server &
@@ -22,14 +22,14 @@ services:
       test: ["CMD-SHELL", "pgrep -x sing-box > /dev/null 2>&1 || exit 1"]
       interval: 5s
       timeout: 5s
-      retries: 18
+      retries: 12
       start_period: 30s
 
   e2e-client:
+    image: retv2e2e-client:latest
     build:
       context: ..
       dockerfile: e2e/Dockerfile.client
-    image: retv2e2e-client
     command: >
       -c "
         sing-box run -c /etc/sing-box/config.json &
