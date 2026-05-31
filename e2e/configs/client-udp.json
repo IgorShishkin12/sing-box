@@ -16,17 +16,17 @@
     {
       "type": "reticulum",
       "tag": "reticulum-out",
-      "name": "e2e-sum-server-udp",
+      "name": "e2e-sum-server",
       "password": "e2e-test-password",
       "reticulum_config": {
-        "identity_name": "e2e-client-udp",
+        "identity_name": "e2e-client",
         "storage_path": "/var/lib/reticulum/client-udp",
         "interfaces": [
           {
             "name": "Reticulum UDP Client",
             "type": "UDPInterface",
             "listen_port": 4242,
-            "forward_ip": "e2e-server-udp",
+            "forward_ip": "e2e-server",
             "forward_port": 4243
           }
         ]
