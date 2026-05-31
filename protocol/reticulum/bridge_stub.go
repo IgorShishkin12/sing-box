@@ -32,7 +32,7 @@ func BridgeWrite(connHandle uint64, data []byte) int { return -1 }
 
 func BridgeGetHash(name string) (string, error)                  { return "", ErrBridgeNotAvailable }
 func BridgeRegisterName(name string, hash string) error          { return ErrBridgeNotAvailable }
-func BridgeShutdown()                                             {}
+func BridgeShutdown()                                            {}
 func BridgeResolveName(name string) (string, error)              { return "", ErrBridgeNotAvailable }
 func BridgeConnIdentifiedPeer(connHandle uint64) (string, error) { return "", ErrBridgeNotAvailable }
 func BridgeConnPeerHash(connHandle uint64) (string, error)       { return "", ErrBridgeNotAvailable }

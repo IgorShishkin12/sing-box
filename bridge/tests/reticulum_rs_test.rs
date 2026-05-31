@@ -24,7 +24,10 @@ mod tests {
                     let handle_bytes = unsafe { std::slice::from_raw_parts(result_out, len_out) };
                     if handle_bytes.len() != 8 {
                         reticulum_free(result_out);
-                        return Err(format!("unexpected handle byte length: {}", handle_bytes.len()));
+                        return Err(format!(
+                            "unexpected handle byte length: {}",
+                            handle_bytes.len()
+                        ));
                     }
                     let handle = u64::from_le_bytes(handle_bytes.try_into().unwrap());
                     reticulum_free(result_out);
@@ -115,7 +118,11 @@ mod tests {
         assert!(dial_task_id >= 0);
 
         let result = poll_task(dial_task_id, Duration::from_secs(10));
-        assert!(result.is_err(), "dial to unknown hash should fail, got {:?}", result);
+        assert!(
+            result.is_err(),
+            "dial to unknown hash should fail, got {:?}",
+            result
+        );
 
         reticulum_shutdown();
     }
@@ -148,7 +155,10 @@ mod tests {
 
         if dial_task_id >= 0 {
             let dial_result = poll_task(dial_task_id, Duration::from_secs(15));
-            eprintln!("dial result (expected to fail without network): {:?}", dial_result);
+            eprintln!(
+                "dial result (expected to fail without network): {:?}",
+                dial_result
+            );
         }
 
         reticulum_close(listener_handle);

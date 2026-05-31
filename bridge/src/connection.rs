@@ -1,8 +1,8 @@
+use reticulum_rs::transport::destination::link::Link;
+use reticulum_rs::transport::hash::AddressHash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use reticulum_rs::transport::destination::link::Link;
-use reticulum_rs::transport::hash::AddressHash;
 
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -134,7 +134,9 @@ impl Connection {
     /// Returns the verified persistent transport identity hash of the remote peer.
     pub fn identified_peer(&self) -> Option<AddressHash> {
         match &self.inner {
-            ConnectionInner::Link { identified_peer, .. } => *identified_peer,
+            ConnectionInner::Link {
+                identified_peer, ..
+            } => *identified_peer,
             #[cfg(test)]
             ConnectionInner::Memory { .. } => None,
         }

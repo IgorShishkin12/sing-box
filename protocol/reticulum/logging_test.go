@@ -35,20 +35,20 @@ func (l *recordingLogger) countLevel(level string) int {
 	return n
 }
 
-func (l *recordingLogger) Trace(args ...any)                              { l.record("trace") }
-func (l *recordingLogger) Debug(args ...any)                              { l.record("debug") }
-func (l *recordingLogger) Info(args ...any)                               { l.record("info") }
-func (l *recordingLogger) Warn(args ...any)                               { l.record("warn") }
-func (l *recordingLogger) Error(args ...any)                              { l.record("error") }
-func (l *recordingLogger) Fatal(args ...any)                              { l.record("fatal") }
-func (l *recordingLogger) Panic(args ...any)                              { l.record("panic") }
-func (l *recordingLogger) TraceContext(_ context.Context, args ...any)    { l.record("trace") }
-func (l *recordingLogger) DebugContext(_ context.Context, args ...any)    { l.record("debug") }
-func (l *recordingLogger) InfoContext(_ context.Context, args ...any)     { l.record("info") }
-func (l *recordingLogger) WarnContext(_ context.Context, args ...any)     { l.record("warn") }
-func (l *recordingLogger) ErrorContext(_ context.Context, args ...any)    { l.record("error") }
-func (l *recordingLogger) FatalContext(_ context.Context, args ...any)    { l.record("fatal") }
-func (l *recordingLogger) PanicContext(_ context.Context, args ...any)    { l.record("panic") }
+func (l *recordingLogger) Trace(args ...any)                           { l.record("trace") }
+func (l *recordingLogger) Debug(args ...any)                           { l.record("debug") }
+func (l *recordingLogger) Info(args ...any)                            { l.record("info") }
+func (l *recordingLogger) Warn(args ...any)                            { l.record("warn") }
+func (l *recordingLogger) Error(args ...any)                           { l.record("error") }
+func (l *recordingLogger) Fatal(args ...any)                           { l.record("fatal") }
+func (l *recordingLogger) Panic(args ...any)                           { l.record("panic") }
+func (l *recordingLogger) TraceContext(_ context.Context, args ...any) { l.record("trace") }
+func (l *recordingLogger) DebugContext(_ context.Context, args ...any) { l.record("debug") }
+func (l *recordingLogger) InfoContext(_ context.Context, args ...any)  { l.record("info") }
+func (l *recordingLogger) WarnContext(_ context.Context, args ...any)  { l.record("warn") }
+func (l *recordingLogger) ErrorContext(_ context.Context, args ...any) { l.record("error") }
+func (l *recordingLogger) FatalContext(_ context.Context, args ...any) { l.record("fatal") }
+func (l *recordingLogger) PanicContext(_ context.Context, args ...any) { l.record("panic") }
 
 var _ log.ContextLogger = (*recordingLogger)(nil)
 

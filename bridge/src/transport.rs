@@ -10,12 +10,15 @@ use once_cell::sync::OnceCell;
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, watch};
 use tokio::sync::Mutex;
+use tokio::sync::{broadcast, watch};
 
 use rand_core::OsRng;
+use reticulum_rs::runtime::ReceivedData;
 use reticulum_rs::transport::destination::link::{Link, LinkEvent, LinkEventData, LinkStatus};
-use reticulum_rs::transport::destination::{DestinationDesc, DestinationName, SingleInputDestination};
+use reticulum_rs::transport::destination::{
+    DestinationDesc, DestinationName, SingleInputDestination,
+};
 use reticulum_rs::transport::hash::AddressHash;
 use reticulum_rs::transport::identity::{Identity, PrivateIdentity};
 use reticulum_rs::transport::iface::tcp_client::TcpClient;
@@ -23,7 +26,6 @@ use reticulum_rs::transport::iface::tcp_server::TcpServer;
 use reticulum_rs::transport::iface::udp::UdpInterface;
 use reticulum_rs::transport::iface::InterfaceManager;
 use reticulum_rs::transport::transport::{Transport, TransportConfig};
-use reticulum_rs::runtime::ReceivedData;
 use reticulum_rs::transport::PacketContext;
 
 use crate::config::{ReticulumConfig, ReticulumInterface};
@@ -123,25 +125,47 @@ pub fn parse_link_identify_payload(payload: &[u8], link_id: &AddressHash) -> Opt
 ///
 /// The identity hex is in the same format as `PrivateIdentity::to_hex_string` /
 /// `new_from_hex_string` (128 hex chars = 64 bytes private key material).
-pub fn load_or_create_service_identity(config_dir: &str, name: &str) -> Result<PrivateIdentity, String> {
-    let key_path = std::path::PathBuf::from(config_dir)
-        .join(format!("{}-service.key", name));
+pub fn load_or_create_service_identity(
+    config_dir: &str,
+    name: &str,
+) -> Result<PrivateIdentity, String> {
+    let key_path = std::path::PathBuf::from(config_dir).join(format!("{}-service.key", name));
 
     if key_path.exists() {
-        let mut file = std::fs::File::open(&key_path)
-            .map_err(|e| format!("failed to open identity key '{}': {}", key_path.display(), e))?;
+        let mut file = std::fs::File::open(&key_path).map_err(|e| {
+            format!(
+                "failed to open identity key '{}': {}",
+                key_path.display(),
+                e
+            )
+        })?;
         let mut hex = String::new();
-        file.read_to_string(&mut hex)
-            .map_err(|e| format!("failed to read identity key '{}': {}", key_path.display(), e))?;
+        file.read_to_string(&mut hex).map_err(|e| {
+            format!(
+                "failed to read identity key '{}': {}",
+                key_path.display(),
+                e
+            )
+        })?;
         PrivateIdentity::new_from_hex_string(hex.trim())
             .map_err(|_| format!("invalid identity key in '{}'", key_path.display()))
     } else {
         let identity = PrivateIdentity::new_from_rand(OsRng);
         let hex = identity.to_hex_string();
-        let mut file = std::fs::File::create(&key_path)
-            .map_err(|e| format!("failed to create identity key '{}': {}", key_path.display(), e))?;
-        file.write_all(hex.as_bytes())
-            .map_err(|e| format!("failed to write identity key '{}': {}", key_path.display(), e))?;
+        let mut file = std::fs::File::create(&key_path).map_err(|e| {
+            format!(
+                "failed to create identity key '{}': {}",
+                key_path.display(),
+                e
+            )
+        })?;
+        file.write_all(hex.as_bytes()).map_err(|e| {
+            format!(
+                "failed to write identity key '{}': {}",
+                key_path.display(),
+                e
+            )
+        })?;
         log::info!(
             "created new service identity for '{}': addr={}",
             name,
@@ -233,19 +257,30 @@ async fn spawn_interfaces(
                 let mcast = format!("239.255.0.1:{port}");
                 let ui = UdpInterface::new(&mcast, Some(&mcast));
                 let addr = iface_mgr.spawn(ui, |ctx| UdpInterface::spawn(ctx));
-                log::info!("spawned AutoInterface (UDP multicast 239.255.0.1) port={} addr={}", port, addr);
+                log::info!(
+                    "spawned AutoInterface (UDP multicast 239.255.0.1) port={} addr={}",
+                    port,
+                    addr
+                );
                 log::warn!("AutoInterface here is experimental feature, incompatible with real Reticulum' implementation");
             }
             "UDPInterface" => {
                 let lip = iface.listen_ip.as_deref().unwrap_or("0.0.0.0");
                 let lport = iface.listen_port.unwrap_or(4242);
                 let bind = format!("{lip}:{lport}");
-                let fwd = iface.forward_ip.as_ref().map(|ip| {
-                    format!("{}:{}", ip, iface.forward_port.unwrap_or(lport))
-                });
+                let fwd = iface
+                    .forward_ip
+                    .as_ref()
+                    .map(|ip| format!("{}:{}", ip, iface.forward_port.unwrap_or(lport)));
                 let ui = UdpInterface::new(&bind, fwd.as_ref());
                 let addr = iface_mgr.spawn(ui, |ctx| UdpInterface::spawn(ctx));
-                log::info!("spawned UDPInterface '{}' bind={} forward={:?} addr={}", label, bind, fwd, addr);
+                log::info!(
+                    "spawned UDPInterface '{}' bind={} forward={:?} addr={}",
+                    label,
+                    bind,
+                    fwd,
+                    addr
+                );
             }
             "TCPServerInterface" => {
                 let lip = iface.listen_ip.as_deref().unwrap_or("0.0.0.0");
@@ -253,7 +288,12 @@ async fn spawn_interfaces(
                 let bind = format!("{lip}:{lport}");
                 let ts = TcpServer::new(&bind, iface_mgr_arc.clone());
                 let addr = iface_mgr.spawn(ts, |ctx| TcpServer::spawn(ctx));
-                log::info!("spawned TCPServerInterface '{}' bind={} addr={}", label, bind, addr);
+                log::info!(
+                    "spawned TCPServerInterface '{}' bind={} addr={}",
+                    label,
+                    bind,
+                    addr
+                );
             }
             "TCPClientInterface" => {
                 let host = iface.target_host.as_deref().unwrap_or("");
@@ -261,7 +301,12 @@ async fn spawn_interfaces(
                 let target = format!("{host}:{port}");
                 let tc = TcpClient::new(&target);
                 let addr = iface_mgr.spawn(tc, |ctx| TcpClient::spawn(ctx));
-                log::info!("spawned TCPClientInterface '{}' target={} addr={}", label, target, addr);
+                log::info!(
+                    "spawned TCPClientInterface '{}' target={} addr={}",
+                    label,
+                    target,
+                    addr
+                );
             }
             other => {
                 log::warn!("unknown interface type '{}', skipping", other);
@@ -366,14 +411,19 @@ pub async fn register_listener_destination(
         let mut tp = transport.lock().await;
         let name = DestinationName::new(&app_name, &aspect);
         let dest = tp.add_destination(identity, name).await;
-        let hash = { let d = dest.lock().await; d.desc.address_hash };
+        let hash = {
+            let d = dest.lock().await;
+            d.desc.address_hash
+        };
         let events = tp.in_link_events();
         (hash, dest, events)
     };
 
     log::info!(
         "registered service destination: addr={} app={} aspect={}",
-        address_hash, app_name, aspect
+        address_hash,
+        app_name,
+        aspect
     );
 
     let store = crate::store::global_store();
@@ -407,7 +457,11 @@ pub async fn register_listener_destination(
                                 let guard = link.lock().await;
                                 guard.peer_identity().address_hash
                             };
-                            log::info!("service link activated: id={} peer={}", event.id, peer_hash);
+                            log::info!(
+                                "service link activated: id={} peer={}",
+                                event.id,
+                                peer_hash
+                            );
                             let mut peer_events = {
                                 let tp = transport.lock().await;
                                 tp.in_link_events()
@@ -416,12 +470,19 @@ pub async fn register_listener_destination(
                                 let tp = transport.lock().await;
                                 tp.received_data_events()
                             };
-                            let identified = exchange_identify_on_link(&link, event.id, &mut peer_events).await;
-                            let conn = crate::connection::Connection::new_from_link(link.clone(), event.id, Some(peer_hash), identified);
+                            let identified =
+                                exchange_identify_on_link(&link, event.id, &mut peer_events).await;
+                            let conn = crate::connection::Connection::new_from_link(
+                                link.clone(),
+                                event.id,
+                                Some(peer_hash),
+                                identified,
+                            );
                             let conn_id = store.insert_connection(conn).await;
                             spawn_link_data_reader(conn_id, event.id, data_rx);
                             crate::c_api::call_on_accept(
-                                listener_handle, conn_id,
+                                listener_handle,
+                                conn_id,
                                 &peer_hash.to_hex_string(),
                             );
                             // Keep listener alive; suppress unused-var warning.
@@ -565,7 +626,10 @@ pub async fn exchange_identify_on_link(
         let guard = link.lock().await;
         let pkt = match guard.identify_packet(&payload) {
             Ok(p) => p,
-            Err(e) => { log::warn!("identify: failed to build packet: {:?}", e); return None; }
+            Err(e) => {
+                log::warn!("identify: failed to build packet: {:?}", e);
+                return None;
+            }
         };
         (pkt, guard.ingress_iface())
     };
@@ -585,7 +649,10 @@ pub async fn exchange_identify_on_link(
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            log::warn!("identify: timeout waiting for peer identify on link {}", link_id);
+            log::warn!(
+                "identify: timeout waiting for peer identify on link {}",
+                link_id
+            );
             return None;
         }
         tokio::select! {
@@ -684,7 +751,11 @@ pub async fn dial_and_wait(
     };
 
     let name = DestinationName::new("sing-box-reticulum", "dial");
-    let desc = DestinationDesc { identity, address_hash, name };
+    let desc = DestinationDesc {
+        identity,
+        address_hash,
+        name,
+    };
 
     let link = {
         let tp = transport.lock().await;
@@ -710,10 +781,7 @@ pub async fn dial_and_wait(
                 return Ok((link_clone, link_id));
             }
             LinkStatus::Closed | LinkStatus::Stale => {
-                log::error!(
-                    "link {} failed with status {:?}",
-                    link_id, link_status
-                );
+                log::error!("link {} failed with status {:?}", link_id, link_status);
                 return Err("link failed before becoming active");
             }
             _ => {}
@@ -723,10 +791,7 @@ pub async fn dial_and_wait(
         match link_events.try_recv() {
             Ok(event) => {
                 if event.id == link_id && matches!(event.event, LinkEvent::Activated) {
-                    log::info!(
-                        "link {} activated (event), dial successful",
-                        link_id
-                    );
+                    log::info!("link {} activated (event), dial successful", link_id);
                     return Ok((link_clone, link_id));
                 }
             }
@@ -753,7 +818,10 @@ mod tests {
         let hash = "rln://aabbccdd00112233445566778899aabb";
         let result = parse_dest_hash(hash);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().to_hex_string(), "aabbccdd00112233445566778899aabb");
+        assert_eq!(
+            result.unwrap().to_hex_string(),
+            "aabbccdd00112233445566778899aabb"
+        );
     }
 
     #[test]
@@ -793,8 +861,7 @@ mod tests {
 
     #[test]
     fn test_identity_persistence() {
-        let dir =
-            std::env::temp_dir().join(format!("test-identity-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("test-identity-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cfg_dir = dir.to_str().unwrap();
 
@@ -814,8 +881,7 @@ mod tests {
     fn test_identity_key_override() {
         use rand_core::OsRng;
 
-        let dir =
-            std::env::temp_dir().join(format!("test-identity-key-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("test-identity-key-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cfg_dir = dir.to_str().unwrap();
 
@@ -845,8 +911,7 @@ mod tests {
     #[tokio::test]
     async fn test_wait_for_announce_no_transport() {
         // Without an initialized transport, wait_for_service_announce returns None immediately.
-        let result =
-            wait_for_service_announce("nonexistent", Duration::from_millis(50)).await;
+        let result = wait_for_service_announce("nonexistent", Duration::from_millis(50)).await;
         assert!(result.is_none());
     }
 }

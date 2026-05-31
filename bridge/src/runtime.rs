@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::runtime::{Builder, Runtime};
 
-static RUNTIME: once_cell::sync::OnceCell<Mutex<Option<Arc<Runtime>>>> = once_cell::sync::OnceCell::new();
+static RUNTIME: once_cell::sync::OnceCell<Mutex<Option<Arc<Runtime>>>> =
+    once_cell::sync::OnceCell::new();
 
 fn get_runtime_lock() -> &'static Mutex<Option<Arc<Runtime>>> {
     RUNTIME.get_or_init(|| Mutex::new(None))
@@ -12,12 +13,10 @@ fn get_runtime_lock() -> &'static Mutex<Option<Arc<Runtime>>> {
 /// Lock the runtime mutex, recovering from a poisoned state if a previous
 /// test panicked while holding the lock.
 fn lock_runtime() -> std::sync::MutexGuard<'static, Option<Arc<Runtime>>> {
-    get_runtime_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| {
-            log::warn!("runtime mutex was poisoned, recovering");
-            poisoned.into_inner()
-        })
+    get_runtime_lock().lock().unwrap_or_else(|poisoned| {
+        log::warn!("runtime mutex was poisoned, recovering");
+        poisoned.into_inner()
+    })
 }
 
 /// Initialize the Tokio runtime if not already initialized.
@@ -29,10 +28,7 @@ pub fn init_runtime() -> Result<(), String> {
         return Ok(());
     }
     log::debug!("Building runtime (multi-thread)");
-    match Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    match Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => {
             *guard = Some(Arc::new(rt));
             log::info!("Runtime created successfully");
@@ -89,14 +85,10 @@ where
     // If so, skip the serial lock to avoid deadlock on reentrant calls.
     let is_reentrant = IN_BLOCK_ON.with(|cell| cell.replace(true));
     let _serial = if !is_reentrant {
-        Some(
-            get_block_on_lock()
-                .lock()
-                .unwrap_or_else(|poisoned| {
-                    log::warn!("block_on mutex was poisoned, recovering");
-                    poisoned.into_inner()
-                }),
-        )
+        Some(get_block_on_lock().lock().unwrap_or_else(|poisoned| {
+            log::warn!("block_on mutex was poisoned, recovering");
+            poisoned.into_inner()
+        }))
     } else {
         None
     };
@@ -115,7 +107,9 @@ where
     // Runtime was shut down — re-initialize; error already logged inside.
     let _ = init_runtime();
     let guard = lock_runtime();
-    let rt = guard.as_ref().expect("Runtime not initialized after re-init");
+    let rt = guard
+        .as_ref()
+        .expect("Runtime not initialized after re-init");
     let result = rt.block_on(f);
     if !is_reentrant {
         IN_BLOCK_ON.with(|cell| cell.set(false));

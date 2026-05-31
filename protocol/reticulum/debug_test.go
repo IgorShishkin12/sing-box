@@ -3,8 +3,8 @@
 package reticulum
 
 import (
-"fmt"
-"testing"
+	"fmt"
+	"testing"
 )
 
 func TestDebug(t *testing.T) {

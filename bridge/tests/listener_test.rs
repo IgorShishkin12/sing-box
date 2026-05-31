@@ -1,5 +1,5 @@
-use std::ffi::CString;
 use sing_box_reticulum_bridge::c_api::*;
+use std::ffi::CString;
 
 /// Test that listen with an invalid hash (empty after stripping prefix) returns -1.
 #[test]
@@ -19,10 +19,17 @@ fn test_listen_returns_handle() {
     let handle = unsafe { reticulum_listen(hash.as_ptr()) };
     // The listen may succeed or fail depending on runtime state, but must not panic.
     if handle > 0 {
-        unsafe { reticulum_close(handle as u64); }
+        unsafe {
+            reticulum_close(handle as u64);
+        }
     } else {
-        eprintln!("listen returned {} (acceptable in test environment)", handle);
+        eprintln!(
+            "listen returned {} (acceptable in test environment)",
+            handle
+        );
     }
 
-    unsafe { reticulum_shutdown(); }
+    unsafe {
+        reticulum_shutdown();
+    }
 }

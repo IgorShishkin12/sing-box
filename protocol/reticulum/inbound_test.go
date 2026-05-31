@@ -81,7 +81,7 @@ func TestInboundStartWithConfigPath(t *testing.T) {
 
 	opts := option.ReticulumInboundOptions{
 		ReticulumConfigPath: configPath,
-		Name: "test-inbound-config",
+		Name:                "test-inbound-config",
 	}
 
 	inbound, err := NewInbound(ctx, router, logger, "test", opts)

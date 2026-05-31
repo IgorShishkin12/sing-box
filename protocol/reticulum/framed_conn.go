@@ -29,9 +29,9 @@ type framedConn struct {
 	inner    net.Conn
 	ctrlCh   chan []byte   // full auth messages (type byte + payload)
 	dataCh   chan []byte   // full raw messages for all non-auth messages
-	gate     chan struct{}  // closed by OpenGate; Read blocks until then
+	gate     chan struct{} // closed by OpenGate; Read blocks until then
 	gateOnce sync.Once
-	done     chan struct{}  // closed by Close
+	done     chan struct{} // closed by Close
 	doneOnce sync.Once
 	readBuf  []byte // leftover bytes from last dataCh receive
 
@@ -161,8 +161,8 @@ func (fc *framedConn) Close() error {
 	return fc.inner.Close()
 }
 
-func (fc *framedConn) LocalAddr() net.Addr               { return fc.localAddr }
-func (fc *framedConn) RemoteAddr() net.Addr              { return fc.remoteAddr }
-func (fc *framedConn) SetDeadline(t time.Time) error     { return fc.inner.SetDeadline(t) }
+func (fc *framedConn) LocalAddr() net.Addr                { return fc.localAddr }
+func (fc *framedConn) RemoteAddr() net.Addr               { return fc.remoteAddr }
+func (fc *framedConn) SetDeadline(t time.Time) error      { return fc.inner.SetDeadline(t) }
 func (fc *framedConn) SetReadDeadline(t time.Time) error  { return fc.inner.SetReadDeadline(t) }
 func (fc *framedConn) SetWriteDeadline(t time.Time) error { return fc.inner.SetWriteDeadline(t) }

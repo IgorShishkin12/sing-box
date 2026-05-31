@@ -30,7 +30,13 @@ var (
 	bridgeInitErr  error
 )
 
-var bridgeLoggerVal interface{ Error(args ...interface{}); Warn(args ...interface{}); Info(args ...interface{}); Debug(args ...interface{}); Trace(args ...interface{}) }
+var bridgeLoggerVal interface {
+	Error(args ...interface{})
+	Warn(args ...interface{})
+	Info(args ...interface{})
+	Debug(args ...interface{})
+	Trace(args ...interface{})
+}
 
 // ---------------------------------------------------------------------------
 // Log callback
