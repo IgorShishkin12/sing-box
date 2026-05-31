@@ -76,7 +76,7 @@ fn test_listen_succeeds_without_network() {
     match result {
         Ok(handle) => {
             assert!(handle > 0, "listener handle should be positive");
-            unsafe { sing_box_reticulum_bridge::c_api::reticulum_close(handle) };
+            sing_box_reticulum_bridge::c_api::reticulum_close(handle);
         }
         Err(e) => {
             // Acceptable: transport may require interfaces for service registration.

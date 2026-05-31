@@ -15,6 +15,7 @@ fn test_poll_error_returns_message() {
     // Poll in a loop — the spawned task completes asynchronously.
     let mut result_out: *mut u8 = std::ptr::null_mut();
     let mut len_out: usize = 0;
+    #[allow(unused_assignments)]
     let mut final_ret = 0i32;
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
