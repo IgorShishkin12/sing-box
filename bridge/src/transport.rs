@@ -256,7 +256,7 @@ async fn spawn_interfaces(
                 let port = iface.data_port.unwrap_or(49555);
                 let mcast = format!("239.255.0.1:{port}");
                 let ui = UdpInterface::new(&mcast, Some(&mcast));
-                let addr = iface_mgr.spawn(ui, |ctx| UdpInterface::spawn(ctx));
+                let addr = iface_mgr.spawn(ui, UdpInterface::spawn);
                 log::info!(
                     "spawned AutoInterface (UDP multicast 239.255.0.1) port={} addr={}",
                     port,
@@ -273,7 +273,7 @@ async fn spawn_interfaces(
                     .as_ref()
                     .map(|ip| format!("{}:{}", ip, iface.forward_port.unwrap_or(lport)));
                 let ui = UdpInterface::new(&bind, fwd.as_ref());
-                let addr = iface_mgr.spawn(ui, |ctx| UdpInterface::spawn(ctx));
+                let addr = iface_mgr.spawn(ui, UdpInterface::spawn);
                 log::info!(
                     "spawned UDPInterface '{}' bind={} forward={:?} addr={}",
                     label,
@@ -287,7 +287,7 @@ async fn spawn_interfaces(
                 let lport = iface.listen_port.unwrap_or(7788);
                 let bind = format!("{lip}:{lport}");
                 let ts = TcpServer::new(&bind, iface_mgr_arc.clone());
-                let addr = iface_mgr.spawn(ts, |ctx| TcpServer::spawn(ctx));
+                let addr = iface_mgr.spawn(ts, TcpServer::spawn);
                 log::info!(
                     "spawned TCPServerInterface '{}' bind={} addr={}",
                     label,
@@ -300,7 +300,7 @@ async fn spawn_interfaces(
                 let port = iface.target_port.unwrap_or(7788);
                 let target = format!("{host}:{port}");
                 let tc = TcpClient::new(&target);
-                let addr = iface_mgr.spawn(tc, |ctx| TcpClient::spawn(ctx));
+                let addr = iface_mgr.spawn(tc, TcpClient::spawn);
                 log::info!(
                     "spawned TCPClientInterface '{}' target={} addr={}",
                     label,
@@ -375,7 +375,7 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
 
         let iface_mgr = transport.iface_manager();
         let mut mgr = iface_mgr.lock().await;
-        spawn_interfaces(&mut *mgr, &interfaces, iface_mgr.clone()).await;
+        spawn_interfaces(&mut mgr, &interfaces, iface_mgr.clone()).await;
         log::debug!("interfaces spawned");
 
         transport

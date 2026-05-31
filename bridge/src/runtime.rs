@@ -41,15 +41,15 @@ pub fn init_runtime() -> Result<(), String> {
     }
 }
 
-/// Thread-local flag to detect reentrant `block_on` calls.
-///
-/// `current_thread` runtime's `block_on` is NOT thread-safe — calling it
-/// concurrently from multiple threads causes data races on the runtime's
-/// internal state. However, calling it reentrantly from the *same* thread
-/// is safe (e.g., `reticulum_listen` calls `block_on` twice in sequence).
-///
-/// We use a global `Mutex<()>` to serialize across threads, but skip it
-/// when we detect we're already inside a `block_on` on this thread.
+// Thread-local flag to detect reentrant `block_on` calls.
+//
+// `current_thread` runtime's `block_on` is NOT thread-safe — calling it
+// concurrently from multiple threads causes data races on the runtime's
+// internal state. However, calling it reentrantly from the *same* thread
+// is safe (e.g., `reticulum_listen` calls `block_on` twice in sequence).
+//
+// We use a global `Mutex<()>` to serialize across threads, but skip it
+// when we detect we're already inside a `block_on` on this thread.
 thread_local! {
     static IN_BLOCK_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }

@@ -38,6 +38,12 @@ impl Clone for Listener {
     }
 }
 
+impl Default for Listener {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Listener {
     pub fn new() -> Self {
         Self {

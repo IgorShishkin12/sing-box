@@ -63,7 +63,7 @@ pub(crate) fn call_on_close(conn_id: u64) {
 /// write to a channel and return).
 /// Returns 0 on success, -1 on error.
 #[no_mangle]
-pub extern "C" fn reticulum_init(
+pub unsafe extern "C" fn reticulum_init(
     config_json: *const c_char,
     on_accept: Option<extern "C" fn(u64, u64, *const c_char)>,
     on_connect: Option<extern "C" fn(u64, u64)>,
@@ -150,7 +150,7 @@ pub extern "C" fn reticulum_shutdown() {
 /// Dial a destination hash. Non-blocking; fires `on_connect(task_id, conn_id)`
 /// when done (`conn_id == 0` on failure).
 #[no_mangle]
-pub extern "C" fn reticulum_dial(task_id: u64, destination_hash: *const c_char) {
+pub unsafe extern "C" fn reticulum_dial(task_id: u64, destination_hash: *const c_char) {
     if destination_hash.is_null() {
         call_on_connect(task_id, 0);
         return;
@@ -214,7 +214,7 @@ pub extern "C" fn reticulum_dial(task_id: u64, destination_hash: *const c_char) 
 /// Listen on a hash. Blocks until the listener is registered.
 /// Returns the listener handle (>0) on success, -1 on error.
 #[no_mangle]
-pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i64 {
+pub unsafe extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i64 {
     if listen_hash.is_null() {
         return -1;
     }
@@ -238,8 +238,7 @@ pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i64 {
         };
 
         let service_identity =
-            crate::transport::load_or_create_service_identity(&cfg_dir, &listen_name)
-                .map_err(|e| e)?;
+            crate::transport::load_or_create_service_identity(&cfg_dir, &listen_name)?;
 
         let listener = Listener::with_hash(listen_name.clone());
         let listener_arc = Arc::new(listener);
@@ -291,7 +290,7 @@ pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i64 {
 
 /// Write data to a connection. Returns bytes written or -1 on error.
 #[no_mangle]
-pub extern "C" fn reticulum_write(conn_handle: u64, data: *const u8, len: usize) -> i32 {
+pub unsafe extern "C" fn reticulum_write(conn_handle: u64, data: *const u8, len: usize) -> i32 {
     if data.is_null() || len == 0 {
         return -1;
     }
@@ -383,7 +382,7 @@ pub extern "C" fn reticulum_get_transport_hash() -> *mut c_char {
 
 /// Register a name→hash mapping. Returns 0 on success, -1 on error.
 #[no_mangle]
-pub extern "C" fn reticulum_register_name(name: *const c_char, hash: *const c_char) -> i32 {
+pub unsafe extern "C" fn reticulum_register_name(name: *const c_char, hash: *const c_char) -> i32 {
     if name.is_null() || hash.is_null() {
         return -1;
     }
@@ -405,7 +404,7 @@ pub extern "C" fn reticulum_register_name(name: *const c_char, hash: *const c_ch
 /// Get the hash for a registered name. Caller must free with reticulum_free.
 /// Returns 0 in the out-param on success, -1 if the name is unknown.
 #[no_mangle]
-pub extern "C" fn get_hash(hash: *mut *mut c_char, name: *const c_char) -> i32 {
+pub unsafe extern "C" fn get_hash(hash: *mut *mut c_char, name: *const c_char) -> i32 {
     if hash.is_null() || name.is_null() {
         return -1;
     }
@@ -433,7 +432,7 @@ pub extern "C" fn get_hash(hash: *mut *mut c_char, name: *const c_char) -> i32 {
 /// Resolve a service name to its address hash via network announcements.
 /// Caller must free the returned string with reticulum_free. Returns NULL on timeout.
 #[no_mangle]
-pub extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
     if name.is_null() {
         return std::ptr::null_mut();
     }

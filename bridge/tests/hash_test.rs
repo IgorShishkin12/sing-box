@@ -4,8 +4,9 @@ use std::ffi::CString;
 /// Helper: init with fresh runtime for each test
 fn bridge_init() {
     let config = std::ffi::CString::new("{}").unwrap();
-    let ret =
-        sing_box_reticulum_bridge::c_api::reticulum_init(config.as_ptr(), None, None, None, None);
+    let ret = unsafe {
+        sing_box_reticulum_bridge::c_api::reticulum_init(config.as_ptr(), None, None, None, None)
+    };
     assert_eq!(ret, 0);
 }
 
@@ -22,7 +23,8 @@ fn test_get_hash_unknown_name() {
 
     let name = CString::new("nonexistent").unwrap();
     let mut hash_out: *mut std::ffi::c_char = std::ptr::null_mut();
-    let result = sing_box_reticulum_bridge::c_api::get_hash(&mut hash_out, name.as_ptr());
+    let result =
+        unsafe { sing_box_reticulum_bridge::c_api::get_hash(&mut hash_out, name.as_ptr()) };
     assert_eq!(result, -1, "unknown name should return -1");
     assert!(
         hash_out.is_null(),
@@ -40,14 +42,17 @@ fn test_get_hash_after_register() {
 
     let name = CString::new("alice").unwrap();
     let expected_hash = CString::new("abc123def456").unwrap();
-    let reg_ret = sing_box_reticulum_bridge::c_api::reticulum_register_name(
-        name.as_ptr(),
-        expected_hash.as_ptr(),
-    );
+    let reg_ret = unsafe {
+        sing_box_reticulum_bridge::c_api::reticulum_register_name(
+            name.as_ptr(),
+            expected_hash.as_ptr(),
+        )
+    };
     assert_eq!(reg_ret, 0, "register should succeed");
 
     let mut hash_out: *mut std::ffi::c_char = std::ptr::null_mut();
-    let result = sing_box_reticulum_bridge::c_api::get_hash(&mut hash_out, name.as_ptr());
+    let result =
+        unsafe { sing_box_reticulum_bridge::c_api::get_hash(&mut hash_out, name.as_ptr()) };
     assert_eq!(result, 0, "get_hash should succeed for registered name");
     assert!(!hash_out.is_null(), "hash pointer should not be null");
 
@@ -69,17 +74,21 @@ fn test_get_hash_after_register() {
 #[test]
 fn test_get_hash_null_params() {
     // No need to init for null checks
-    let result = sing_box_reticulum_bridge::c_api::get_hash(std::ptr::null_mut(), std::ptr::null());
+    let result = unsafe {
+        sing_box_reticulum_bridge::c_api::get_hash(std::ptr::null_mut(), std::ptr::null())
+    };
     assert_eq!(result, -1, "null params should return -1");
 }
 
 /// Test that register_name with null parameters returns -1
 #[test]
 fn test_register_name_null_params() {
-    let result = sing_box_reticulum_bridge::c_api::reticulum_register_name(
-        std::ptr::null(),
-        std::ptr::null(),
-    );
+    let result = unsafe {
+        sing_box_reticulum_bridge::c_api::reticulum_register_name(
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
     assert_eq!(result, -1, "null params should return -1");
 }
 
@@ -91,14 +100,16 @@ fn test_get_hash_deterministic() {
 
     let name = CString::new("bob").unwrap();
     let registered = CString::new("somehash").unwrap();
-    let reg_ret = sing_box_reticulum_bridge::c_api::reticulum_register_name(
-        name.as_ptr(),
-        registered.as_ptr(),
-    );
+    let reg_ret = unsafe {
+        sing_box_reticulum_bridge::c_api::reticulum_register_name(
+            name.as_ptr(),
+            registered.as_ptr(),
+        )
+    };
     assert_eq!(reg_ret, 0);
 
     let mut hash_out1: *mut std::ffi::c_char = std::ptr::null_mut();
-    let _ = sing_box_reticulum_bridge::c_api::get_hash(&mut hash_out1, name.as_ptr());
+    let _ = unsafe { sing_box_reticulum_bridge::c_api::get_hash(&mut hash_out1, name.as_ptr()) };
     let hash1 = unsafe {
         std::ffi::CStr::from_ptr(hash_out1)
             .to_string_lossy()
@@ -107,7 +118,7 @@ fn test_get_hash_deterministic() {
     sing_box_reticulum_bridge::c_api::reticulum_free(hash_out1 as *mut u8);
 
     let mut hash_out2: *mut std::ffi::c_char = std::ptr::null_mut();
-    let _ = sing_box_reticulum_bridge::c_api::get_hash(&mut hash_out2, name.as_ptr());
+    let _ = unsafe { sing_box_reticulum_bridge::c_api::get_hash(&mut hash_out2, name.as_ptr()) };
     let hash2 = unsafe {
         std::ffi::CStr::from_ptr(hash_out2)
             .to_string_lossy()
