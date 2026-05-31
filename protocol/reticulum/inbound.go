@@ -145,22 +145,28 @@ func (h *Inbound) acceptLoop() {
 			}
 		}
 
-		destAddr, err := readDestHeader(conn)
-		if err != nil {
-			h.logger.Error("read dest header: ", err)
-			conn.Close()
-			continue
-		}
+		session := newMuxSessionServer(conn, h.logger)
+		go h.handleSession(session)
+	}
+}
 
-		h.logger.Info("inbound connection to ", destAddr)
+// handleSession dispatches incoming virtual connections from a mux session.
+func (h *Inbound) handleSession(s *muxSession) {
+	for mc := range s.incomingCh {
+		go h.routeVirtualConn(mc)
+	}
+}
 
-		if h.router != nil {
-			metadata := adapter.InboundContext{
-				Network:     "tcp",
-				Destination: M.ParseSocksaddr(destAddr),
-			}
-			h.router.RouteConnectionEx(context.Background(), conn, metadata, nil)
+// routeVirtualConn routes one virtual connection to the configured destination.
+func (h *Inbound) routeVirtualConn(mc *muxConn) {
+	defer mc.Close()
+	h.logger.Info("inbound virtual connection to ", mc.dest)
+	if h.router != nil {
+		metadata := adapter.InboundContext{
+			Network:     "tcp",
+			Destination: M.ParseSocksaddr(mc.dest),
 		}
+		h.router.RouteConnectionEx(context.Background(), mc, metadata, nil)
 	}
 }
 
