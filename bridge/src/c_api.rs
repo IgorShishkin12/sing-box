@@ -15,8 +15,11 @@ pub(crate) static ON_LOG: AtomicUsize = AtomicUsize::new(0);
 /// Initialize the reticulum bridge with a JSON config string.
 /// Returns 0 on success, -1 on error.
 /// config_json must not be NULL; always provide at least "{}" for defaults.
+///
+/// # Safety
+/// `config_json` must be a valid, non-null, null-terminated C string.
 #[no_mangle]
-pub extern "C" fn reticulum_init(config_json: *const c_char) -> i32 {
+pub unsafe extern "C" fn reticulum_init(config_json: *const c_char) -> i32 {
     // Route log:: macro calls into tracing so reticulum-rs events and bridge
     // events all flow through the same subscriber.
     let _ = tracing_log::LogTracer::init();
@@ -71,8 +74,11 @@ pub extern "C" fn reticulum_set_log_callback(
 /// Get the destination hash for a given name.
 /// The caller must free `*hash` with reticulum_free after use.
 /// Returns 0 on success, -1 if the name is unknown.
+///
+/// # Safety
+/// `hash` and `name` must be valid, non-null pointers; `name` must be null-terminated.
 #[no_mangle]
-pub extern "C" fn get_hash(hash: *mut *mut c_char, name: *const c_char) -> i32 {
+pub unsafe extern "C" fn get_hash(hash: *mut *mut c_char, name: *const c_char) -> i32 {
     if hash.is_null() || name.is_null() {
         return -1;
     }
@@ -105,8 +111,11 @@ pub extern "C" fn get_hash(hash: *mut *mut c_char, name: *const c_char) -> i32 {
 
 /// Register a name→hash mapping for later lookup via get_hash.
 /// Returns 0 on success, -1 on error.
+///
+/// # Safety
+/// `name` and `hash` must be valid, non-null, null-terminated C strings.
 #[no_mangle]
-pub extern "C" fn reticulum_register_name(name: *const c_char, hash: *const c_char) -> i32 {
+pub unsafe extern "C" fn reticulum_register_name(name: *const c_char, hash: *const c_char) -> i32 {
     if name.is_null() || hash.is_null() {
         return -1;
     }
@@ -145,8 +154,11 @@ pub extern "C" fn reticulum_shutdown() {
 
 /// Dial a destination hash, returning a task ID.
 /// Use reticulum_poll to check for completion and get the connection handle.
+///
+/// # Safety
+/// `destination_hash` must be a valid, non-null, null-terminated C string.
 #[no_mangle]
-pub extern "C" fn reticulum_dial(destination_hash: *const c_char) -> i32 {
+pub unsafe extern "C" fn reticulum_dial(destination_hash: *const c_char) -> i32 {
     if destination_hash.is_null() {
         return -1;
     }
@@ -216,8 +228,11 @@ pub extern "C" fn reticulum_dial(destination_hash: *const c_char) -> i32 {
 
 /// Listen on a name, returning a task ID.
 /// Use reticulum_poll to check for completion and get the listener handle.
+///
+/// # Safety
+/// `listen_hash` must be a valid, non-null, null-terminated C string.
 #[no_mangle]
-pub extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i32 {
+pub unsafe extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i32 {
     if listen_hash.is_null() {
         return -1;
     }
@@ -451,8 +466,11 @@ pub extern "C" fn reticulum_accept(listener_handle: u64) -> i32 {
 
 /// Write data to a connection.
 /// Returns number of bytes written, or -1 on error.
+///
+/// # Safety
+/// `data` must be a valid pointer to at least `len` initialized bytes.
 #[no_mangle]
-pub extern "C" fn reticulum_write(conn_handle: u64, data: *const u8, len: usize) -> i32 {
+pub unsafe extern "C" fn reticulum_write(conn_handle: u64, data: *const u8, len: usize) -> i32 {
     if data.is_null() || len == 0 {
         return -1;
     }
@@ -478,8 +496,11 @@ pub extern "C" fn reticulum_write(conn_handle: u64, data: *const u8, len: usize)
 
 /// Read data from a connection.
 /// Returns number of bytes read, or -1 on error.
+///
+/// # Safety
+/// `buffer` must be a valid pointer to a writable buffer of at least `max_len` bytes.
 #[no_mangle]
-pub extern "C" fn reticulum_read(conn_handle: u64, buffer: *mut u8, max_len: usize) -> i32 {
+pub unsafe extern "C" fn reticulum_read(conn_handle: u64, buffer: *mut u8, max_len: usize) -> i32 {
     if buffer.is_null() || max_len == 0 {
         return -1;
     }
@@ -512,8 +533,11 @@ unsafe fn alloc_with_libc(data: &[u8]) -> *mut u8 {
 /// Returns 0=pending, 1=done, -1=error.
 /// If done, the result handle is stored in *result_out and its length in *len_out.
 /// The caller must free the result with reticulum_free.
+///
+/// # Safety
+/// `result_out` and `len_out` must be valid, non-null pointers if a result is expected.
 #[no_mangle]
-pub extern "C" fn reticulum_poll(
+pub unsafe extern "C" fn reticulum_poll(
     task_id: i32,
     result_out: *mut *mut u8,
     len_out: *mut usize,
@@ -582,8 +606,11 @@ pub extern "C" fn reticulum_free(ptr: *mut u8) {
 ///
 /// The caller must free the returned string with reticulum_free.
 /// Returns NULL on timeout or if transport is not initialized.
+///
+/// # Safety
+/// `name` must be a valid, non-null, null-terminated C string.
 #[no_mangle]
-pub extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
     if name.is_null() {
         return std::ptr::null_mut();
     }
