@@ -211,6 +211,18 @@ func BridgeShutdown() {
 	C.reticulum_shutdown()
 }
 
+// BridgeConnPeerHash returns the Reticulum identity hash of the remote peer for a
+// connection handle. Only available on accepted (inbound) connections; returns an
+// error for outbound connections or unknown handles.
+func BridgeConnPeerHash(connHandle uint64) (string, error) {
+	hashStr := C.reticulum_get_conn_peer_hash(C.uint64_t(connHandle))
+	if hashStr == nil {
+		return "", ErrBridgeConnPeerHashFailed
+	}
+	defer C.reticulum_free(unsafe.Pointer(hashStr))
+	return C.GoString(hashStr), nil
+}
+
 // BridgeResolveName resolves a human-readable name to a deterministic address hash.
 // Both listener and dialer can call this independently to get the same hash
 // from the same name, without any shared state or network communication.

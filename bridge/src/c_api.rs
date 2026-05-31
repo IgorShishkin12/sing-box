@@ -172,7 +172,7 @@ pub extern "C" fn reticulum_dial(destination_hash: *const c_char) -> i32 {
                 };
                 match crate::transport::dial_and_wait(&dest).await {
                     Ok((link, link_id)) => {
-                        let conn = crate::connection::Connection::new_from_link(link, link_id);
+                        let conn = crate::connection::Connection::new_from_link(link, link_id, None);
                         crate::transport::spawn_link_data_reader(conn.clone(), link_id, data_rx);
                         let handle = store.insert_connection(conn).await;
                         registry
@@ -362,6 +362,37 @@ pub extern "C" fn reticulum_get_listener_hash(listener_handle: u64) -> *mut c_ch
             }
             None => None,
         }
+    });
+    match result {
+        Some(hash_str) => {
+            let bytes = hash_str.as_bytes();
+            let len = bytes.len() + 1;
+            unsafe {
+                let ptr = libc::malloc(len) as *mut c_char;
+                if ptr.is_null() {
+                    return std::ptr::null_mut();
+                }
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr as *mut u8, bytes.len());
+                *ptr.add(bytes.len()) = 0;
+                ptr
+            }
+        }
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Get the identity hash of the remote peer for a connection handle.
+/// Returns a null-terminated hex string (caller must free with reticulum_free),
+/// or NULL if the handle is not found or the peer hash is not available (e.g. outbound).
+#[no_mangle]
+pub extern "C" fn reticulum_get_conn_peer_hash(conn_handle: u64) -> *mut c_char {
+    let store = global_store();
+    let result: Option<String> = runtime::block_on(async move {
+        store
+            .get_connection(conn_handle)
+            .await
+            .and_then(|conn| conn.peer_hash())
+            .map(|h| h.to_hex_string())
     });
     match result {
         Some(hash_str) => {

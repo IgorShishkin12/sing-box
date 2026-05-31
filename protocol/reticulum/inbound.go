@@ -48,6 +48,7 @@ type Inbound struct {
 	options      option.ReticulumInboundOptions
 	listenerTask int
 	listenerHdl  uint64
+	listenHash   string // server identity hash, used as serverID in Auth
 	accepting    bool
 	mu           sync.Mutex
 	closed       bool
@@ -97,6 +98,7 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 		return fmt.Errorf("bridge listen failed: %w", err)
 	}
 	h.listenerTask = taskID
+	h.listenHash = listenHash
 
 	handle, err := BridgePollTask(taskID, 30*time.Second)
 	if err != nil {
@@ -149,7 +151,12 @@ func (h *Inbound) handleConn(handle uint64) {
 	fc := newFramedConn(raw)
 
 	if h.options.Password != "" {
-		if err := ServerAuth(fc, h.options.Password); err != nil {
+		peerID, err := BridgeConnPeerHash(handle)
+		if err != nil {
+			h.logger.Debug("peer hash unavailable for handle ", handle, ": ", err)
+			peerID = ""
+		}
+		if err := Auth(fc, h.options.Password, h.listenHash, peerID); err != nil {
 			h.logger.Error("reticulum auth failed: ", err)
 			fc.Close()
 			return

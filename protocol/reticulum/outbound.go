@@ -128,7 +128,7 @@ func (h *Outbound) getOrCreateSession(ctx context.Context, destHash string) (*mu
 	fc := newFramedConn(raw)
 
 	if h.options.Password != "" {
-		if err := ClientAuth(fc, h.options.Password); err != nil {
+		if err := Auth(fc, h.options.Password, localName, destHash); err != nil {
 			fc.Close()
 			return nil, fmt.Errorf("reticulum auth failed: %w", err)
 		}

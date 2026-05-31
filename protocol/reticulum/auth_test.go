@@ -6,38 +6,61 @@ import (
 )
 
 // chanAuthIO implements AuthIO using a channel pair; no network needed.
+// done is a shared channel between the pair — closing it via Close() unblocks
+// both sides' pending ReadMsg/WriteMsg, simulating a connection teardown.
 type chanAuthIO struct {
-	in  <-chan []byte
-	out chan<- []byte
+	in   <-chan []byte
+	out  chan<- []byte
+	done chan struct{}
 }
 
 func (c *chanAuthIO) ReadMsg() ([]byte, error) {
-	msg, ok := <-c.in
-	if !ok {
-		return nil, io.EOF
+	select {
+	case msg, ok := <-c.in:
+		if !ok {
+			return nil, io.EOF
+		}
+		return msg, nil
+	case <-c.done:
+		return nil, io.ErrClosedPipe
 	}
-	return msg, nil
 }
 
 func (c *chanAuthIO) WriteMsg(b []byte) error {
 	cpy := make([]byte, len(b))
 	copy(cpy, b)
-	c.out <- cpy
-	return nil
+	select {
+	case c.out <- cpy:
+		return nil
+	case <-c.done:
+		return io.ErrClosedPipe
+	}
 }
 
-// newChanAuthPair returns two paired AuthIO endpoints (server, client).
+// Close unblocks both sides of the pair by closing the shared done channel.
+func (c *chanAuthIO) Close() {
+	select {
+	case <-c.done: // already closed
+	default:
+		close(c.done)
+	}
+}
+
+// newChanAuthPair returns two paired AuthIO endpoints sharing a done channel.
 func newChanAuthPair() (*chanAuthIO, *chanAuthIO) {
 	ch1 := make(chan []byte, 8)
 	ch2 := make(chan []byte, 8)
-	return &chanAuthIO{in: ch1, out: ch2}, &chanAuthIO{in: ch2, out: ch1}
+	done := make(chan struct{})
+	return &chanAuthIO{in: ch1, out: ch2, done: done},
+		&chanAuthIO{in: ch2, out: ch1, done: done}
 }
 
 func TestAuth_Success(t *testing.T) {
-	server, client := newChanAuthPair()
+	// Each side uses its own identity and verifies the other's.
+	a, b := newChanAuthPair()
 	errs := make(chan error, 2)
-	go func() { errs <- ServerAuth(server, "correct-password") }()
-	go func() { errs <- ClientAuth(client, "correct-password") }()
+	go func() { errs <- Auth(a, "correct-password", "identity-a", "identity-b") }()
+	go func() { errs <- Auth(b, "correct-password", "identity-b", "identity-a") }()
 	for i := 0; i < 2; i++ {
 		if err := <-errs; err != nil {
 			t.Errorf("unexpected error: %v", err)
@@ -46,67 +69,64 @@ func TestAuth_Success(t *testing.T) {
 }
 
 func TestAuth_WrongPassword(t *testing.T) {
-	server, client := newChanAuthPair()
+	a, b := newChanAuthPair()
 	errs := make(chan error, 2)
-	go func() { errs <- ServerAuth(server, "server-password") }()
-	go func() { errs <- ClientAuth(client, "client-password") }()
+	go func() { errs <- Auth(a, "password-A", "identity-a", "") }()
+	go func() { errs <- Auth(b, "password-B", "identity-b", "") }()
 
-	errCount := 0
+	var errCount int
 	for i := 0; i < 2; i++ {
 		if err := <-errs; err != nil {
 			errCount++
 		}
 	}
 	if errCount == 0 {
-		t.Error("expected at least one error for wrong password, got none")
+		t.Error("expected errors for mismatched passwords, got none")
 	}
 }
 
-func TestAuth_BadChallenge(t *testing.T) {
-	// Client receives a garbage challenge (wrong version byte).
-	server, client := newChanAuthPair()
+func TestAuth_PeerIdentityMismatch(t *testing.T) {
+	// Side a expects peer to be "expected-b" but peer claims "identity-b".
+	// a returns error after round 1; calling a.Close() unblocks b which is
+	// waiting for a's round-2 MAC that will never arrive.
+	a, b := newChanAuthPair()
 	errs := make(chan error, 2)
 	go func() {
-		// Send a bad challenge manually.
-		bad := make([]byte, 33)
-		bad[0] = 0xFF // wrong version
-		server.WriteMsg(bad)
-		errs <- nil
+		err := Auth(a, "password", "identity-a", "expected-b")
+		a.Close() // unblock b, which is waiting for a's round-2 MAC
+		errs <- err
 	}()
-	go func() { errs <- ClientAuth(client, "password") }()
+	go func() { errs <- Auth(b, "password", "identity-b", "") }()
 
-	var clientErr error
+	var gotErr bool
 	for i := 0; i < 2; i++ {
-		err := <-errs
-		if err != nil {
-			clientErr = err
+		if err := <-errs; err != nil {
+			gotErr = true
 		}
 	}
-	if clientErr == nil {
-		t.Fatal("expected client error for bad challenge, got nil")
+	if !gotErr {
+		t.Error("expected error for peer identity mismatch, got none")
 	}
 }
 
-func TestAuth_ServerRejectsShortResponse(t *testing.T) {
-	// Server receives a too-short client response.
-	server, client := newChanAuthPair()
+func TestAuth_ShortRound1(t *testing.T) {
+	// One side sends a round1 message shorter than 64 bytes; peer rejects it.
+	a, b := newChanAuthPair()
 	errs := make(chan error, 2)
-	go func() { errs <- ServerAuth(server, "password") }()
+	go func() { errs <- Auth(a, "password", "identity-a", "") }()
 	go func() {
-		// Read the server challenge, send a short response.
-		client.ReadMsg() //nolint:errcheck
-		client.WriteMsg([]byte("short"))
+		_ = b.WriteMsg([]byte("short")) // only 5 bytes, want 64
+		b.ReadMsg()                     //nolint:errcheck  drain so side a's write doesn't stall
 		errs <- nil
 	}()
 
-	var serverErr error
+	var gotErr bool
 	for i := 0; i < 2; i++ {
-		err := <-errs
-		if err != nil {
-			serverErr = err
+		if err := <-errs; err != nil {
+			gotErr = true
 		}
 	}
-	if serverErr == nil {
-		t.Fatal("expected server error for short response, got nil")
+	if !gotErr {
+		t.Error("expected at least one error for short round1, got none")
 	}
 }

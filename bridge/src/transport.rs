@@ -346,9 +346,13 @@ pub async fn register_listener_destination(
                         };
 
                         if link_dest_hash == service_hash {
+                            let peer_hash = {
+                                let guard = link.lock().await;
+                                guard.peer_identity().address_hash
+                            };
                             log::info!(
                                 "service link activated: id={} peer={}",
-                                event.id, event.address_hash
+                                event.id, peer_hash
                             );
                             // Subscribe BEFORE push_connection so no data sent by the
                             // client immediately after link setup is missed.
@@ -356,7 +360,7 @@ pub async fn register_listener_destination(
                                 let tp = transport.lock().await;
                                 tp.received_data_events()
                             };
-                            let conn = Connection::new_from_link(link.clone(), event.id);
+                            let conn = Connection::new_from_link(link.clone(), event.id, Some(peer_hash));
                             spawn_link_data_reader(conn.clone(), event.id, data_rx);
                             listener_clone.push_connection(conn).await;
                         }

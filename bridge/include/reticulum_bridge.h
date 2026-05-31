@@ -68,6 +68,13 @@ int32_t reticulum_accept(uint64_t listener_handle);
 char* reticulum_get_listener_hash(uint64_t listener_handle);
 
 /*
+ * Get the identity hash of the remote peer for a connection handle.
+ * Returns a null-terminated hex string (caller must free with reticulum_free),
+ * or NULL if the handle is not found or has no peer identity (e.g. outbound connections).
+ */
+char* reticulum_get_conn_peer_hash(uint64_t conn_handle);
+
+/*
  * Close a connection or listener handle.
  */
 void reticulum_close(uint64_t handle);
