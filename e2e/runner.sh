@@ -17,6 +17,7 @@ cd "$SCRIPT_DIR"
 
 echo "Building e2e images..."
 $COMPOSE_CMD -f docker-compose.tcp.yml build
+$COMPOSE_CMD -f docker-compose.android-tcp.yml build
 
 run_test() {
     local file="$1"
@@ -39,6 +40,7 @@ run_test docker-compose.length-test.yml  e2e-client
 run_test docker-compose.tcp.yml  e2e-client
 run_test docker-compose.udp.yml  e2e-client
 run_test docker-compose.auto.yml e2e-client
+run_test docker-compose.android-tcp.yml e2e-android-client
 
 echo ""
 echo "=== ALL E2E TESTS PASSED ==="

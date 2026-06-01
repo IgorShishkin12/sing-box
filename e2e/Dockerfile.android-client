@@ -1,0 +1,102 @@
+# Stage 1: build sing-box and e2e-loadtest for Android x86_64
+FROM golang:1.24 AS android-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl unzip build-essential ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# Android NDK r28
+ENV ANDROID_NDK_HOME=/opt/android-ndk
+ENV TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+RUN curl -fsSL -o /tmp/ndk.zip \
+        https://dl.google.com/android/repository/android-ndk-r28-linux.zip && \
+    unzip -q /tmp/ndk.zip -d /opt && \
+    mv /opt/android-ndk-r28 $ANDROID_NDK_HOME && \
+    rm /tmp/ndk.zip
+ENV PATH=$PATH:$TOOLCHAIN
+
+# Rust + Android x86_64 target
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+        sh -s -- -y --default-toolchain stable --no-modify-path
+ENV PATH=$PATH:/root/.cargo/bin
+RUN rustup target add x86_64-linux-android
+
+WORKDIR /workspace/sing-box
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+
+COPY . .
+
+# Rust bridge for x86_64-linux-android
+# .cargo/config.toml already wires x86_64-linux-android23-clang as linker.
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/tmp/cargo-target \
+    CARGO_TARGET_DIR=/tmp/cargo-target \
+    cargo build --release --target x86_64-linux-android \
+        --manifest-path bridge/Cargo.toml && \
+    mkdir -p bridge/target/x86_64-linux-android/release && \
+    cp /tmp/cargo-target/x86_64-linux-android/release/libsing_box_reticulum_bridge.a \
+        bridge/target/x86_64-linux-android/release/
+
+# sing-box for Android x86_64
+# CGO directive in bridge_stub_reticulum.go:11 picks up the .a above automatically.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    export TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS) && \
+    GOOS=android GOARCH=amd64 CGO_ENABLED=1 \
+    CC=$TOOLCHAIN/x86_64-linux-android34-clang \
+    go build -trimpath -tags "$TAGS,with_reticulum" \
+        -o /android-bins/sing-box \
+        ./cmd/sing-box/
+
+# loadtest for Android x86_64 (pure Go, no CGO)
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    GOOS=android GOARCH=amd64 CGO_ENABLED=0 \
+    go build -o /android-bins/e2e-loadtest ./e2e/loadtest/
+
+# ---------------------------------------------------------------------------
+# Stage 2: Android emulator image
+# SDK and system image are downloaded here so they land in a cached layer.
+# ---------------------------------------------------------------------------
+FROM ubuntu:22.04 AS android-client
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openjdk-17-jdk-headless curl unzip socat ca-certificates \
+        libpulse0 libgl1 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Android SDK command-line tools
+ENV ANDROID_HOME=/opt/android-sdk
+ENV PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator
+
+RUN mkdir -p $ANDROID_HOME/cmdline-tools && \
+    curl -fsSL -o /tmp/cmdline-tools.zip \
+        https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip && \
+    unzip -q /tmp/cmdline-tools.zip -d $ANDROID_HOME/cmdline-tools && \
+    mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest && \
+    rm /tmp/cmdline-tools.zip
+
+# Accept licenses, then download emulator + system image (cached in this layer)
+RUN yes | sdkmanager --licenses > /dev/null && \
+    sdkmanager "platform-tools" "emulator" \
+        "system-images;android-34;google_apis;x86_64"
+
+# Create AVD (also cached)
+RUN echo "no" | avdmanager create avd \
+        -n reticulum_test \
+        -k "system-images;android-34;google_apis;x86_64" \
+        -d pixel_5 \
+        --force
+
+# Android binaries built in stage 1
+COPY --from=android-builder /android-bins/sing-box      /android-bins/sing-box
+COPY --from=android-builder /android-bins/e2e-loadtest  /android-bins/e2e-loadtest
+
+# Entrypoint
+COPY e2e/android-entrypoint.sh /android-entrypoint.sh
+RUN chmod +x /android-entrypoint.sh
+
+ENTRYPOINT ["/android-entrypoint.sh"]
