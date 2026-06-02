@@ -54,10 +54,13 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
         -o /android-bins/sing-box \
         ./cmd/sing-box/
 
-# loadtest for Android x86_64 (pure Go, no CGO)
+# loadtest for Android x86_64.
+# Android always requires external (cgo) linking even for pure-Go binaries
+# because the runtime links against Android's libc via the NDK clang.
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    GOOS=android GOARCH=amd64 CGO_ENABLED=0 \
+    GOOS=android GOARCH=amd64 CGO_ENABLED=1 \
+    CC=$TOOLCHAIN/x86_64-linux-android34-clang \
     go build -o /android-bins/e2e-loadtest ./e2e/loadtest/
 
 # ---------------------------------------------------------------------------
