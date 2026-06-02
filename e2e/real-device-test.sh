@@ -101,15 +101,20 @@ echo "sum-server: $SUMSERVER_BIN"
 if [[ -z "${SERVER_IP:-}" ]]; then
     echo "=== Discovering network addresses ==="
 
-    # Phone's LAN IP: first non-loopback, non-link-local inet address on the phone
-    PHONE_IP=$(adb shell ip addr \
-        | grep 'inet ' \
-        | grep -v '127\.' \
-        | grep -v '169\.254\.' \
-        | awk '{print $2}' \
-        | cut -d/ -f1 \
-        | head -1 \
-        | tr -d '\r')
+    # Phone's WiFi IP — prefer wlan0, fall back to any non-loopback non-link-local address
+    PHONE_IP=$(adb shell "ip addr show wlan0 2>/dev/null | grep 'inet '" \
+        | awk '{print $2}' | cut -d/ -f1 | tr -d '\r')
+    if [[ -z "$PHONE_IP" ]]; then
+        PHONE_IP=$(adb shell ip addr \
+            | grep 'inet ' \
+            | grep -v '127\.' \
+            | grep -v '169\.254\.' \
+            | grep -v '10\.' \
+            | awk '{print $2}' \
+            | cut -d/ -f1 \
+            | head -1 \
+            | tr -d '\r')
+    fi
 
     if [[ -z "$PHONE_IP" ]]; then
         echo "ERROR: could not determine phone's IP address." >&2
