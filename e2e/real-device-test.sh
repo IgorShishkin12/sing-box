@@ -27,6 +27,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINS_CACHE="$SCRIPT_DIR/android-bins"
 SERVER_RETICULUM_PORT=7788
 SINGBOX_STARTUP_WAIT=5
+LOG_DIR="$SCRIPT_DIR/logs/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$LOG_DIR"
+echo "Logs → $LOG_DIR"
 
 # Prefer podman; fall back to docker
 if command -v podman &>/dev/null; then
@@ -163,18 +166,19 @@ SERVER_CONFIG="$(mktemp /tmp/sb-real-device-server-XXXXXX.json)"
 sed "s|\"storage_path\":.*|\"storage_path\": \"$RETICULUM_STORAGE\",|" \
     "$SCRIPT_DIR/configs/server.json" > "$SERVER_CONFIG"
 
-"$SUMSERVER_BIN" &
+"$SUMSERVER_BIN" 2>&1 | tee "$LOG_DIR/pc-sumserver.log" &
 SUMSERVER_PID=$!
 
-"$SINGBOX_BIN" run -c "$SERVER_CONFIG" &
+"$SINGBOX_BIN" run -c "$SERVER_CONFIG" 2>&1 | tee "$LOG_DIR/pc-singbox.log" &
 SINGBOX_SERVER_PID=$!
 
 cleanup() {
     echo "=== Cleanup ==="
-    adb shell pkill -f 'sing-box' 2>/dev/null || true
-    kill "$SINGBOX_SERVER_PID" "$SUMSERVER_PID" 2>/dev/null || true
+    adb shell pkill -f '/data/local/tmp/sing-box' 2>/dev/null || true
+    kill "$SINGBOX_SERVER_PID" "$SINGBOX_ANDROID_PID" "$SUMSERVER_PID" 2>/dev/null || true
     rm -f "$SERVER_CONFIG"
     rm -rf "$RETICULUM_STORAGE"
+    echo "Logs saved in $LOG_DIR"
 }
 trap cleanup EXIT
 
@@ -188,7 +192,6 @@ cat > "$CLIENT_CONFIG" <<EOF
 {
   "log": {
     "level": "info",
-    "output": "/dev/stdout",
     "timestamp": true
   },
   "inbounds": [
@@ -237,13 +240,15 @@ adb shell mkdir -p /data/local/tmp/reticulum
 rm -f "$CLIENT_CONFIG"
 
 # ---------------------------------------------------------------------------
-# 7. Start sing-box on phone (background)
+# 7. Start sing-box on phone — stream output to PC in real-time
 # ---------------------------------------------------------------------------
 echo "=== Starting sing-box on phone ==="
-adb shell \
-    "nohup /data/local/tmp/sing-box run \
-        -c /data/local/tmp/sing-box-config.json \
-        >/data/local/tmp/singbox.log 2>&1 &"
+# Run sing-box in the foreground inside adb shell; the background adb process
+# on the PC side pipes stdout/stderr here and into the log file live.
+adb shell "/data/local/tmp/sing-box run -c /data/local/tmp/sing-box-config.json" \
+    2>&1 | tee "$LOG_DIR/android-singbox.log" &
+SINGBOX_ANDROID_PID=$!
+
 echo "Waiting ${SINGBOX_STARTUP_WAIT}s for sing-box to initialise..."
 sleep $SINGBOX_STARTUP_WAIT
 
@@ -252,20 +257,11 @@ sleep $SINGBOX_STARTUP_WAIT
 # ---------------------------------------------------------------------------
 echo "=== Running e2e-loadtest on phone ==="
 LOADTEST_RESULT=0
-adb shell \
-    "/data/local/tmp/e2e-loadtest \
-        --socks 127.0.0.1:1080 \
-        --url http://127.0.0.1:8080" || LOADTEST_RESULT=$?
+adb shell "/data/local/tmp/e2e-loadtest --socks 127.0.0.1:1080 --url http://127.0.0.1:8080" \
+    2>&1 | tee "$LOG_DIR/android-loadtest.log" || LOADTEST_RESULT=$?
 
 # ---------------------------------------------------------------------------
-# 9. Collect logs
-# ---------------------------------------------------------------------------
-echo ""
-echo "=== sing-box log from phone ==="
-adb shell cat /data/local/tmp/singbox.log 2>/dev/null || true
-
-# ---------------------------------------------------------------------------
-# 10. Report
+# 9. Report
 # ---------------------------------------------------------------------------
 echo ""
 if [[ $LOADTEST_RESULT -eq 0 ]]; then
