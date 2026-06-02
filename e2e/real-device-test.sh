@@ -4,8 +4,10 @@
 # Prerequisites:
 #   - adb is in PATH and exactly one real device is connected
 #     (USB or: adb connect <phone-ip>:5555 before running this script)
-#   - sing-box binary is in PATH (built with with_reticulum tag)
-#   - sum-server binary is in PATH (go build ./e2e/sumserver/)
+#   - sing-box binary: looked up in order:
+#       $SINGBOX_BIN env var → PATH → ../sing-box (make build_with_bridge output)
+#   - sum-server binary: looked up in order:
+#       $SUMSERVER_BIN env var → PATH → sumserver/sum-server (go build output)
 #
 # The script auto-discovers the PC's IP that is reachable from the phone.
 # Override with: SERVER_IP=192.168.x.y ./real-device-test.sh
@@ -49,12 +51,35 @@ if [[ "$REAL_DEVICES" -gt 1 ]]; then
     exit 1
 fi
 
-if ! command -v sing-box &>/dev/null; then
-    echo "ERROR: sing-box not found in PATH (build with: make build_with_bridge)" >&2; exit 1
+# Locate sing-box: PATH, then the parent directory (where `make build_with_bridge` drops it)
+SINGBOX_BIN="${SINGBOX_BIN:-}"
+if [[ -z "$SINGBOX_BIN" ]]; then
+    if command -v sing-box &>/dev/null; then
+        SINGBOX_BIN="$(command -v sing-box)"
+    elif [[ -x "$SCRIPT_DIR/../sing-box" ]]; then
+        SINGBOX_BIN="$(cd "$SCRIPT_DIR/.." && pwd)/sing-box"
+    else
+        echo "ERROR: sing-box not found. Build with 'make build_with_bridge' in sing-box/" >&2
+        echo "  or set SINGBOX_BIN=/path/to/sing-box" >&2
+        exit 1
+    fi
 fi
-if ! command -v sum-server &>/dev/null; then
-    echo "ERROR: sum-server not found in PATH (build with: go build ./e2e/sumserver/)" >&2; exit 1
+echo "sing-box: $SINGBOX_BIN"
+
+# Locate sum-server: PATH, then the sumserver build directory
+SUMSERVER_BIN="${SUMSERVER_BIN:-}"
+if [[ -z "$SUMSERVER_BIN" ]]; then
+    if command -v sum-server &>/dev/null; then
+        SUMSERVER_BIN="$(command -v sum-server)"
+    elif [[ -x "$SCRIPT_DIR/sumserver/sum-server" ]]; then
+        SUMSERVER_BIN="$SCRIPT_DIR/sumserver/sum-server"
+    else
+        echo "ERROR: sum-server not found. Build with 'go build -o e2e/sumserver/sum-server ./e2e/sumserver/' in sing-box/" >&2
+        echo "  or set SUMSERVER_BIN=/path/to/sum-server" >&2
+        exit 1
+    fi
 fi
+echo "sum-server: $SUMSERVER_BIN"
 
 # ---------------------------------------------------------------------------
 # 2. Auto-discover SERVER_IP
@@ -120,11 +145,11 @@ echo "=== Starting PC-side server ==="
 RETICULUM_STORAGE="$(mktemp -d)"
 SERVER_CONFIG="$SCRIPT_DIR/configs/server.json"
 
-sum-server &
+"$SUMSERVER_BIN" &
 SUMSERVER_PID=$!
 
 RETICULUM_STORAGE="$RETICULUM_STORAGE" \
-sing-box run -c "$SERVER_CONFIG" &
+"$SINGBOX_BIN" run -c "$SERVER_CONFIG" &
 SINGBOX_SERVER_PID=$!
 
 cleanup() {
