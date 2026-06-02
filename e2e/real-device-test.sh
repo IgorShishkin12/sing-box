@@ -184,10 +184,11 @@ SERVER_CONFIG="$(mktemp /tmp/sb-real-device-server-XXXXXX.json)"
 sed "s|\"storage_path\":.*|\"storage_path\": \"$RETICULUM_STORAGE\",|" \
     "$SCRIPT_DIR/configs/server.json" > "$SERVER_CONFIG"
 
-ADDR=0.0.0.0 "$SUMSERVER_BIN" 2>&1 | tee "$LOG_DIR/pc-sumserver.log" &
+# Process substitution keeps $! as the binary's PID, not tee's.
+ADDR=0.0.0.0 "$SUMSERVER_BIN" > >(tee "$LOG_DIR/pc-sumserver.log") 2>&1 &
 SUMSERVER_PID=$!
 
-"$SINGBOX_BIN" run -c "$SERVER_CONFIG" 2>&1 | tee "$LOG_DIR/pc-singbox.log" &
+"$SINGBOX_BIN" run -c "$SERVER_CONFIG" > >(tee "$LOG_DIR/pc-singbox.log") 2>&1 &
 SINGBOX_SERVER_PID=$!
 SINGBOX_ANDROID_PID=""  # set later; initialised here so cleanup is always safe
 
