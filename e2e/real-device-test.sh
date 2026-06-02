@@ -12,7 +12,7 @@
 # The script auto-discovers the PC's IP that is reachable from the phone.
 # Override with: SERVER_IP=192.168.x.y ./real-device-test.sh
 #
-# Arm64 Android binaries are built on first run via Docker and cached in
+# Arm64 Android binaries are built on first run via Podman (or Docker) and cached in
 # e2e/android-bins-arm64/. Subsequent runs reuse the cache.
 #
 # Future (Phase 2 APK): replace the "push binaries" section below with:
@@ -27,6 +27,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINS_CACHE="$SCRIPT_DIR/android-bins-arm64"
 SERVER_RETICULUM_PORT=7788
 SINGBOX_STARTUP_WAIT=5
+
+# Prefer podman; fall back to docker
+if command -v podman &>/dev/null; then
+    CONTAINER_CMD="podman"
+elif command -v docker &>/dev/null; then
+    CONTAINER_CMD="docker"
+else
+    CONTAINER_CMD=""
+fi
 
 # ---------------------------------------------------------------------------
 # 1. Prerequisite checks
@@ -123,9 +132,14 @@ echo "Server IP (PC): $SERVER_IP"
 # 3. Build arm64 Android binaries if not already cached
 # ---------------------------------------------------------------------------
 if [[ ! -f "$BINS_CACHE/sing-box" || ! -f "$BINS_CACHE/e2e-loadtest" ]]; then
-    echo "=== Building arm64 Android binaries via Docker (cached after first run) ==="
+    if [[ -z "$CONTAINER_CMD" ]]; then
+        echo "ERROR: arm64 binaries not found and neither podman nor docker is available." >&2
+        echo "  Pre-build them or install podman/docker." >&2
+        exit 1
+    fi
+    echo "=== Building arm64 Android binaries via $CONTAINER_CMD (cached after first run) ==="
     mkdir -p "$BINS_CACHE"
-    docker build \
+    "$CONTAINER_CMD" build \
         --build-arg GOARCH=arm64 \
         --build-arg RUST_TARGET=aarch64-linux-android \
         --build-arg NDK_CC=aarch64-linux-android34-clang \
