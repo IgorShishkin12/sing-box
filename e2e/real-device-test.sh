@@ -166,7 +166,7 @@ SERVER_CONFIG="$(mktemp /tmp/sb-real-device-server-XXXXXX.json)"
 sed "s|\"storage_path\":.*|\"storage_path\": \"$RETICULUM_STORAGE\",|" \
     "$SCRIPT_DIR/configs/server.json" > "$SERVER_CONFIG"
 
-"$SUMSERVER_BIN" 2>&1 | tee "$LOG_DIR/pc-sumserver.log" &
+ADDR=0.0.0.0 "$SUMSERVER_BIN" 2>&1 | tee "$LOG_DIR/pc-sumserver.log" &
 SUMSERVER_PID=$!
 
 "$SINGBOX_BIN" run -c "$SERVER_CONFIG" 2>&1 | tee "$LOG_DIR/pc-singbox.log" &
@@ -183,6 +183,28 @@ cleanup() {
 trap cleanup EXIT
 
 sleep 2  # let server initialise
+
+# ---------------------------------------------------------------------------
+# Pre-check: verify phone can reach sum-server directly (no sing-box)
+# sum-server is bound on 0.0.0.0:8080 so the phone can POST to it directly.
+# ---------------------------------------------------------------------------
+echo "=== Pre-check: phone → sum-server ($SERVER_IP:8080) without sing-box ==="
+PRECHECK_RESPONSE=$(adb shell \
+    "printf 'POST /sum HTTP/1.0\r\nHost: $SERVER_IP:8080\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"a\":3,\"b\":5}\r\n' \
+     | nc -w 5 $SERVER_IP 8080 2>/dev/null" \
+    | tr -d '\r')
+
+if echo "$PRECHECK_RESPONSE" | grep -q '"sum":8'; then
+    echo "Pre-check OK: phone can reach sum-server at $SERVER_IP:8080"
+else
+    echo "ERROR: pre-check failed — phone cannot reach sum-server at $SERVER_IP:8080" >&2
+    echo "  Response: ${PRECHECK_RESPONSE:-(empty)}" >&2
+    echo "  Check:" >&2
+    echo "    - SERVER_IP=$SERVER_IP is reachable from the phone" >&2
+    echo "    - No firewall blocks port 8080 on the PC" >&2
+    echo "    - Phone and PC are on the same network" >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 5. Generate client config with discovered SERVER_IP
