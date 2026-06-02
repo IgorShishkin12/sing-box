@@ -93,6 +93,16 @@ if [[ -z "$SUMSERVER_BIN" ]]; then
 fi
 echo "sum-server: $SUMSERVER_BIN"
 
+# Check that required ports are free
+for PORT in 8080 7788; do
+    if ss -tlnp 2>/dev/null | grep -q ":$PORT " || \
+       netstat -tlnp 2>/dev/null | grep -q ":$PORT "; then
+        echo "ERROR: port $PORT is already in use (leftover from a previous run?)." >&2
+        echo "  Find and kill the process: lsof -i :$PORT" >&2
+        exit 1
+    fi
+done
+
 # ---------------------------------------------------------------------------
 # 2. Auto-discover SERVER_IP
 #    Get the phone's LAN IP → ask the PC's routing table which src IP it would
@@ -201,7 +211,7 @@ echo "=== Pre-check: phone → sum-server ($SERVER_IP:8080) without sing-box ===
 PRECHECK_RESPONSE=$(adb shell \
     "printf 'POST /sum HTTP/1.0\r\nHost: $SERVER_IP:8080\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"a\":3,\"b\":5}\r\n' \
      | nc -w 5 $SERVER_IP 8080 2>/dev/null" \
-    | tr -d '\r')
+    | tr -d '\r') || true
 
 if echo "$PRECHECK_RESPONSE" | grep -q '"sum":8'; then
     echo "Pre-check OK: phone can reach sum-server at $SERVER_IP:8080"
