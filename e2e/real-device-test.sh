@@ -101,11 +101,11 @@ echo "sum-server: $SUMSERVER_BIN"
 if [[ -z "${SERVER_IP:-}" ]]; then
     echo "=== Discovering network addresses ==="
 
-    # Phone's LAN IP: look for inet address on a non-loopback wifi/eth interface
+    # Phone's LAN IP: first non-loopback, non-link-local inet address on the phone
     PHONE_IP=$(adb shell ip addr \
         | grep 'inet ' \
         | grep -v '127\.' \
-        | grep -v '::' \
+        | grep -v '169\.254\.' \
         | awk '{print $2}' \
         | cut -d/ -f1 \
         | head -1 \
@@ -118,9 +118,12 @@ if [[ -z "${SERVER_IP:-}" ]]; then
     fi
     echo "Phone IP: $PHONE_IP"
 
-    # PC's IP on the same subnet as the phone
+    # PC's LAN IP: the source address the kernel would use to reach the phone,
+    # but excluding Docker/bridge virtual interfaces (172.x or dev docker*/br-*).
     SERVER_IP=$(ip route get "$PHONE_IP" \
+        | grep -v ' dev \(docker\|br-\)' \
         | grep -oP 'src \K[\d.]+' \
+        | grep -v '^172\.' \
         | head -1)
 
     if [[ -z "$SERVER_IP" ]]; then
@@ -171,11 +174,12 @@ SUMSERVER_PID=$!
 
 "$SINGBOX_BIN" run -c "$SERVER_CONFIG" 2>&1 | tee "$LOG_DIR/pc-singbox.log" &
 SINGBOX_SERVER_PID=$!
+SINGBOX_ANDROID_PID=""  # set later; initialised here so cleanup is always safe
 
 cleanup() {
     echo "=== Cleanup ==="
     adb shell pkill -f '/data/local/tmp/sing-box' 2>/dev/null || true
-    kill "$SINGBOX_SERVER_PID" "$SINGBOX_ANDROID_PID" "$SUMSERVER_PID" 2>/dev/null || true
+    kill "$SINGBOX_SERVER_PID" ${SINGBOX_ANDROID_PID:+"$SINGBOX_ANDROID_PID"} "$SUMSERVER_PID" 2>/dev/null || true
     rm -f "$SERVER_CONFIG"
     rm -rf "$RETICULUM_STORAGE"
     echo "Logs saved in $LOG_DIR"
