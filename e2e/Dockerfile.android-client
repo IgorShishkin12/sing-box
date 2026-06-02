@@ -1,5 +1,26 @@
-# Stage 1: build sing-box and e2e-loadtest for Android x86_64
+# Stage 1: build sing-box and e2e-loadtest for Android.
+#
+# Build args (override for arm64 real-device builds):
+#   GOARCH        — go target arch  (default: amd64 for x86_64 emulator)
+#   RUST_TARGET   — Rust target triple
+#   NDK_CC        — NDK clang wrapper for Go CGO and loadtest linking
+#
+# Example arm64 invocation:
+#   docker build \
+#     --build-arg GOARCH=arm64 \
+#     --build-arg RUST_TARGET=aarch64-linux-android \
+#     --build-arg NDK_CC=aarch64-linux-android34-clang \
+#     --target android-builder \
+#     --output type=local,dest=./android-bins-arm64 \
+#     -f e2e/Dockerfile.android-client .
+ARG GOARCH=amd64
+ARG RUST_TARGET=x86_64-linux-android
+ARG NDK_CC=x86_64-linux-android34-clang
+
 FROM golang:1.24 AS android-builder
+ARG GOARCH
+ARG RUST_TARGET
+ARG NDK_CC
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl unzip build-essential ca-certificates && \
@@ -16,11 +37,11 @@ RUN curl -fsSL -o /tmp/ndk.zip \
     rm /tmp/ndk.zip
 ENV PATH=$PATH:$TOOLCHAIN
 
-# Rust + Android x86_64 target
+# Rust + Android target (arch-parametric)
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
         sh -s -- -y --default-toolchain stable --no-modify-path
 ENV PATH=$PATH:/root/.cargo/bin
-RUN rustup target add x86_64-linux-android
+RUN rustup target add $RUST_TARGET
 
 WORKDIR /workspace/sing-box
 COPY go.mod go.sum ./
@@ -38,29 +59,30 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/tmp/cargo-target \
     cd bridge && \
     CARGO_TARGET_DIR=/tmp/cargo-target \
-    cargo build --release --target x86_64-linux-android && \
-    mkdir -p target/x86_64-linux-android/release && \
-    cp /tmp/cargo-target/x86_64-linux-android/release/libsing_box_reticulum_bridge.a \
-        target/x86_64-linux-android/release/
+    cargo build --release --target $RUST_TARGET && \
+    mkdir -p target/$RUST_TARGET/release && \
+    cp /tmp/cargo-target/$RUST_TARGET/release/libsing_box_reticulum_bridge.a \
+        target/$RUST_TARGET/release/
 
-# sing-box for Android x86_64
-# CGO directive in bridge_stub_reticulum.go:11 picks up the .a above automatically.
+# sing-box for Android (arch-parametric).
+# CGO directive in bridge_stub_reticulum.go picks up the .a above automatically
+# based on GOOS=android + GOARCH.
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     export TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS) && \
-    GOOS=android GOARCH=amd64 CGO_ENABLED=1 \
-    CC=$TOOLCHAIN/x86_64-linux-android34-clang \
+    GOOS=android GOARCH=$GOARCH CGO_ENABLED=1 \
+    CC=$TOOLCHAIN/$NDK_CC \
     go build -trimpath -tags "$TAGS,with_reticulum" \
         -o /android-bins/sing-box \
         ./cmd/sing-box/
 
-# loadtest for Android x86_64.
+# loadtest for Android (arch-parametric).
 # Android always requires external (cgo) linking even for pure-Go binaries
 # because the runtime links against Android's libc via the NDK clang.
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    GOOS=android GOARCH=amd64 CGO_ENABLED=1 \
-    CC=$TOOLCHAIN/x86_64-linux-android34-clang \
+    GOOS=android GOARCH=$GOARCH CGO_ENABLED=1 \
+    CC=$TOOLCHAIN/$NDK_CC \
     go build -o /android-bins/e2e-loadtest ./e2e/loadtest/
 
 # ---------------------------------------------------------------------------
