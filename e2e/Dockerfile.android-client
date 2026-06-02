@@ -129,3 +129,12 @@ COPY e2e/android-entrypoint.sh /android-entrypoint.sh
 RUN chmod +x /android-entrypoint.sh
 
 ENTRYPOINT ["/android-entrypoint.sh"]
+
+# ---------------------------------------------------------------------------
+# Minimal export stage — used by real-device-test.sh to extract just the two
+# arm64 binaries without the rest of the builder filesystem:
+#   podman build --target export --output type=local,dest=./android-bins-arm64 ...
+# ---------------------------------------------------------------------------
+FROM scratch AS export
+COPY --from=android-builder /android-bins/sing-box      /android-bins/sing-box
+COPY --from=android-builder /android-bins/e2e-loadtest  /android-bins/e2e-loadtest

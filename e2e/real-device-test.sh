@@ -24,7 +24,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BINS_CACHE="$SCRIPT_DIR/android-bins-arm64"
+BINS_CACHE="$SCRIPT_DIR/android-bins"
 SERVER_RETICULUM_PORT=7788
 SINGBOX_STARTUP_WAIT=5
 
@@ -143,8 +143,8 @@ if [[ ! -f "$BINS_CACHE/sing-box" || ! -f "$BINS_CACHE/e2e-loadtest" ]]; then
         --build-arg GOARCH=arm64 \
         --build-arg RUST_TARGET=aarch64-linux-android \
         --build-arg NDK_CC=aarch64-linux-android34-clang \
-        --target android-builder \
-        --output "type=local,dest=$BINS_CACHE" \
+        --target export \
+        --output "type=local,dest=$SCRIPT_DIR" \
         -f "$SCRIPT_DIR/Dockerfile.android-client" \
         "$(dirname "$SCRIPT_DIR")"
     echo "Binaries cached in $BINS_CACHE"
@@ -157,12 +157,15 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== Starting PC-side server ==="
 RETICULUM_STORAGE="$(mktemp -d)"
-SERVER_CONFIG="$SCRIPT_DIR/configs/server.json"
+
+# Patch storage_path in the server config to a writable temp dir
+SERVER_CONFIG="$(mktemp /tmp/sb-real-device-server-XXXXXX.json)"
+sed "s|\"storage_path\":.*|\"storage_path\": \"$RETICULUM_STORAGE\",|" \
+    "$SCRIPT_DIR/configs/server.json" > "$SERVER_CONFIG"
 
 "$SUMSERVER_BIN" &
 SUMSERVER_PID=$!
 
-RETICULUM_STORAGE="$RETICULUM_STORAGE" \
 "$SINGBOX_BIN" run -c "$SERVER_CONFIG" &
 SINGBOX_SERVER_PID=$!
 
@@ -170,6 +173,7 @@ cleanup() {
     echo "=== Cleanup ==="
     adb shell pkill -f 'sing-box' 2>/dev/null || true
     kill "$SINGBOX_SERVER_PID" "$SUMSERVER_PID" 2>/dev/null || true
+    rm -f "$SERVER_CONFIG"
     rm -rf "$RETICULUM_STORAGE"
 }
 trap cleanup EXIT

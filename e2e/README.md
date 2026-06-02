@@ -21,7 +21,7 @@ cd sing-box/e2e
 | `docker-compose.udp.yml` | Concurrent load, UDP interface | `configs/server-udp.json`, `configs/client-udp.json` |
 | `docker-compose.auto.yml` | Concurrent load, AutoInterface (link-local discovery) | `configs/server-auto.json`, `configs/client-auto.json` |
 | `docker-compose.android-tcp.yml` | Android x86_64 emulator as client, TCP interface | `Dockerfile.android-client`, `android-entrypoint.sh` |
-| `real-device-test.sh` | Real arm64 Android phone over LAN ADB, TCP interface | `android-bins-arm64/` (built on first run) |
+| `real-device-test.sh` | Real arm64 Android phone over LAN ADB, TCP interface | `android-bins/` (built on first run) |
 
 ## Android tests
 
@@ -62,7 +62,7 @@ adb devices                   # confirm one real device
 SERVER_IP=192.168.1.42 ./real-device-test.sh
 ```
 
-Arm64 binaries are cached in `android-bins-arm64/` after the first build.
+Arm64 binaries are cached in `android-bins/` after the first build.
 
 ## Key support files
 
