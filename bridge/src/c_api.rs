@@ -146,6 +146,13 @@ pub extern "C" fn reticulum_shutdown() {
     }
     crate::transport::clear_transport();
     runtime::shutdown();
+    // Zero all callback pointers last, after tasks are aborted and the runtime
+    // is dropped, so no surviving task can invoke a dangling function pointer.
+    ON_ACCEPT.store(0, Ordering::SeqCst);
+    ON_CONNECT.store(0, Ordering::SeqCst);
+    ON_DATA.store(0, Ordering::SeqCst);
+    ON_CLOSE.store(0, Ordering::SeqCst);
+    ON_LOG.store(0, Ordering::SeqCst);
 }
 
 // ---------------------------------------------------------------------------
