@@ -39,22 +39,27 @@ fn test_init_shutdown_init() {
 fn test_transport_reinit_creates_new_identity() {
     init();
     let h1 = reticulum_get_transport_hash();
-    assert!(!h1.is_null(), "transport hash must be non-null after first init");
+    assert!(
+        !h1.is_null(),
+        "transport hash must be non-null after first init"
+    );
 
     reticulum_shutdown();
     init();
 
     let h2 = reticulum_get_transport_hash();
-    assert!(!h2.is_null(), "transport hash must be non-null after second init");
+    assert!(
+        !h2.is_null(),
+        "transport hash must be non-null after second init"
+    );
 
     let s1 = unsafe { std::ffi::CStr::from_ptr(h1).to_str().unwrap().to_string() };
     let s2 = unsafe { std::ffi::CStr::from_ptr(h2).to_str().unwrap().to_string() };
     assert_ne!(s1, s2, "ephemeral identity must differ across reinit");
 
-    unsafe {
-        reticulum_free(h1 as *mut u8);
-        reticulum_free(h2 as *mut u8);
-    }
+    reticulum_free(h1 as *mut u8);
+    reticulum_free(h2 as *mut u8);
+
     reticulum_shutdown();
 }
 
@@ -81,7 +86,11 @@ fn test_callbacks_cleared_after_shutdown() {
     // If the callback were still set it would fire; since it's cleared it must not.
     reticulum_close(9999);
     std::thread::sleep(std::time::Duration::from_millis(20));
-    assert_eq!(FIRED.load(Ordering::SeqCst), 0, "on_close must not fire after shutdown");
+    assert_eq!(
+        FIRED.load(Ordering::SeqCst),
+        0,
+        "on_close must not fire after shutdown"
+    );
 }
 
 /// Test that dial after shutdown is a silent no-op: callbacks are cleared on
@@ -107,5 +116,8 @@ fn test_dial_after_shutdown_is_noop() {
     unsafe { reticulum_dial(9001, dest.as_ptr()) };
     std::thread::sleep(std::time::Duration::from_millis(20));
 
-    assert!(!FIRED.load(Ordering::SeqCst), "on_connect must not fire after shutdown");
+    assert!(
+        !FIRED.load(Ordering::SeqCst),
+        "on_connect must not fire after shutdown"
+    );
 }

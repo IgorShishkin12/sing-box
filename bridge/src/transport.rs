@@ -90,7 +90,9 @@ pub fn get_transport_identity() -> Option<Arc<PrivateIdentity>> {
 pub fn clear_transport() {
     *transport_store().lock().unwrap_or_else(|p| p.into_inner()) = None;
     *identity_store().lock().unwrap_or_else(|p| p.into_inner()) = None;
-    *identity_hash_store().lock().unwrap_or_else(|p| p.into_inner()) = None;
+    *identity_hash_store()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = None;
     log::info!("transport singletons cleared");
 }
 
@@ -426,7 +428,9 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
         *guard = Some(Arc::new(Mutex::new(transport)));
     }
     *identity_store().lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(identity));
-    *identity_hash_store().lock().unwrap_or_else(|p| p.into_inner()) = Some(identity_hash);
+    *identity_hash_store()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = Some(identity_hash);
     Ok(())
 }
 

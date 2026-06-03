@@ -10,7 +10,7 @@ extern "C" fn on_resolve(task_id: u64, hash: *const std::os::raw::c_char) {
     RESOLVE_TASK.store(task_id, Ordering::SeqCst);
     RESOLVE_NULL.store(hash.is_null(), Ordering::SeqCst);
     if !hash.is_null() {
-        unsafe { reticulum_free(hash as *mut u8) };
+        reticulum_free(hash as *mut u8);
     }
     RESOLVE_FIRED.store(true, Ordering::SeqCst);
 }
@@ -24,12 +24,14 @@ fn reset() {
 fn wait_resolve(task_id: u64, max_ms: u64) {
     let start = std::time::Instant::now();
     loop {
-        if RESOLVE_FIRED.load(Ordering::SeqCst) && RESOLVE_TASK.load(Ordering::SeqCst) == task_id
-        {
+        if RESOLVE_FIRED.load(Ordering::SeqCst) && RESOLVE_TASK.load(Ordering::SeqCst) == task_id {
             return;
         }
         if start.elapsed().as_millis() as u64 >= max_ms {
-            panic!("on_resolve did not fire for task {} within {}ms", task_id, max_ms);
+            panic!(
+                "on_resolve did not fire for task {} within {}ms",
+                task_id, max_ms
+            );
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
@@ -43,7 +45,10 @@ fn test_resolve_null_name_fires_null() {
     reticulum_set_resolve_callback(Some(on_resolve));
     unsafe { reticulum_resolve_name(42, std::ptr::null()) };
     wait_resolve(42, 500);
-    assert!(RESOLVE_NULL.load(Ordering::SeqCst), "null name must resolve to null");
+    assert!(
+        RESOLVE_NULL.load(Ordering::SeqCst),
+        "null name must resolve to null"
+    );
     // No runtime was started — no shutdown needed.
 }
 
@@ -59,7 +64,10 @@ fn test_resolve_empty_name_fires_null() {
     let empty = std::ffi::CString::new("").unwrap();
     unsafe { reticulum_resolve_name(43, empty.as_ptr()) };
     wait_resolve(43, 500);
-    assert!(RESOLVE_NULL.load(Ordering::SeqCst), "empty name must resolve to null");
+    assert!(
+        RESOLVE_NULL.load(Ordering::SeqCst),
+        "empty name must resolve to null"
+    );
 
     reticulum_shutdown();
 }

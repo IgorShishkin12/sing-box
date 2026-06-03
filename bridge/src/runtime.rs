@@ -24,9 +24,7 @@ pub fn register_task(handle: JoinHandle<()>) {
 
 /// Abort and drain all registered task handles.
 fn abort_all_tasks() {
-    let mut handles = get_task_handles()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
+    let mut handles = get_task_handles().lock().unwrap_or_else(|p| p.into_inner());
     log::debug!("aborting {} registered task(s)", handles.len());
     for handle in handles.drain(..) {
         handle.abort();
