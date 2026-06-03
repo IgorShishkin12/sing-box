@@ -278,6 +278,10 @@ adb push "$BINS_CACHE/sing-box"          /data/local/tmp/sing-box
 adb push "$BINS_CACHE/e2e-loadtest"      /data/local/tmp/e2e-loadtest
 adb push "$CLIENT_CONFIG"                /data/local/tmp/sing-box-config.json
 adb shell chmod +x /data/local/tmp/sing-box /data/local/tmp/e2e-loadtest
+# Wipe stale Reticulum state — the server gets a fresh identity every run
+# (new temp dir = new key = new destination hash), so any cached
+# name→hash mapping on the phone would point to the wrong destination.
+adb shell rm -rf /data/local/tmp/reticulum
 adb shell mkdir -p /data/local/tmp/reticulum
 rm -f "$CLIENT_CONFIG"
 

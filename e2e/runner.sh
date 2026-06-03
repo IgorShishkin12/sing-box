@@ -41,6 +41,7 @@ run_test docker-compose.tcp.yml  e2e-client
 run_test docker-compose.udp.yml  e2e-client
 run_test docker-compose.auto.yml e2e-client
 run_test docker-compose.android-tcp.yml e2e-android-client
+run_test docker-compose.internet-proxy.yml e2e-client
 
 echo ""
 echo "=== ALL E2E TESTS PASSED ==="
