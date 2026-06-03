@@ -103,6 +103,32 @@ func TestOutboundStartWithConfigPath(t *testing.T) {
 	}
 }
 
+// TestOutboundConnectEager_WithDest verifies that connectEager with a pre-resolved hash
+// reaches BridgeDial (stub failure), proving the session establishment path is entered.
+func TestOutboundConnectEager_WithDest(t *testing.T) {
+	hash := "aabbccdd00112233445566778899aabb"
+	o := newTestOutbound(t, option.ReticulumOutboundOptions{
+		Destination: hash,
+		AuthOnStart: true,
+	})
+	o.resolvedHash = hash
+
+	err := o.connectEager(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "connect on start")
+}
+
+// TestOutboundConnectEager_WithName verifies that connectEager resolves the name before
+// dialling when no hash is pre-resolved (stub BridgeResolveName returns an error).
+func TestOutboundConnectEager_WithName(t *testing.T) {
+	o := newTestOutbound(t, option.ReticulumOutboundOptions{Name: "my-server", AuthOnStart: true})
+
+	err := o.connectEager(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "on start")
+	require.Contains(t, err.Error(), "my-server")
+}
+
 // TestOutboundStartRequiresDestOrName_JSONRoundtrip ensures the JSON config key
 // "destination" maps to the right field (regression: was previously treated as a
 // name rather than a hex hash, confusing resolution logic).

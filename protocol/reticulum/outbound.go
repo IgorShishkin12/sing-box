@@ -71,6 +71,31 @@ func (h *Outbound) Start(stage adapter.StartStage) error {
 	}
 	h.bridgeInited = true
 	h.logger.Info("reticulum outbound: bridge initialized")
+
+	if h.options.AuthOnStart {
+		if err := h.connectEager(context.Background()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// connectEager resolves the destination (if needed) and establishes the mux session
+// immediately rather than waiting for the first DialContext call.
+// Caller must hold h.mu when h.resolvedHash may be written.
+func (h *Outbound) connectEager(ctx context.Context) error {
+	destHash := h.resolvedHash
+	if destHash == "" {
+		hash, err := BridgeResolveName(h.options.Name)
+		if err != nil {
+			return fmt.Errorf("resolve %q on start: %w", h.options.Name, err)
+		}
+		h.resolvedHash = hash
+		destHash = hash
+	}
+	if _, err := h.getOrCreateSession(ctx, destHash); err != nil {
+		return fmt.Errorf("connect on start: %w", err)
+	}
 	return nil
 }
 
