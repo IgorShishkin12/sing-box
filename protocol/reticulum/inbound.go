@@ -140,7 +140,11 @@ func (h *Inbound) handleConn(connID uint64) {
 			h.logger.Warn("auth: peer identity unavailable (identify exchange may have failed): ", err)
 			peerID = ""
 		}
-		if err := Auth(fc, h.options.Password, ownID, peerID); err != nil {
+		policy := RetryPolicy(h.options.AuthRetry)
+		if policy == "" {
+			policy = RetryNone
+		}
+		if err := AuthWithRetry(fc, h.options.Password, ownID, peerID, policy); err != nil {
 			h.logger.Error("reticulum auth failed: ", err)
 			fc.Close()
 			return

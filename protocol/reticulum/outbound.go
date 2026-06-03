@@ -134,7 +134,11 @@ func (h *Outbound) getOrCreateSession(ctx context.Context, destHash string) (*mu
 			h.logger.WarnContext(ctx, "auth: peer identity unavailable (identify exchange may have failed): ", err)
 			peerID = ""
 		}
-		if err := Auth(fc, h.options.Password, ownID, peerID); err != nil {
+		policy := RetryPolicy(h.options.AuthRetry)
+		if policy == "" {
+			policy = RetryNone
+		}
+		if err := AuthWithRetry(fc, h.options.Password, ownID, peerID, policy); err != nil {
 			fc.Close()
 			return nil, fmt.Errorf("reticulum auth failed: %w", err)
 		}

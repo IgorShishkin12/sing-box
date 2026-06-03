@@ -22,6 +22,30 @@ import (
 
 const authTimeout = 10 * time.Second
 
+// RetryPolicy controls how auth failures are retried on the same connection.
+type RetryPolicy string
+
+const (
+	RetryNone   RetryPolicy = "none"
+	RetryLinear RetryPolicy = "linear"
+	RetryExp    RetryPolicy = "exp"
+)
+
+// retryDelay returns the delay before the next auth attempt for the given policy.
+// attempt is zero-based (0 = delay before the 2nd try, after the 1st failure).
+// Returns (0, false) when the policy does not retry (RetryNone or unknown).
+func retryDelay(policy RetryPolicy, attempt int) (time.Duration, bool) {
+	switch policy {
+	case RetryLinear:
+		return 5 * time.Second, true
+	case RetryExp:
+		// 4s, 8s, 16s, 32s, … (4 << attempt seconds)
+		return time.Duration(4<<attempt) * time.Second, true
+	default:
+		return 0, false
+	}
+}
+
 func generateSalt() ([]byte, error) {
 	salt := make([]byte, 32)
 	_, err := rand.Read(salt)
@@ -37,22 +61,10 @@ func macBound(password, ownID string, peerSalt []byte) []byte {
 	return h.Sum(nil)
 }
 
-// Auth performs symmetric mutual password authentication with identity binding.
-//
-// ownID is this side's identity hash (transport hash or service destination hash).
-// peerID is the peer's identity hash (from BridgeConnPeerHash or the known destination hash).
-//
-// Round 1: both sides concurrently send TypeRequestAuth + 32-byte random salt.
-// Round 2: both sides concurrently send TypeResponseAuth + HMAC-SHA256(password, ownID, peerSalt).
-// Each side verifies the peer's HMAC by recomputing HMAC(password, peerID, ownSalt).
-//
-// Returns nil on success. On failure the caller should close the connection.
-func Auth(rw AuthIO, password, ownID, peerID string) error {
-	ownSalt, err := generateSalt()
-	if err != nil {
-		return fmt.Errorf("generate salt: %w", err)
-	}
-
+// authAttempt performs one 2-round auth exchange using the provided ownSalt.
+// Separating salt generation from the exchange allows callers to reuse the same
+// salt across retry attempts on the same connection.
+func authAttempt(rw AuthIO, password, ownID, peerID string, ownSalt []byte) error {
 	type readResult struct {
 		typeByte byte
 		data     []byte
@@ -106,4 +118,51 @@ func Auth(rw AuthIO, password, ownID, peerID string) error {
 		return fmt.Errorf("authentication failed")
 	}
 	return nil
+}
+
+// Auth performs symmetric mutual password authentication with identity binding.
+//
+// ownID is this side's identity hash (transport hash or service destination hash).
+// peerID is the peer's identity hash (from BridgeConnPeerHash or the known destination hash).
+//
+// Round 1: both sides concurrently send TypeRequestAuth + 32-byte random salt.
+// Round 2: both sides concurrently send TypeResponseAuth + HMAC-SHA256(password, ownID, peerSalt).
+// Each side verifies the peer's HMAC by recomputing HMAC(password, peerID, ownSalt).
+//
+// Returns nil on success. On failure the caller should close the connection.
+func Auth(rw AuthIO, password, ownID, peerID string) error {
+	ownSalt, err := generateSalt()
+	if err != nil {
+		return fmt.Errorf("generate salt: %w", err)
+	}
+	return authAttempt(rw, password, ownID, peerID, ownSalt)
+}
+
+// authWithRetry is the testable core of AuthWithRetry; sleep is injected to allow fast tests.
+// The salt is generated once and reused across all retry attempts so each side's challenge
+// stays stable for the lifetime of the connection — no salt-to-response tracking needed.
+func authWithRetry(rw AuthIO, password, ownID, peerID string, policy RetryPolicy, sleep func(time.Duration)) error {
+	ownSalt, err := generateSalt()
+	if err != nil {
+		return fmt.Errorf("generate salt: %w", err)
+	}
+	for attempt := 0; ; attempt++ {
+		err := authAttempt(rw, password, ownID, peerID, ownSalt)
+		if err == nil {
+			return nil
+		}
+		delay, ok := retryDelay(policy, attempt)
+		if !ok {
+			return err
+		}
+		sleep(delay)
+	}
+}
+
+// AuthWithRetry performs auth with the configured retry policy.
+// policy "none" (or empty) is identical to Auth — one attempt, fail fast.
+// policy "linear" retries every 5 s; policy "exp" retries after 4 s, 8 s, 16 s, …
+// Both sides must use the same policy for retries to succeed on the same connection.
+func AuthWithRetry(rw AuthIO, password, ownID, peerID string, policy RetryPolicy) error {
+	return authWithRetry(rw, password, ownID, peerID, policy, time.Sleep)
 }

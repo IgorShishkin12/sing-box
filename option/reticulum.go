@@ -8,6 +8,7 @@ type ReticulumInboundOptions struct {
 	Destination         string           `json:"destination,omitempty"`
 	Name                string           `json:"name,omitempty"`
 	Password            string           `json:"password,omitempty"`
+	AuthRetry           string           `json:"auth_retry,omitempty"`
 }
 
 type ReticulumConfig struct {
@@ -44,4 +45,5 @@ type ReticulumOutboundOptions struct {
 	Destination         string           `json:"destination,omitempty"`
 	Name                string           `json:"name,omitempty"`
 	Password            string           `json:"password,omitempty"`
+	AuthRetry           string           `json:"auth_retry,omitempty"`
 }
