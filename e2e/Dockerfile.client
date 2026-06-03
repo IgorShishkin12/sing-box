@@ -35,6 +35,10 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     go build -o /usr/local/bin/e2e-loadtest ./e2e/loadtest/
 
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    go build -o /usr/local/bin/e2e-bench ./e2e/bench/
+
 
 FROM alpine:3.20
 
@@ -42,6 +46,7 @@ RUN apk add --no-cache bash curl ca-certificates libgcc libstdc++ coreutils
 
 COPY --from=builder /usr/local/bin/sing-box /usr/local/bin/sing-box
 COPY --from=builder /usr/local/bin/e2e-loadtest /usr/local/bin/e2e-loadtest
+COPY --from=builder /usr/local/bin/e2e-bench /usr/local/bin/e2e-bench
 
 EXPOSE 1080
 
