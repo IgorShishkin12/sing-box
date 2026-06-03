@@ -113,7 +113,7 @@ if [[ -z "${SERVER_IP:-}" ]]; then
 
     # Phone's WiFi IP — prefer wlan0, fall back to any non-loopback non-link-local address
     PHONE_IP=$(adb shell "ip addr show wlan0 2>/dev/null | grep 'inet '" \
-        | awk '{print $2}' | cut -d/ -f1 | tr -d '\r')
+        | awk '{print $2}' | cut -d/ -f1 | tr -d '\r') || true
     if [[ -z "$PHONE_IP" ]]; then
         PHONE_IP=$(adb shell ip addr \
             | grep 'inet ' \
@@ -123,7 +123,7 @@ if [[ -z "${SERVER_IP:-}" ]]; then
             | awk '{print $2}' \
             | cut -d/ -f1 \
             | head -1 \
-            | tr -d '\r')
+            | tr -d '\r') || true
     fi
 
     if [[ -z "$PHONE_IP" ]]; then
@@ -139,7 +139,7 @@ if [[ -z "${SERVER_IP:-}" ]]; then
         | grep -v ' dev \(docker\|br-\)' \
         | grep -oP 'src \K[\d.]+' \
         | grep -v '^172\.' \
-        | head -1)
+        | head -1) || true
 
     if [[ -z "$SERVER_IP" ]]; then
         echo "ERROR: could not determine PC IP reachable from phone." >&2

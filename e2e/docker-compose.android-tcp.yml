@@ -30,6 +30,7 @@ services:
     build:
       context: ..
       dockerfile: e2e/Dockerfile.android-client
+      target: android-client
     devices:
       - /dev/kvm:/dev/kvm
     networks:
