@@ -429,7 +429,7 @@ pub async fn register_listener_destination(
     let store = crate::store::global_store();
     let service_hash = address_hash;
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         loop {
             match link_events.recv().await {
                 Ok(event) => {
@@ -501,6 +501,7 @@ pub async fn register_listener_destination(
             }
         }
     });
+    runtime::register_task(task);
 
     Ok((address_hash, destination))
 }
@@ -693,7 +694,7 @@ pub fn spawn_link_data_reader(
     link_id: AddressHash,
     mut data_rx: broadcast::Receiver<ReceivedData>,
 ) {
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         loop {
             match data_rx.recv().await {
                 Ok(data) => {
@@ -712,6 +713,7 @@ pub fn spawn_link_data_reader(
             }
         }
     });
+    runtime::register_task(handle);
 }
 
 // ---------------------------------------------------------------------------

@@ -169,9 +169,15 @@ pub unsafe extern "C" fn reticulum_dial(task_id: u64, destination_hash: *const c
         }
     };
 
+    if !runtime::has_runtime() {
+        log::warn!("dial: bridge not initialized");
+        call_on_connect(task_id, 0);
+        return;
+    }
+
     let store = global_store();
 
-    runtime::spawn(async move {
+    let dial_handle = runtime::spawn(async move {
         let transport = match crate::transport::get_transport() {
             Some(t) => t,
             None => {
@@ -215,6 +221,7 @@ pub unsafe extern "C" fn reticulum_dial(task_id: u64, destination_hash: *const c
             }
         }
     });
+    runtime::register_task(dial_handle);
 }
 
 /// Listen on a hash. Blocks until the listener is registered.
@@ -267,12 +274,13 @@ pub unsafe extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i64 {
                     let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
                     let dest_clone = service_dest_arc.clone();
                     let name_clone = listen_name.clone();
-                    tokio::spawn(async move {
+                    let ann_handle = tokio::spawn(async move {
                         crate::transport::start_service_announce_loop(
                             dest_clone, name_clone, stop_rx,
                         )
                         .await;
                     });
+                    runtime::register_task(ann_handle);
                 }
                 Ok(handle)
             }

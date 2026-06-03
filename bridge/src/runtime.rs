@@ -2,9 +2,36 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::runtime::{Builder, Runtime};
+use tokio::task::JoinHandle;
 
 static RUNTIME: once_cell::sync::OnceCell<Mutex<Option<Arc<Runtime>>>> =
     once_cell::sync::OnceCell::new();
+
+static TASK_HANDLES: once_cell::sync::OnceCell<Mutex<Vec<JoinHandle<()>>>> =
+    once_cell::sync::OnceCell::new();
+
+fn get_task_handles() -> &'static Mutex<Vec<JoinHandle<()>>> {
+    TASK_HANDLES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Register a task handle so it is aborted when `shutdown()` is called.
+pub fn register_task(handle: JoinHandle<()>) {
+    get_task_handles()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(handle);
+}
+
+/// Abort and drain all registered task handles.
+fn abort_all_tasks() {
+    let mut handles = get_task_handles()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    log::debug!("aborting {} registered task(s)", handles.len());
+    for handle in handles.drain(..) {
+        handle.abort();
+    }
+}
 
 fn get_runtime_lock() -> &'static Mutex<Option<Arc<Runtime>>> {
     RUNTIME.get_or_init(|| Mutex::new(None))
@@ -134,21 +161,73 @@ where
 
 /// Shutdown the bridge runtime.
 ///
-/// Tokio's `current_thread` runtime has thread-local state that cannot be
-/// safely recreated after being dropped — doing so causes SIGSEGV/SIGABRT
-/// on subsequent `Runtime::block_on` calls. Therefore we *do not* drop the
-/// runtime. We simply mark it as "logically shut down" so that `block_on`
-/// knows to re-init (which is a no-op since the runtime still exists).
+/// Aborts all registered background tasks, then drops the Tokio runtime.
+/// After this call, `has_runtime()` returns `false` and `init_runtime()` can
+/// be used to start a fresh runtime.
 ///
-/// The store and registry are cleared by the caller (reticulum_shutdown).
+/// The store is cleared by the caller (`reticulum_shutdown`) before this is
+/// called.
 pub fn shutdown() {
     log::debug!("shutdown called");
-    // Keep the runtime alive — don't drop it.
-    // The Mutex will always hold Some(Arc<Runtime>) after first init.
-    let guard = lock_runtime();
+    abort_all_tasks();
+    let mut guard = lock_runtime();
     if guard.is_some() {
-        log::debug!("Runtime shut down (logical)");
+        *guard = None;
+        log::info!("Runtime shut down");
     } else {
         log::warn!("Runtime was not initialized, nothing to shut down");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shutdown_clears_runtime() {
+        init_runtime().unwrap();
+        assert!(has_runtime());
+        shutdown();
+        assert!(!has_runtime(), "shutdown must clear the runtime");
+        // Leave runtime initialized for subsequent tests.
+        init_runtime().unwrap();
+    }
+
+    #[test]
+    fn test_reinit_after_shutdown() {
+        init_runtime().unwrap();
+        shutdown();
+        assert!(!has_runtime());
+        init_runtime().unwrap();
+        assert!(has_runtime());
+        let v = block_on(async { 7u64 });
+        assert_eq!(v, 7);
+        shutdown();
+        // Leave initialized.
+        init_runtime().unwrap();
+    }
+
+    #[test]
+    fn test_register_task_aborted_on_shutdown() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        init_runtime().unwrap();
+
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran2 = ran.clone();
+        let handle = spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            ran2.store(true, Ordering::SeqCst);
+        });
+        register_task(handle);
+        shutdown();
+
+        // The long-running task was aborted; the flag was never set.
+        assert!(!ran.load(Ordering::SeqCst));
+        assert!(!has_runtime());
+        // Leave initialized.
+        init_runtime().unwrap();
     }
 }
