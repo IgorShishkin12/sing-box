@@ -11,11 +11,12 @@ package reticulum
 #cgo android,amd64 LDFLAGS: ${SRCDIR}/../../bridge/target/x86_64-linux-android/release/libsing_box_reticulum_bridge.a -lm
 #include "reticulum_bridge.h"
 #include <stdlib.h>
-extern void goOnLog    (uint8_t level,      char*     target,    char*     message);
-extern void goOnAccept (uint64_t listener_id, uint64_t conn_id, char*     peer_hash);
-extern void goOnConnect(uint64_t task_id,     uint64_t conn_id);
-extern void goOnData   (uint64_t conn_id,     uint8_t* data,    size_t    len);
+extern void goOnLog    (uint8_t level,        char*       target,    char*  message);
+extern void goOnAccept (uint64_t listener_id, uint64_t   conn_id,   char*  peer_hash);
+extern void goOnConnect(uint64_t task_id,     uint64_t   conn_id);
+extern void goOnData   (uint64_t conn_id,     uint8_t*   data,      size_t len);
 extern void goOnClose  (uint64_t conn_id);
+extern void goOnResolve(uint64_t task_id,     char*       hash);
 */
 import "C"
 import (
@@ -120,6 +121,18 @@ func goOnClose(connID C.uint64_t) {
 	}
 }
 
+//export goOnResolve
+func goOnResolve(taskID C.uint64_t, hash *C.char) {
+	var result string
+	if hash != nil {
+		result = C.GoString(hash)
+		C.reticulum_free(unsafe.Pointer(hash))
+	}
+	if ch, ok := pendingResolves.LoadAndDelete(uint64(taskID)); ok {
+		ch.(chan string) <- result
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Bridge API
 // ---------------------------------------------------------------------------
@@ -145,7 +158,9 @@ func BridgeInit(configJSON string) error {
 		)
 		if ret != 0 {
 			bridgeInitErr = ErrBridgeInitFailed
+			return
 		}
+		C.reticulum_set_resolve_callback(C.reticulum_on_resolve_fn(C.goOnResolve))
 	})
 	return bridgeInitErr
 }
@@ -232,15 +247,26 @@ func BridgeRegisterName(name string, hash string) error {
 func BridgeShutdown() { C.reticulum_shutdown() }
 
 // BridgeResolveName resolves a human-readable name to an address hash.
+// The Go-level call blocks until Rust fires on_resolve (success or timeout).
+// Internally this is callback-based so the calling goroutine blocks on a channel
+// rather than tying up a Rust thread for up to 69 s.
 func BridgeResolveName(name string) (string, error) {
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
-	hashStr := C.reticulum_resolve_name(cname)
-	if hashStr == nil {
+
+	nextDialMu.Lock()
+	nextDialTaskSeq++
+	taskID := nextDialTaskSeq
+	nextDialMu.Unlock()
+
+	resultCh := make(chan string, 1)
+	pendingResolves.Store(taskID, resultCh)
+	C.reticulum_resolve_name(C.uint64_t(taskID), cname)
+	hash := <-resultCh
+	if hash == "" {
 		return "", ErrBridgeResolveNameFailed
 	}
-	defer C.reticulum_free(unsafe.Pointer(hashStr))
-	return C.GoString(hashStr), nil
+	return hash, nil
 }
 
 // BridgeConnIdentifiedPeer returns the verified persistent identity hash of the remote peer.
@@ -273,5 +299,8 @@ func BridgeTransportHash() (string, error) {
 	return C.GoString(hashStr), nil
 }
 
-// nextDialMu protects nextDialTaskSeq.
+// nextDialMu protects nextDialTaskSeq (shared by dial and resolve task IDs).
 var nextDialMu sync.Mutex
+
+// pendingResolves maps task_id → chan string for in-flight BridgeResolveName calls.
+var pendingResolves sync.Map
