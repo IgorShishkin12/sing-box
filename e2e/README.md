@@ -21,7 +21,56 @@ cd sing-box/e2e
 | `docker-compose.udp.yml` | Concurrent load, UDP interface | `configs/server-udp.json`, `configs/client-udp.json` |
 | `docker-compose.auto.yml` | Concurrent load, AutoInterface (link-local discovery) | `configs/server-auto.json`, `configs/client-auto.json` |
 | `docker-compose.android-tcp.yml` | Android x86_64 emulator as client, TCP interface | `Dockerfile.android-client`, `android-entrypoint.sh` |
+| `docker-compose.internet-proxy.yml` | Internet proxy isolation: client routes HTTP via SOCKS5 through Reticulum to the real internet | `configs/server.json`, `configs/client.json` |
 | `real-device-test.sh` | Real arm64 Android phone over LAN ADB, TCP interface | `android-bins/` (built on first run) |
+
+## Pass / fail conditions
+
+Each scenario documents its expected happy path, known protocol limits that are *supposed*
+to fail, and known bugs where the test fails when it shouldn't.
+
+### `simple-tcp`
+
+**Passes:** always — baseline single connection; if this fails everything else is broken.
+
+### `length-test`
+
+**Passes:** current payload (512 × `1` in the `terms` array).
+
+**Expected to fail (protocol limit, not a bug):** payloads large enough to require more
+than 64 fragments. The fragment encoding in `mux.go` uses a 6-bit `partIndex` field
+(max value 63) with a 1-bit `isLast` flag, so the hard limit is 64 fragments per
+message. Exceeding it raises an explicit "too many fragments" error. Raising the limit
+requires a protocol-breaking change to the frame format.
+
+### `tcp` / `udp` / `auto`
+
+**Passes:** all 20 requests (5 goroutines × 4 each) succeed. These are the primary
+regression tests for concurrent correctness and interface-specific behaviour.
+
+### `android-tcp`
+
+**Passes:** when `/dev/kvm` is available on the Docker host (required for KVM
+acceleration). Emulator boot takes ~1 minute; the image build is slow the first time
+but cached on subsequent runs.
+
+### `internet-proxy`
+
+**Passes:** fetching a small HTTP response through the SOCKS5 proxy, e.g. `example.com`
+(~1 KB, plain `Example Domain` page).
+
+**Bug — fails when it shouldn't:** fetching `www.google.com` fails. Google's homepage is
+substantially larger (full HTML with inline resources), so the response arrives in
+multiple TCP segments and requires multi-packet stream reassembly. The failure does *not*
+produce a "too many fragments" error, which distinguishes it from the length-test limit —
+the fragment count is not the bottleneck. The likely cause is a bug in stream reassembly
+or proxy buffering when a proxied HTTP response spans many Reticulum packets. Needs
+investigation.
+
+### `real-device-test.sh`
+
+**Passes:** when a real arm64 Android device is connected via ADB and reachable over LAN.
+Not included in `runner.sh`; run manually.
 
 ## Android tests
 
