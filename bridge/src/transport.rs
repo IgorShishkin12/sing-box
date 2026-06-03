@@ -8,7 +8,7 @@
 
 use once_cell::sync::OnceCell;
 use std::io::{Read, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::sync::{broadcast, watch};
@@ -40,28 +40,58 @@ const DIAL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Interval between service re-announces.
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Global Transport singleton.
-static TRANSPORT: OnceCell<Arc<Mutex<Transport>>> = OnceCell::new();
+// ---------------------------------------------------------------------------
+// Transport singletons (resettable for shutdown/reinit support)
+// ---------------------------------------------------------------------------
 
-/// Full transport-level identity, set once during `init_transport`.
-static TRANSPORT_IDENTITY: OnceCell<Arc<PrivateIdentity>> = OnceCell::new();
+static TRANSPORT: OnceCell<StdMutex<Option<Arc<Mutex<Transport>>>>> = OnceCell::new();
+static TRANSPORT_IDENTITY: OnceCell<StdMutex<Option<Arc<PrivateIdentity>>>> = OnceCell::new();
+static TRANSPORT_IDENTITY_HASH: OnceCell<StdMutex<Option<AddressHash>>> = OnceCell::new();
 
-/// Address hash of the transport-level identity, set once during `init_transport`.
-static TRANSPORT_IDENTITY_HASH: OnceCell<AddressHash> = OnceCell::new();
+fn transport_store() -> &'static StdMutex<Option<Arc<Mutex<Transport>>>> {
+    TRANSPORT.get_or_init(|| StdMutex::new(None))
+}
 
-/// Get a reference to the global Transport, if initialized.
-pub fn get_transport() -> Option<&'static Arc<Mutex<Transport>>> {
-    TRANSPORT.get()
+fn identity_store() -> &'static StdMutex<Option<Arc<PrivateIdentity>>> {
+    TRANSPORT_IDENTITY.get_or_init(|| StdMutex::new(None))
+}
+
+fn identity_hash_store() -> &'static StdMutex<Option<AddressHash>> {
+    TRANSPORT_IDENTITY_HASH.get_or_init(|| StdMutex::new(None))
+}
+
+/// Get a clone of the global Transport Arc, if initialized.
+pub fn get_transport() -> Option<Arc<Mutex<Transport>>> {
+    transport_store()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
 }
 
 /// Returns the hex-encoded transport identity address hash, or `None` before init.
 pub fn get_transport_identity_hash() -> Option<String> {
-    TRANSPORT_IDENTITY_HASH.get().map(|h| h.to_hex_string())
+    identity_hash_store()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map(|h| h.to_hex_string())
 }
 
-/// Returns a reference to the full transport-level private identity, or `None` before init.
-pub fn get_transport_identity() -> Option<&'static Arc<PrivateIdentity>> {
-    TRANSPORT_IDENTITY.get()
+/// Returns a clone of the transport-level private identity Arc, or `None` before init.
+pub fn get_transport_identity() -> Option<Arc<PrivateIdentity>> {
+    identity_store()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
+/// Clear all transport singletons so the next `init_transport` call starts fresh.
+/// Called by `reticulum_shutdown`.
+pub fn clear_transport() {
+    *transport_store().lock().unwrap_or_else(|p| p.into_inner()) = None;
+    *identity_store().lock().unwrap_or_else(|p| p.into_inner()) = None;
+    *identity_hash_store().lock().unwrap_or_else(|p| p.into_inner()) = None;
+    log::info!("transport singletons cleared");
 }
 
 // ---------------------------------------------------------------------------
@@ -320,9 +350,13 @@ async fn spawn_interfaces(
 // ---------------------------------------------------------------------------
 
 /// Initialize the global Transport singleton with the given config.
-/// Must be called once during `reticulum_init`.
+/// Safe to call after `clear_transport()` — will re-initialize cleanly.
 pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
-    if TRANSPORT.get().is_some() {
+    if transport_store()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .is_some()
+    {
         log::debug!("Transport already initialized");
         return Ok(());
     }
@@ -352,7 +386,7 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
             hex::encode(id.verifying_key_bytes()),
         );
     }
-    let _ = TRANSPORT_IDENTITY_HASH.set(*identity.address_hash());
+    let identity_hash = *identity.address_hash();
 
     // 3. Build ratchet store path
     let ratchet_store = Some(std::path::PathBuf::from(&cfg_dir).join("ratchet_store.db"));
@@ -365,7 +399,7 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
         tp_config.set_ratchet_store_path(rstore.clone());
     }
 
-    // 5. Create Transport and spawn interfaces
+    // 5. Create Transport and spawn interfaces (no transport lock held during block_on)
     let interfaces = cfg.interfaces.clone();
     log::debug!("about to block_on for Transport::new");
     let transport = runtime::block_on(async move {
@@ -382,8 +416,17 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
     });
     log::info!("Transport initialized successfully");
 
-    let _ = TRANSPORT.set(Arc::new(Mutex::new(transport)));
-    let _ = TRANSPORT_IDENTITY.set(Arc::new(identity));
+    // 6. Store — re-check under lock to handle concurrent init races
+    {
+        let mut guard = transport_store().lock().unwrap_or_else(|p| p.into_inner());
+        if guard.is_some() {
+            log::debug!("Transport initialized concurrently, discarding duplicate");
+            return Ok(());
+        }
+        *guard = Some(Arc::new(Mutex::new(transport)));
+    }
+    *identity_store().lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(identity));
+    *identity_hash_store().lock().unwrap_or_else(|p| p.into_inner()) = Some(identity_hash);
     Ok(())
 }
 
@@ -622,7 +665,7 @@ pub async fn exchange_identify_on_link(
     );
 
     // Send our identify packet using PacketContext::LinkIdentify (0xFB).
-    let payload = build_link_identify_payload(transport_id, &link_id);
+    let payload = build_link_identify_payload(&transport_id, &link_id);
     let (packet, iface) = {
         let guard = link.lock().await;
         let pkt = match guard.identify_packet(&payload) {

@@ -32,6 +32,32 @@ fn test_init_shutdown_init() {
     reticulum_shutdown();
 }
 
+/// Test that transport identity hash is available after re-init, and is different
+/// each time (ephemeral identity — no identity_name/key in "{}").
+#[test]
+#[serial]
+fn test_transport_reinit_creates_new_identity() {
+    init();
+    let h1 = reticulum_get_transport_hash();
+    assert!(!h1.is_null(), "transport hash must be non-null after first init");
+
+    reticulum_shutdown();
+    init();
+
+    let h2 = reticulum_get_transport_hash();
+    assert!(!h2.is_null(), "transport hash must be non-null after second init");
+
+    let s1 = unsafe { std::ffi::CStr::from_ptr(h1).to_str().unwrap().to_string() };
+    let s2 = unsafe { std::ffi::CStr::from_ptr(h2).to_str().unwrap().to_string() };
+    assert_ne!(s1, s2, "ephemeral identity must differ across reinit");
+
+    unsafe {
+        reticulum_free(h1 as *mut u8);
+        reticulum_free(h2 as *mut u8);
+    }
+    reticulum_shutdown();
+}
+
 /// Test that dial after shutdown fires on_connect with conn_id=0.
 #[test]
 #[serial]

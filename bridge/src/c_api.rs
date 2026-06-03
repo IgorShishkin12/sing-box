@@ -144,6 +144,7 @@ pub extern "C" fn reticulum_shutdown() {
             store.clear_all().await;
         });
     }
+    crate::transport::clear_transport();
     runtime::shutdown();
 }
 
