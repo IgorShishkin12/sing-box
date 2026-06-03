@@ -17,6 +17,7 @@ extern void goOnConnect(uint64_t task_id,     uint64_t   conn_id);
 extern void goOnData   (uint64_t conn_id,     uint8_t*   data,      size_t len);
 extern void goOnClose  (uint64_t conn_id);
 extern void goOnResolve(uint64_t task_id,     char*       hash);
+extern void goOnWrite  (uint64_t task_id,     int32_t    bytes);
 */
 import "C"
 import (
@@ -133,6 +134,13 @@ func goOnResolve(taskID C.uint64_t, hash *C.char) {
 	}
 }
 
+//export goOnWrite
+func goOnWrite(taskID C.uint64_t, bytes C.int32_t) {
+	if ch, ok := pendingWrites.LoadAndDelete(uint64(taskID)); ok {
+		ch.(chan int) <- int(bytes)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Bridge API
 // ---------------------------------------------------------------------------
@@ -161,6 +169,7 @@ func BridgeInit(configJSON string) error {
 			return
 		}
 		C.reticulum_set_resolve_callback(C.reticulum_on_resolve_fn(C.goOnResolve))
+		C.reticulum_set_write_callback(C.reticulum_on_write_fn(C.goOnWrite))
 	})
 	return bridgeInitErr
 }
@@ -209,13 +218,21 @@ func BridgeClose(handle uint64) {
 	C.reticulum_close(C.uint64_t(handle))
 }
 
-// BridgeWrite writes data to a connection.
+// BridgeWrite writes data to a connection. Non-blocking at the Rust level;
+// this goroutine blocks on a channel until on_write fires.
 func BridgeWrite(connHandle uint64, data []byte) int {
 	if len(data) == 0 {
 		return 0
 	}
-	n := C.reticulum_write(C.uint64_t(connHandle), (*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data)))
-	return int(n)
+	nextDialMu.Lock()
+	nextDialTaskSeq++
+	taskID := nextDialTaskSeq
+	nextDialMu.Unlock()
+
+	resultCh := make(chan int, 1)
+	pendingWrites.Store(taskID, resultCh)
+	C.reticulum_write(C.uint64_t(taskID), C.uint64_t(connHandle), (*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data)))
+	return <-resultCh
 }
 
 // BridgeGetHash gets the destination hash for a registered name.
@@ -304,3 +321,6 @@ var nextDialMu sync.Mutex
 
 // pendingResolves maps task_id → chan string for in-flight BridgeResolveName calls.
 var pendingResolves sync.Map
+
+// pendingWrites maps task_id → chan int for in-flight BridgeWrite calls.
+var pendingWrites sync.Map

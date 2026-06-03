@@ -26,6 +26,8 @@ typedef void (*reticulum_on_close_fn)  (uint64_t conn_id);
  * non-NULL it is malloc'd — caller must free with reticulum_free.
  */
 typedef void (*reticulum_on_resolve_fn)(uint64_t task_id, const char* hash);
+/* Fires when reticulum_write completes. bytes is the number of bytes written, or -1 on error. */
+typedef void (*reticulum_on_write_fn)(uint64_t task_id, int32_t bytes);
 
 /* Log callback type: (level, target, message) */
 typedef void (*reticulum_log_fn)(uint8_t, const char*, const char*);
@@ -40,6 +42,12 @@ void reticulum_set_log_callback(reticulum_log_fn on_log);
  * Must be set before calling reticulum_resolve_name.
  */
 void reticulum_set_resolve_callback(reticulum_on_resolve_fn on_resolve);
+
+/*
+ * Register the write-completion callback.
+ * Must be set before calling reticulum_write.
+ */
+void reticulum_set_write_callback(reticulum_on_write_fn on_write);
 
 /*
  * Initialize the bridge.
@@ -82,10 +90,10 @@ int64_t reticulum_listen(const char* listen_hash);
 void reticulum_close(uint64_t handle);
 
 /*
- * Write data to a connection.
- * Returns number of bytes written, or -1 on error.
+ * Write data to a connection. Non-blocking.
+ * Fires on_write(task_id, bytes) when done; bytes is -1 on error.
  */
-int reticulum_write(uint64_t conn_handle, const uint8_t* data, size_t len);
+void reticulum_write(uint64_t task_id, uint64_t conn_handle, const uint8_t* data, size_t len);
 
 /*
  * Get the destination hash of a listener as a hex string.

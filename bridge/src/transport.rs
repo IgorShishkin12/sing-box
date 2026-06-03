@@ -836,6 +836,10 @@ pub async fn dial_and_wait(
             _ => {}
         }
 
+        // TODO: replace sleep+try_recv with tokio::select! { link_events.recv() ... } so
+        // activation is event-driven instead of polled every 100 ms. Blocked on confirming
+        // that the transport library emits a Closed/Failed LinkEvent (needed to avoid
+        // hanging until DIAL_TIMEOUT on silent link failure).
         tokio::time::sleep(DIAL_POLL_INTERVAL).await;
         match link_events.try_recv() {
             Ok(event) => {
