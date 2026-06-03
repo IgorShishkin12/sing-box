@@ -22,7 +22,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
-      start_period: 30s
 
   e2e-client:
     image: retv2e2e-client:latest
@@ -34,8 +33,8 @@ services:
     command: >
       -c "
         ip route del default 2>/dev/null || true &&
-        sing-box run -c /etc/sing-box/config.json &
-        sleep 20 &&
+        sing-box run -c /etc/sing-box/config.json | tee /tmp/singbox.log 2>&1 &
+        until grep -q 'sing-box started' /tmp/singbox.log 2>/dev/null; do sleep 0.2; done &&
         echo 'Verifying client has no direct internet access...' &&
         ! curl -sf --max-time 5 http://example.com > /dev/null 2>&1 &&
         echo 'Confirmed: direct internet access is blocked' &&
