@@ -46,4 +46,5 @@ type ReticulumOutboundOptions struct {
 	Name                string           `json:"name,omitempty"`
 	Password            string           `json:"password,omitempty"`
 	AuthRetry           string           `json:"auth_retry,omitempty"`
+	AuthOnStart         bool             `json:"auth_on_start,omitempty"`
 }
