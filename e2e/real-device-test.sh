@@ -233,7 +233,7 @@ CLIENT_CONFIG=$(mktemp /tmp/sb-real-device-client-XXXXXX.json)
 cat > "$CLIENT_CONFIG" <<EOF
 {
   "log": {
-    "level": "info",
+    "level": "debug",
     "timestamp": true
   },
   "inbounds": [
@@ -250,6 +250,8 @@ cat > "$CLIENT_CONFIG" <<EOF
       "tag": "reticulum-out",
       "name": "e2e-sum-server",
       "password": "e2e-test-password",
+      "auth_retry": "exp",
+      "auth_on_start": true,
       "reticulum_config": {
         "identity_name": "e2e-real-device-client",
         "storage_path": "/data/local/tmp/reticulum",
