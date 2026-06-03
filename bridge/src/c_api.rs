@@ -19,6 +19,7 @@ pub(crate) static ON_CONNECT: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static ON_DATA: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static ON_CLOSE: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static ON_RESOLVE: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static ON_WRITE: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) fn call_on_accept(listener_id: u64, conn_id: u64, peer_hash: &str) {
     let f_ptr = ON_ACCEPT.load(Ordering::Relaxed);
@@ -59,6 +60,14 @@ pub(crate) fn call_on_resolve(task_id: u64, hash: Option<String>) {
         let f: extern "C" fn(u64, *const c_char) = unsafe { std::mem::transmute(f_ptr) };
         let ptr = alloc_c_string(hash);
         f(task_id, ptr);
+    }
+}
+
+pub(crate) fn call_on_write(task_id: u64, bytes: i32) {
+    let f_ptr = ON_WRITE.load(Ordering::Relaxed);
+    if f_ptr != 0 {
+        let f: extern "C" fn(u64, i32) = unsafe { std::mem::transmute(f_ptr) };
+        f(task_id, bytes);
     }
 }
 
@@ -158,6 +167,16 @@ pub extern "C" fn reticulum_set_resolve_callback(
     }
 }
 
+/// Register the write-completion callback.
+/// Called from Rust with `(task_id, bytes)` when `reticulum_write` completes.
+/// `bytes` is the number of bytes written, or -1 on error.
+#[no_mangle]
+pub extern "C" fn reticulum_set_write_callback(on_write: Option<extern "C" fn(u64, i32)>) {
+    if let Some(f) = on_write {
+        ON_WRITE.store(f as usize, Ordering::Relaxed);
+    }
+}
+
 /// Shutdown the bridge and release resources.
 #[no_mangle]
 pub extern "C" fn reticulum_shutdown() {
@@ -176,6 +195,7 @@ pub extern "C" fn reticulum_shutdown() {
     ON_DATA.store(0, Ordering::SeqCst);
     ON_CLOSE.store(0, Ordering::SeqCst);
     ON_RESOLVE.store(0, Ordering::SeqCst);
+    ON_WRITE.store(0, Ordering::SeqCst);
     ON_LOG.store(0, Ordering::SeqCst);
 }
 
@@ -336,20 +356,29 @@ pub unsafe extern "C" fn reticulum_listen(listen_hash: *const c_char) -> i64 {
 // Connection I/O
 // ---------------------------------------------------------------------------
 
-/// Write data to a connection. Returns bytes written or -1 on error.
+/// Write data to a connection. Non-blocking.
+/// Fires `on_write(task_id, bytes)` when done; `bytes` is -1 on error.
 ///
 /// # Safety
-/// `data` must be a valid pointer to at least `len` initialized bytes.
+/// `data` must be a valid pointer to at least `len` initialized bytes for the
+/// duration of this call. The buffer is copied before the function returns.
 #[no_mangle]
-pub unsafe extern "C" fn reticulum_write(conn_handle: u64, data: *const u8, len: usize) -> i32 {
+pub unsafe extern "C" fn reticulum_write(
+    task_id: u64,
+    conn_handle: u64,
+    data: *const u8,
+    len: usize,
+) {
     if data.is_null() || len == 0 {
-        return -1;
+        call_on_write(task_id, -1);
+        return;
     }
+    // Copy before returning — the caller's buffer may be freed immediately after.
+    let data_vec = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
     let store = global_store();
-    let data_slice = unsafe { std::slice::from_raw_parts(data, len) };
-    runtime::block_on(async move {
-        match store.get_connection(conn_handle).await {
-            Some(conn) => match conn.write(data_slice).await {
+    runtime::spawn(async move {
+        let result = match store.get_connection(conn_handle).await {
+            Some(conn) => match conn.write(&data_vec).await {
                 Ok(n) => n as i32,
                 Err(e) => {
                     log::warn!("write on handle {}: {}", conn_handle, e);
@@ -360,19 +389,20 @@ pub unsafe extern "C" fn reticulum_write(conn_handle: u64, data: *const u8, len:
                 log::warn!("write: invalid conn handle={}", conn_handle);
                 -1
             }
-        }
-    })
+        };
+        call_on_write(task_id, result);
+    });
 }
 
-/// Close a connection or listener handle.
-///
-/// # Safety
-/// `buffer` must be a valid pointer to a writable buffer of at least `max_len` bytes.
+/// Close a connection or listener handle. Fire-and-forget.
 #[no_mangle]
 pub extern "C" fn reticulum_close(handle: u64) {
     log::debug!("close handle={}", handle);
+    if !runtime::has_runtime() {
+        return;
+    }
     let store = global_store();
-    runtime::block_on(async move {
+    runtime::spawn(async move {
         store.remove(handle).await;
     });
 }

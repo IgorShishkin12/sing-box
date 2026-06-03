@@ -90,7 +90,9 @@ pub fn get_transport_identity() -> Option<Arc<PrivateIdentity>> {
 pub fn clear_transport() {
     *transport_store().lock().unwrap_or_else(|p| p.into_inner()) = None;
     *identity_store().lock().unwrap_or_else(|p| p.into_inner()) = None;
-    *identity_hash_store().lock().unwrap_or_else(|p| p.into_inner()) = None;
+    *identity_hash_store()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = None;
     log::info!("transport singletons cleared");
 }
 
@@ -426,7 +428,9 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
         *guard = Some(Arc::new(Mutex::new(transport)));
     }
     *identity_store().lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(identity));
-    *identity_hash_store().lock().unwrap_or_else(|p| p.into_inner()) = Some(identity_hash);
+    *identity_hash_store()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = Some(identity_hash);
     Ok(())
 }
 
@@ -832,6 +836,10 @@ pub async fn dial_and_wait(
             _ => {}
         }
 
+        // TODO: replace sleep+try_recv with tokio::select! { link_events.recv() ... } so
+        // activation is event-driven instead of polled every 100 ms. Blocked on confirming
+        // that the transport library emits a Closed/Failed LinkEvent (needed to avoid
+        // hanging until DIAL_TIMEOUT on silent link failure).
         tokio::time::sleep(DIAL_POLL_INTERVAL).await;
         match link_events.try_recv() {
             Ok(event) => {
