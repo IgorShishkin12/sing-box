@@ -18,6 +18,7 @@ pub(crate) static ON_ACCEPT: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static ON_CONNECT: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static ON_DATA: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static ON_CLOSE: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static ON_RESOLVE: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) fn call_on_accept(listener_id: u64, conn_id: u64, peer_hash: &str) {
     let f_ptr = ON_ACCEPT.load(Ordering::Relaxed);
@@ -49,6 +50,15 @@ pub(crate) fn call_on_close(conn_id: u64) {
     if f_ptr != 0 {
         let f: extern "C" fn(u64) = unsafe { std::mem::transmute(f_ptr) };
         f(conn_id);
+    }
+}
+
+pub(crate) fn call_on_resolve(task_id: u64, hash: Option<String>) {
+    let f_ptr = ON_RESOLVE.load(Ordering::Relaxed);
+    if f_ptr != 0 {
+        let f: extern "C" fn(u64, *const c_char) = unsafe { std::mem::transmute(f_ptr) };
+        let ptr = alloc_c_string(hash);
+        f(task_id, ptr);
     }
 }
 
@@ -135,6 +145,19 @@ pub extern "C" fn reticulum_set_log_callback(
     }
 }
 
+/// Register the name-resolution callback.
+/// Called from Rust with `(task_id, hash_ptr)` when `reticulum_resolve_name` completes.
+/// `hash_ptr` is NULL on timeout; when non-NULL it is malloc'd and must be freed
+/// with `reticulum_free`.
+#[no_mangle]
+pub extern "C" fn reticulum_set_resolve_callback(
+    on_resolve: Option<extern "C" fn(u64, *const c_char)>,
+) {
+    if let Some(f) = on_resolve {
+        ON_RESOLVE.store(f as usize, Ordering::Relaxed);
+    }
+}
+
 /// Shutdown the bridge and release resources.
 #[no_mangle]
 pub extern "C" fn reticulum_shutdown() {
@@ -152,6 +175,7 @@ pub extern "C" fn reticulum_shutdown() {
     ON_CONNECT.store(0, Ordering::SeqCst);
     ON_DATA.store(0, Ordering::SeqCst);
     ON_CLOSE.store(0, Ordering::SeqCst);
+    ON_RESOLVE.store(0, Ordering::SeqCst);
     ON_LOG.store(0, Ordering::SeqCst);
 }
 
@@ -466,26 +490,39 @@ pub unsafe extern "C" fn get_hash(hash: *mut *mut c_char, name: *const c_char) -
     }
 }
 
-/// Resolve a service name to its address hash via network announcements.
-/// Caller must free the returned string with reticulum_free. Returns NULL on timeout.
+/// Resolve a service name to its address hash via network announcements. Non-blocking.
+/// Fires `on_resolve(task_id, hash_ptr)` when done.
+/// `hash_ptr` is NULL on timeout; when non-NULL it is malloc'd — free with `reticulum_free`.
+/// Retries up to 3× with exponential backoff (3 s → 6 s → 12 s), 15 s per attempt.
+///
 /// # Safety
-/// `name` must be a valid, non-null, null-terminated C string.
+/// `name` must be a valid, null-terminated C string or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn reticulum_resolve_name(task_id: u64, name: *const c_char) {
     if name.is_null() {
-        return std::ptr::null_mut();
+        call_on_resolve(task_id, None);
+        return;
     }
     let name_str = match unsafe { CStr::from_ptr(name) }.to_str() {
         Ok(s) if !s.is_empty() => s.to_string(),
-        _ => return std::ptr::null_mut(),
+        _ => {
+            call_on_resolve(task_id, None);
+            return;
+        }
     };
+
+    if !runtime::has_runtime() {
+        log::warn!("resolve_name: bridge not initialized");
+        call_on_resolve(task_id, None);
+        return;
+    }
 
     use std::time::Duration;
     const ANNOUNCE_WAIT: Duration = Duration::from_secs(15);
     const MAX_ATTEMPTS: u32 = 3;
     const INITIAL_BACKOFF: Duration = Duration::from_secs(3);
 
-    let hash_opt = runtime::block_on(async move {
+    let handle = runtime::spawn(async move {
         let mut backoff = INITIAL_BACKOFF;
         for attempt in 0u32..MAX_ATTEMPTS {
             if attempt > 0 {
@@ -503,7 +540,8 @@ pub unsafe extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_c
                 crate::transport::wait_for_service_announce(&name_str, ANNOUNCE_WAIT).await
             {
                 log::info!("resolved '{}' → {}", name_str, hash);
-                return Some(hash);
+                call_on_resolve(task_id, Some(hash));
+                return;
             }
         }
         log::warn!(
@@ -511,10 +549,9 @@ pub unsafe extern "C" fn reticulum_resolve_name(name: *const c_char) -> *mut c_c
             name_str,
             MAX_ATTEMPTS
         );
-        None
+        call_on_resolve(task_id, None);
     });
-
-    alloc_c_string(hash_opt)
+    runtime::register_task(handle);
 }
 
 // ---------------------------------------------------------------------------
