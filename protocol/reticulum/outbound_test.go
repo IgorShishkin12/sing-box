@@ -35,9 +35,11 @@ func TestOutboundStartRequiresDestOrName(t *testing.T) {
 func TestOutboundStartSetsResolvedHashFromDestination(t *testing.T) {
 	hash := "aabbccdd00112233445566778899aabb"
 	o := newTestOutbound(t, option.ReticulumOutboundOptions{Destination: hash})
-	// Start will fail at BridgeInit (stub returns ErrBridgeNotAvailable),
-	// but resolvedHash must be populated before that.
+	// resolvedHash is set before BridgeInit is called, so it is populated even if
+	// Start returns an error. With -tags with_reticulum BridgeInit actually succeeds,
+	// so register cleanup to avoid leaving the bridge running for subsequent tests.
 	_ = o.Start(adapter.StartStateInitialize)
+	t.Cleanup(BridgeShutdown)
 	o.mu.Lock()
 	got := o.resolvedHash
 	o.mu.Unlock()
@@ -97,10 +99,37 @@ func TestOutboundStartWithConfigPath(t *testing.T) {
 		Name:                "test-config-path",
 	})
 	err := o.Start(adapter.StartStateInitialize)
-	// Fails at BridgeInit (stub) but NOT at validation — Name is set.
+	t.Cleanup(BridgeShutdown) // with_reticulum: BridgeInit may succeed; avoid leaking bridge state
+	// With stub, Start fails at BridgeInit but NOT at validation — Name is set.
 	if err != nil {
 		require.NotContains(t, err.Error(), "destination or name must be set")
 	}
+}
+
+// TestOutboundConnectEager_WithDest verifies that connectEager with a pre-resolved hash
+// reaches BridgeDial (stub failure), proving the session establishment path is entered.
+func TestOutboundConnectEager_WithDest(t *testing.T) {
+	hash := "aabbccdd00112233445566778899aabb"
+	o := newTestOutbound(t, option.ReticulumOutboundOptions{
+		Destination: hash,
+		AuthOnStart: true,
+	})
+	o.resolvedHash = hash
+
+	err := o.connectEager(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "connect on start")
+}
+
+// TestOutboundConnectEager_WithName verifies that connectEager resolves the name before
+// dialling when no hash is pre-resolved (stub BridgeResolveName returns an error).
+func TestOutboundConnectEager_WithName(t *testing.T) {
+	o := newTestOutbound(t, option.ReticulumOutboundOptions{Name: "my-server", AuthOnStart: true})
+
+	err := o.connectEager(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "on start")
+	require.Contains(t, err.Error(), "my-server")
 }
 
 // TestOutboundStartRequiresDestOrName_JSONRoundtrip ensures the JSON config key

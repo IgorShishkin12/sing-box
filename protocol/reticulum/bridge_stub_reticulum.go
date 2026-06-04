@@ -11,11 +11,13 @@ package reticulum
 #cgo android,amd64 LDFLAGS: ${SRCDIR}/../../bridge/target/x86_64-linux-android/release/libsing_box_reticulum_bridge.a
 #include "reticulum_bridge.h"
 #include <stdlib.h>
-extern void goOnLog    (uint8_t level,      char*     target,    char*     message);
-extern void goOnAccept (uint64_t listener_id, uint64_t conn_id, char*     peer_hash);
-extern void goOnConnect(uint64_t task_id,     uint64_t conn_id);
-extern void goOnData   (uint64_t conn_id,     uint8_t* data,    size_t    len);
+extern void goOnLog    (uint8_t level,        char*       target,    char*  message);
+extern void goOnAccept (uint64_t listener_id, uint64_t   conn_id,   char*  peer_hash);
+extern void goOnConnect(uint64_t task_id,     uint64_t   conn_id);
+extern void goOnData   (uint64_t conn_id,     uint8_t*   data,      size_t len);
 extern void goOnClose  (uint64_t conn_id);
+extern void goOnResolve(uint64_t task_id,     char*       hash);
+extern void goOnWrite  (uint64_t task_id,     int32_t    bytes);
 */
 import "C"
 import (
@@ -26,8 +28,8 @@ import (
 )
 
 var (
-	bridgeInitOnce sync.Once
-	bridgeInitErr  error
+	bridgeStateMu     sync.Mutex
+	bridgeInitialized bool
 )
 
 var bridgeLoggerVal interface {
@@ -120,6 +122,25 @@ func goOnClose(connID C.uint64_t) {
 	}
 }
 
+//export goOnResolve
+func goOnResolve(taskID C.uint64_t, hash *C.char) {
+	var result string
+	if hash != nil {
+		result = C.GoString(hash)
+		C.reticulum_free(unsafe.Pointer(hash))
+	}
+	if ch, ok := pendingResolves.LoadAndDelete(uint64(taskID)); ok {
+		ch.(chan string) <- result
+	}
+}
+
+//export goOnWrite
+func goOnWrite(taskID C.uint64_t, bytes C.int32_t) {
+	if ch, ok := pendingWrites.LoadAndDelete(uint64(taskID)); ok {
+		ch.(chan int) <- int(bytes)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Bridge API
 // ---------------------------------------------------------------------------
@@ -131,28 +152,40 @@ func BridgeSetLogger(logger log.ContextLogger) {
 	C.reticulum_set_log_callback(C.reticulum_log_fn(C.goOnLog))
 }
 
-// BridgeInit initializes the Rust bridge. Only the first call crosses CGO.
+// BridgeInit initializes the Rust bridge. Safe to call after BridgeShutdown.
 func BridgeInit(configJSON string) error {
-	bridgeInitOnce.Do(func() {
-		cstr := C.CString(configJSON)
-		defer C.free(unsafe.Pointer(cstr))
-		ret := C.reticulum_init(
-			cstr,
-			C.reticulum_on_accept_fn(C.goOnAccept),
-			C.reticulum_on_connect_fn(C.goOnConnect),
-			C.reticulum_on_data_fn(C.goOnData),
-			C.reticulum_on_close_fn(C.goOnClose),
-		)
-		if ret != 0 {
-			bridgeInitErr = ErrBridgeInitFailed
-		}
-	})
-	return bridgeInitErr
+	bridgeStateMu.Lock()
+	defer bridgeStateMu.Unlock()
+	if bridgeInitialized {
+		return nil
+	}
+	cstr := C.CString(configJSON)
+	defer C.free(unsafe.Pointer(cstr))
+	ret := C.reticulum_init(
+		cstr,
+		C.reticulum_on_accept_fn(C.goOnAccept),
+		C.reticulum_on_connect_fn(C.goOnConnect),
+		C.reticulum_on_data_fn(C.goOnData),
+		C.reticulum_on_close_fn(C.goOnClose),
+	)
+	if ret != 0 {
+		return ErrBridgeInitFailed
+	}
+	C.reticulum_set_resolve_callback(C.reticulum_on_resolve_fn(C.goOnResolve))
+	C.reticulum_set_write_callback(C.reticulum_on_write_fn(C.goOnWrite))
+	bridgeInitialized = true
+	return nil
 }
 
 // BridgeDial fires an async dial. Returns (taskID, resultCh, err).
 // Wait on resultCh for the conn_id; 0 means failure.
 func BridgeDial(destinationHash string) (uint64, <-chan uint64, error) {
+	bridgeStateMu.Lock()
+	initialized := bridgeInitialized
+	bridgeStateMu.Unlock()
+	if !initialized {
+		return 0, nil, ErrBridgeNotInitialized
+	}
 	cstr := C.CString(destinationHash)
 	defer C.free(unsafe.Pointer(cstr))
 
@@ -194,13 +227,21 @@ func BridgeClose(handle uint64) {
 	C.reticulum_close(C.uint64_t(handle))
 }
 
-// BridgeWrite writes data to a connection.
+// BridgeWrite writes data to a connection. Non-blocking at the Rust level;
+// this goroutine blocks on a channel until on_write fires.
 func BridgeWrite(connHandle uint64, data []byte) int {
 	if len(data) == 0 {
 		return 0
 	}
-	n := C.reticulum_write(C.uint64_t(connHandle), (*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data)))
-	return int(n)
+	nextDialMu.Lock()
+	nextDialTaskSeq++
+	taskID := nextDialTaskSeq
+	nextDialMu.Unlock()
+
+	resultCh := make(chan int, 1)
+	pendingWrites.Store(taskID, resultCh)
+	C.reticulum_write(C.uint64_t(taskID), C.uint64_t(connHandle), (*C.uint8_t)(unsafe.Pointer(&data[0])), C.size_t(len(data)))
+	return <-resultCh
 }
 
 // BridgeGetHash gets the destination hash for a registered name.
@@ -228,19 +269,44 @@ func BridgeRegisterName(name string, hash string) error {
 	return nil
 }
 
-// BridgeShutdown shuts down the bridge.
-func BridgeShutdown() { C.reticulum_shutdown() }
+// BridgeShutdown shuts down the bridge. Safe to call multiple times or without a prior BridgeInit.
+func BridgeShutdown() {
+	bridgeStateMu.Lock()
+	defer bridgeStateMu.Unlock()
+	if !bridgeInitialized {
+		return
+	}
+	bridgeInitialized = false
+	C.reticulum_shutdown()
+}
 
 // BridgeResolveName resolves a human-readable name to an address hash.
+// The Go-level call blocks until Rust fires on_resolve (success or timeout).
+// Internally this is callback-based so the calling goroutine blocks on a channel
+// rather than tying up a Rust thread for up to 69 s.
 func BridgeResolveName(name string) (string, error) {
+	bridgeStateMu.Lock()
+	initialized := bridgeInitialized
+	bridgeStateMu.Unlock()
+	if !initialized {
+		return "", ErrBridgeNotInitialized
+	}
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
-	hashStr := C.reticulum_resolve_name(cname)
-	if hashStr == nil {
+
+	nextDialMu.Lock()
+	nextDialTaskSeq++
+	taskID := nextDialTaskSeq
+	nextDialMu.Unlock()
+
+	resultCh := make(chan string, 1)
+	pendingResolves.Store(taskID, resultCh)
+	C.reticulum_resolve_name(C.uint64_t(taskID), cname)
+	hash := <-resultCh
+	if hash == "" {
 		return "", ErrBridgeResolveNameFailed
 	}
-	defer C.reticulum_free(unsafe.Pointer(hashStr))
-	return C.GoString(hashStr), nil
+	return hash, nil
 }
 
 // BridgeConnIdentifiedPeer returns the verified persistent identity hash of the remote peer.
@@ -273,5 +339,11 @@ func BridgeTransportHash() (string, error) {
 	return C.GoString(hashStr), nil
 }
 
-// nextDialMu protects nextDialTaskSeq.
+// nextDialMu protects nextDialTaskSeq (shared by dial and resolve task IDs).
 var nextDialMu sync.Mutex
+
+// pendingResolves maps task_id → chan string for in-flight BridgeResolveName calls.
+var pendingResolves sync.Map
+
+// pendingWrites maps task_id → chan int for in-flight BridgeWrite calls.
+var pendingWrites sync.Map

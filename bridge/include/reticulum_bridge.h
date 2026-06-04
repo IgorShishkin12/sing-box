@@ -21,6 +21,13 @@ typedef void (*reticulum_on_accept_fn) (uint64_t listener_id, uint64_t conn_id, 
 typedef void (*reticulum_on_connect_fn)(uint64_t task_id,     uint64_t conn_id);
 typedef void (*reticulum_on_data_fn)   (uint64_t conn_id,     const uint8_t* data, size_t len);
 typedef void (*reticulum_on_close_fn)  (uint64_t conn_id);
+/*
+ * Fires when reticulum_resolve_name completes. hash is NULL on timeout; when
+ * non-NULL it is malloc'd — caller must free with reticulum_free.
+ */
+typedef void (*reticulum_on_resolve_fn)(uint64_t task_id, const char* hash);
+/* Fires when reticulum_write completes. bytes is the number of bytes written, or -1 on error. */
+typedef void (*reticulum_on_write_fn)(uint64_t task_id, int32_t bytes);
 
 /* Log callback type: (level, target, message) */
 typedef void (*reticulum_log_fn)(uint8_t, const char*, const char*);
@@ -29,6 +36,18 @@ typedef void (*reticulum_log_fn)(uint8_t, const char*, const char*);
  * Register a Go log callback. Call before reticulum_init.
  */
 void reticulum_set_log_callback(reticulum_log_fn on_log);
+
+/*
+ * Register the name-resolution callback.
+ * Must be set before calling reticulum_resolve_name.
+ */
+void reticulum_set_resolve_callback(reticulum_on_resolve_fn on_resolve);
+
+/*
+ * Register the write-completion callback.
+ * Must be set before calling reticulum_write.
+ */
+void reticulum_set_write_callback(reticulum_on_write_fn on_write);
 
 /*
  * Initialize the bridge.
@@ -71,10 +90,10 @@ int64_t reticulum_listen(const char* listen_hash);
 void reticulum_close(uint64_t handle);
 
 /*
- * Write data to a connection.
- * Returns number of bytes written, or -1 on error.
+ * Write data to a connection. Non-blocking.
+ * Fires on_write(task_id, bytes) when done; bytes is -1 on error.
  */
-int reticulum_write(uint64_t conn_handle, const uint8_t* data, size_t len);
+void reticulum_write(uint64_t task_id, uint64_t conn_handle, const uint8_t* data, size_t len);
 
 /*
  * Get the destination hash of a listener as a hex string.
@@ -114,10 +133,12 @@ int reticulum_register_name(const char* name, const char* hash);
 int get_hash(char** hash, const char* name);
 
 /*
- * Resolve a service name to its address hash via network announcements.
- * Caller must free the returned string with reticulum_free. Returns NULL on timeout.
+ * Resolve a service name to its address hash via network announcements. Non-blocking.
+ * Fires on_resolve(task_id, hash) when done; hash is NULL on timeout.
+ * When non-NULL, hash is malloc'd — caller must free with reticulum_free.
+ * Retries up to 3× with exponential backoff (3 s → 6 s → 12 s), 15 s per attempt.
  */
-char* reticulum_resolve_name(const char* name);
+void reticulum_resolve_name(uint64_t task_id, const char* name);
 
 /*
  * Free memory allocated by the bridge.

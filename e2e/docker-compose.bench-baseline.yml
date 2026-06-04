@@ -1,0 +1,42 @@
+name: retv2bench-baseline
+
+services:
+  bench-server:
+    image: retv2e2e-server:latest
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile.server
+    command: >
+      -c "sum-server &> /dev/null"
+    environment:
+      - LISTEN_ADDR=0.0.0.0
+    networks:
+      - bench-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8080/sum -H 'Content-Type: application/json' -d '{\"a\":1,\"b\":1}' > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  bench-client:
+    image: retv2e2e-client:latest
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile.client
+    command: >
+      -c "
+        e2e-bench -mode direct -url http://bench-server:8080 -output /bench-results/baseline.txt &&
+        echo 'BASELINE BENCHMARKS DONE'
+      "
+    volumes:
+      - ./bench-results:/bench-results
+    networks:
+      - bench-net
+    depends_on:
+      bench-server:
+        condition: service_healthy
+
+networks:
+  bench-net:
+    driver: bridge
+

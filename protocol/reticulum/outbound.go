@@ -71,6 +71,31 @@ func (h *Outbound) Start(stage adapter.StartStage) error {
 	}
 	h.bridgeInited = true
 	h.logger.Info("reticulum outbound: bridge initialized")
+
+	if h.options.AuthOnStart {
+		if err := h.connectEager(context.Background()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// connectEager resolves the destination (if needed) and establishes the mux session
+// immediately rather than waiting for the first DialContext call.
+// Caller must hold h.mu when h.resolvedHash may be written.
+func (h *Outbound) connectEager(ctx context.Context) error {
+	destHash := h.resolvedHash
+	if destHash == "" {
+		hash, err := BridgeResolveName(h.options.Name)
+		if err != nil {
+			return fmt.Errorf("resolve %q on start: %w", h.options.Name, err)
+		}
+		h.resolvedHash = hash
+		destHash = hash
+	}
+	if _, err := h.getOrCreateSession(ctx, destHash); err != nil {
+		return fmt.Errorf("connect on start: %w", err)
+	}
 	return nil
 }
 
@@ -134,7 +159,11 @@ func (h *Outbound) getOrCreateSession(ctx context.Context, destHash string) (*mu
 			h.logger.WarnContext(ctx, "auth: peer identity unavailable (identify exchange may have failed): ", err)
 			peerID = ""
 		}
-		if err := Auth(fc, h.options.Password, ownID, peerID); err != nil {
+		policy := RetryPolicy(h.options.AuthRetry)
+		if policy == "" {
+			policy = RetryNone
+		}
+		if err := AuthWithRetry(fc, h.options.Password, ownID, peerID, policy); err != nil {
 			fc.Close()
 			return nil, fmt.Errorf("reticulum auth failed: %w", err)
 		}

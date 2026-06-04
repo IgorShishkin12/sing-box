@@ -80,7 +80,11 @@ func main() {
 	http.HandleFunc("/sum-terms", sumTermsHandler)
 	http.HandleFunc("/health", healthHandler)
 
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	listenHost := "127.0.0.1"
+	if h := os.Getenv("LISTEN_ADDR"); h != "" {
+		listenHost = h
+	}
+	addr := fmt.Sprintf("%s:%d", listenHost, port)
 	log.Printf("sum server listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
 }

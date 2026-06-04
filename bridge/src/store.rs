@@ -77,6 +77,14 @@ impl HandleStore {
     pub async fn remove(&self, handle: u64) -> Option<StoreEntry> {
         let removed = self.entries.write().await.remove(&handle);
         if removed.is_some() {
+            // TODO(race): push to freed_handles only after the connection's
+            // background data-reader task has been confirmed dead. Currently
+            // the task holds `handle` as its conn_id and may fire on_data /
+            // on_close callbacks for a brief window after remove() returns.
+            // If the handle is immediately recycled and assigned to a new
+            // connection, the stale callback fires on the wrong connection.
+            // Fix: store a JoinHandle per connection in the store; abort it
+            // here before recycling.
             self.freed_handles.lock().unwrap().push(handle);
         }
         removed

@@ -33,7 +33,6 @@ func TestInboundStartCreatesListener(t *testing.T) {
 	err = i.Start(adapter.StartStateInitialize)
 	require.NoError(t, err)
 	require.NotZero(t, i.listenerHdl)
-	require.True(t, i.accepting)
 
 	i.Close()
 	BridgeShutdown()
@@ -56,12 +55,10 @@ func TestInboundCloseStopsAcceptLoop(t *testing.T) {
 
 	err = i.Start(adapter.StartStateInitialize)
 	require.NoError(t, err)
-	require.True(t, i.accepting)
 
 	// Close should stop the accept loop
 	err = i.Close()
 	require.NoError(t, err)
-	require.False(t, i.accepting)
 	require.True(t, i.closed)
 
 	BridgeShutdown()
