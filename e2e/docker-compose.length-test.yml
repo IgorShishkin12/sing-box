@@ -30,10 +30,10 @@ services:
       -c "
         sing-box run -c /etc/sing-box/config.json | tee /tmp/singbox.log 2>&1 &
         until grep -q 'sing-box started' /tmp/singbox.log 2>/dev/null; do sleep 0.2; done &&
-        N=512 &&
-        TERMS=$(seq -s , $$N | sed 's/[0-9][0-9]*/1/g') &&
+        N=200000 &&
+        { printf '{\"terms\":['; i=2; while [ $$i -le $$N ]; do printf '1, '; i=$$(($$i+1)); done; printf '1]}'; } > /tmp/payload.json &&
         RESP=$(curl -sf --socks5-hostname 127.0.0.1:1080 http://127.0.0.1:8080/sum-terms \
-          -H 'Content-Type: application/json' -d '{\"terms\":['$$TERMS']}') &&
+          -H 'Content-Type: application/json' -d @/tmp/payload.json) &&
         echo \"Response: $$RESP\" &&
         echo \"$$RESP\" | grep -q '\"sum\":'$$N &&
         echo 'E2E LENGTH TEST PASSED'
