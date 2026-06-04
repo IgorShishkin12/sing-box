@@ -13,17 +13,25 @@ import (
 )
 
 const (
-	MaxReticulumMessage = 400 //410 is passing somehow, 420 already bad: should be 400 as stated in LXMF-rs/crates/libs/rns-core/src/packet.rs:14
+	// MaxReticulumMessage is the maximum plaintext bytes for a single data_packet call.
+	// Derived from PACKET_MDU (464) minus Fernet overhead (IV 16 + HMAC 32 + AES padding 16).
+	// Matches rns-core LXMF_MAX_PAYLOAD. Larger payloads use the Resource protocol instead.
+	MaxReticulumMessage = 400
 	muxHeaderSize       = 3
-	maxFragPayload      = MaxReticulumMessage - muxHeaderSize // 197
+	maxFragPayload      = MaxReticulumMessage - muxHeaderSize // 397
 
-	// Control packet type bytes (high bit set). From PLAN.md + new types.
+	// Control packet type bytes (high bit set).
 	TypeAuthCtrl     byte = 0x80 // auth exchange message
 	TypeReauthReq    byte = 0x81 // re-auth request
 	TypeNewConn      byte = 0x82 // new virtual connection; payload = "host:port"
 	TypeCloseConn    byte = 0x83 // close virtual connection; no payload
 	TypeRequestAuth  byte = 0x84 // challenge request (future)
 	TypeResponseAuth byte = 0x85 // auth response (future)
+	// TypeLargeData carries a payload that exceeds the 64-fragment limit (~25 KB).
+	// The sender writes the full payload in a single Write call (prefixed by the
+	// standard 3-byte mux header). The bridge routes this to the Reticulum Resource
+	// protocol; the receiver gets the reassembled data via a single on_data callback.
+	TypeLargeData byte = 0xC0
 )
 
 // isControl reports whether a type byte represents a control packet (high bit set).
@@ -218,19 +226,34 @@ func (s *muxSession) writeCtrl(typ byte, id uint16, payload []byte) error {
 	return err
 }
 
-// writeData fragments data and sends all packets under writeMu, ensuring
-// no other write can interleave between fragments of the same message.
+// writeData sends data for virtual connection id.
+//
+// Payloads that fit within 64 fragments (≤ 64 × maxFragPayload bytes) are
+// fragmented and sent as individual data packets — no mux-layer reassembly
+// needed on the receiver because the bridge maps each fragment to a single
+// Reticulum data_packet.
+//
+// Larger payloads are sent as a single TypeLargeData control packet. The
+// bridge routes those to the Reticulum Resource protocol, which handles
+// splitting internally and delivers the reassembled bytes to the peer via a
+// single on_data callback, preserving message boundaries.
 func (s *muxSession) writeData(id uint16, data []byte) error {
-	parts := fragment(data)
-	n := len(parts)
-	if n > 64 {
-		return fmt.Errorf("mux: payload requires %d fragments (max 64)", n)
+	if len(data) > maxFragPayload*64 {
+		msg := make([]byte, muxHeaderSize+len(data))
+		msg[0] = TypeLargeData
+		binary.BigEndian.PutUint16(msg[1:3], id)
+		copy(msg[3:], data)
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
+		_, err := s.inner.Write(msg)
+		return err
 	}
+	parts := fragment(data)
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	for i, part := range parts {
 		pkt := muxPacket{
-			typeByte: encodeDataByte(n, i),
+			typeByte: encodeDataByte(len(parts), i),
 			connID:   id,
 			payload:  part,
 		}
@@ -249,14 +272,34 @@ func (s *muxSession) removeConn(id uint16) {
 }
 
 // readLoop is the single goroutine that reads packets and dispatches them.
+//
+// When inner implements packetReader, full messages are read without size
+// limits — required for TypeLargeData payloads that arrive via the Resource
+// protocol. Falls back to the fixed-size Read path for byte-stream conns
+// (net.Pipe in tests), which only handles payloads that fit in MaxReticulumMessage.
 func (s *muxSession) readLoop() {
 	defer s.closeAll()
 
+	var readOne func() ([]byte, error)
+	if pr, ok := s.inner.(packetReader); ok {
+		readOne = pr.ReadPacket
+	} else {
+		buf := make([]byte, MaxReticulumMessage)
+		readOne = func() ([]byte, error) {
+			n, err := s.inner.Read(buf)
+			if err != nil {
+				return nil, err
+			}
+			msg := make([]byte, n)
+			copy(msg, buf[:n])
+			return msg, nil
+		}
+	}
+
 	fragBufs := make(map[uint16]*fragBuffer)
-	buf := make([]byte, MaxReticulumMessage)
 
 	for {
-		n, err := s.inner.Read(buf)
+		msg, err := readOne()
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Debug("mux readLoop exit: ", err)
@@ -264,7 +307,7 @@ func (s *muxSession) readLoop() {
 			return
 		}
 
-		pkt, err := decodePacket(buf[:n])
+		pkt, err := decodePacket(msg)
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Error("mux: decode error: ", err)
@@ -294,6 +337,18 @@ func (s *muxSession) readLoop() {
 			case TypeCloseConn:
 				delete(fragBufs, pkt.connID)
 				s.closeConnRemote(pkt.connID)
+			case TypeLargeData:
+				// Full payload delivered atomically via Resource protocol.
+				s.mu.Lock()
+				mc := s.conns[pkt.connID]
+				s.mu.Unlock()
+				if mc == nil {
+					continue
+				}
+				select {
+				case mc.readCh <- pkt.payload:
+				case <-mc.done:
+				}
 			default:
 				if s.logger != nil {
 					s.logger.Debug("mux: unhandled control 0x", fmt.Sprintf("%02x", pkt.typeByte))

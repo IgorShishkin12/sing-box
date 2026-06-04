@@ -4,6 +4,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Maximum plaintext bytes per `data_packet()` call.
+/// Derived from `PACKET_MDU (464) - Fernet overhead (IV 16 + HMAC 32 + AES padding 16) = 400`.
+const LXMF_MAX_PAYLOAD: usize = 400;
+
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
@@ -84,26 +88,40 @@ impl Connection {
     }
 
     /// Write data to the connection via the Reticulum link.
+    ///
+    /// Small payloads (≤ LXMF_MAX_PAYLOAD) are sent as a single `data_packet` for low latency.
+    /// Larger payloads are sent via the Resource protocol, which handles splitting and
+    /// retransmission internally and supports up to 64 MB.
     pub async fn write(&self, data: &[u8]) -> Result<usize, String> {
         match &self.inner {
-            ConnectionInner::Link { link, .. } => {
-                let (packet, iface) = {
-                    let link_guard = link.lock().await;
-                    let packet = match link_guard.data_packet(data) {
-                        Ok(p) => p,
-                        Err(e) => return Err(format!("{:?}", e)),
+            ConnectionInner::Link { link, link_id, .. } => {
+                if data.len() <= LXMF_MAX_PAYLOAD {
+                    let (packet, iface) = {
+                        let link_guard = link.lock().await;
+                        let packet = match link_guard.data_packet(data) {
+                            Ok(p) => p,
+                            Err(e) => return Err(format!("{:?}", e)),
+                        };
+                        (packet, link_guard.ingress_iface())
                     };
-                    (packet, link_guard.ingress_iface())
-                };
-                if let Some(transport) = crate::transport::get_transport() {
-                    let tp = transport.lock().await;
-                    if let Some(iface) = iface {
-                        tp.send_direct(iface, packet).await;
-                    } else {
-                        tp.send_broadcast(packet, None).await;
+                    if let Some(transport) = crate::transport::get_transport() {
+                        let tp = transport.lock().await;
+                        if let Some(iface) = iface {
+                            tp.send_direct(iface, packet).await;
+                        } else {
+                            tp.send_broadcast(packet, None).await;
+                        }
                     }
+                    Ok(data.len())
+                } else {
+                    let transport = crate::transport::get_transport()
+                        .ok_or_else(|| "transport not initialized".to_string())?;
+                    let tp = transport.lock().await;
+                    tp.send_resource(link_id, data.to_vec(), None)
+                        .await
+                        .map(|_hash| data.len())
+                        .map_err(|e| format!("send_resource: {:?}", e))
                 }
-                Ok(data.len())
             }
             #[cfg(test)]
             ConnectionInner::Memory { write_buf } => {
@@ -161,6 +179,25 @@ mod tests {
         let data = b"hello world";
         let written = conn.write(data).await.unwrap();
         assert_eq!(written, data.len());
+    }
+
+    #[tokio::test]
+    async fn test_connection_write_memory_small_uses_buffer() {
+        // Small writes (≤ LXMF_MAX_PAYLOAD) go to the write buffer in Memory variant.
+        let conn = Connection::new();
+        let data = vec![0xAB; LXMF_MAX_PAYLOAD];
+        let written = conn.write(&data).await.unwrap();
+        assert_eq!(written, LXMF_MAX_PAYLOAD);
+    }
+
+    #[tokio::test]
+    async fn test_connection_write_memory_large_uses_buffer() {
+        // Memory variant has no size distinction — it always writes to buffer.
+        // This confirms the Memory branch doesn't panic or reject large writes.
+        let conn = Connection::new();
+        let data = vec![0xCD; LXMF_MAX_PAYLOAD + 1];
+        let written = conn.write(&data).await.unwrap();
+        assert_eq!(written, LXMF_MAX_PAYLOAD + 1);
     }
 
     #[tokio::test]

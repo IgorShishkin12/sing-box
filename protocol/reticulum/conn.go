@@ -150,6 +150,35 @@ func readDestHeader(r io.Reader) (string, error) {
 	return string(buf), nil
 }
 
+// ReadPacket returns one complete inbound message without any size limit.
+// Unlike Read, it never splits a message across multiple calls — the full
+// slice placed into the channel by goOnData is returned as-is.
+// This is used by framedConn.readLoop to preserve message boundaries for
+// large Resource-delivered payloads.
+func (c *reticulumConn) ReadPacket() ([]byte, error) {
+	if c.handle == 0 {
+		return nil, io.ErrClosedPipe
+	}
+	select {
+	case chunk, ok := <-c.entry.ch:
+		if !ok {
+			return nil, io.EOF
+		}
+		return chunk, nil
+	case <-c.entry.done:
+		// Drain one message that may have arrived just before close.
+		select {
+		case chunk, ok := <-c.entry.ch:
+			if !ok {
+				return nil, io.EOF
+			}
+			return chunk, nil
+		default:
+		}
+		return nil, io.EOF
+	}
+}
+
 func (c *reticulumConn) Write(b []byte) (int, error) {
 	if c.handle == 0 {
 		return 0, io.ErrClosedPipe
