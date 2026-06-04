@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	MaxReticulumMessage = 200
+	MaxReticulumMessage = 400 //410 is passing somehow, 420 already bad: should be 400 as stated in LXMF-rs/crates/libs/rns-core/src/packet.rs:14
 	muxHeaderSize       = 3
 	maxFragPayload      = MaxReticulumMessage - muxHeaderSize // 197
 
