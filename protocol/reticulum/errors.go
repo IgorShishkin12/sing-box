@@ -3,6 +3,7 @@ package reticulum
 import "errors"
 
 var (
+	ErrBridgeNotInitialized      = errors.New("bridge not initialized")
 	ErrBridgeInitFailed          = errors.New("bridge init failed")
 	ErrBridgeDialFailed          = errors.New("bridge dial failed")
 	ErrBridgeListenFailed        = errors.New("bridge listen failed")

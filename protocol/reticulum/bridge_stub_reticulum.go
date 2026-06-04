@@ -28,8 +28,8 @@ import (
 )
 
 var (
-	bridgeInitOnce sync.Once
-	bridgeInitErr  error
+	bridgeStateMu     sync.Mutex
+	bridgeInitialized bool
 )
 
 var bridgeLoggerVal interface {
@@ -152,31 +152,40 @@ func BridgeSetLogger(logger log.ContextLogger) {
 	C.reticulum_set_log_callback(C.reticulum_log_fn(C.goOnLog))
 }
 
-// BridgeInit initializes the Rust bridge. Only the first call crosses CGO.
+// BridgeInit initializes the Rust bridge. Safe to call after BridgeShutdown.
 func BridgeInit(configJSON string) error {
-	bridgeInitOnce.Do(func() {
-		cstr := C.CString(configJSON)
-		defer C.free(unsafe.Pointer(cstr))
-		ret := C.reticulum_init(
-			cstr,
-			C.reticulum_on_accept_fn(C.goOnAccept),
-			C.reticulum_on_connect_fn(C.goOnConnect),
-			C.reticulum_on_data_fn(C.goOnData),
-			C.reticulum_on_close_fn(C.goOnClose),
-		)
-		if ret != 0 {
-			bridgeInitErr = ErrBridgeInitFailed
-			return
-		}
-		C.reticulum_set_resolve_callback(C.reticulum_on_resolve_fn(C.goOnResolve))
-		C.reticulum_set_write_callback(C.reticulum_on_write_fn(C.goOnWrite))
-	})
-	return bridgeInitErr
+	bridgeStateMu.Lock()
+	defer bridgeStateMu.Unlock()
+	if bridgeInitialized {
+		return nil
+	}
+	cstr := C.CString(configJSON)
+	defer C.free(unsafe.Pointer(cstr))
+	ret := C.reticulum_init(
+		cstr,
+		C.reticulum_on_accept_fn(C.goOnAccept),
+		C.reticulum_on_connect_fn(C.goOnConnect),
+		C.reticulum_on_data_fn(C.goOnData),
+		C.reticulum_on_close_fn(C.goOnClose),
+	)
+	if ret != 0 {
+		return ErrBridgeInitFailed
+	}
+	C.reticulum_set_resolve_callback(C.reticulum_on_resolve_fn(C.goOnResolve))
+	C.reticulum_set_write_callback(C.reticulum_on_write_fn(C.goOnWrite))
+	bridgeInitialized = true
+	return nil
 }
 
 // BridgeDial fires an async dial. Returns (taskID, resultCh, err).
 // Wait on resultCh for the conn_id; 0 means failure.
 func BridgeDial(destinationHash string) (uint64, <-chan uint64, error) {
+	bridgeStateMu.Lock()
+	initialized := bridgeInitialized
+	bridgeStateMu.Unlock()
+	if !initialized {
+		return 0, nil, ErrBridgeNotInitialized
+	}
 	cstr := C.CString(destinationHash)
 	defer C.free(unsafe.Pointer(cstr))
 
@@ -260,14 +269,28 @@ func BridgeRegisterName(name string, hash string) error {
 	return nil
 }
 
-// BridgeShutdown shuts down the bridge.
-func BridgeShutdown() { C.reticulum_shutdown() }
+// BridgeShutdown shuts down the bridge. Safe to call multiple times or without a prior BridgeInit.
+func BridgeShutdown() {
+	bridgeStateMu.Lock()
+	defer bridgeStateMu.Unlock()
+	if !bridgeInitialized {
+		return
+	}
+	bridgeInitialized = false
+	C.reticulum_shutdown()
+}
 
 // BridgeResolveName resolves a human-readable name to an address hash.
 // The Go-level call blocks until Rust fires on_resolve (success or timeout).
 // Internally this is callback-based so the calling goroutine blocks on a channel
 // rather than tying up a Rust thread for up to 69 s.
 func BridgeResolveName(name string) (string, error) {
+	bridgeStateMu.Lock()
+	initialized := bridgeInitialized
+	bridgeStateMu.Unlock()
+	if !initialized {
+		return "", ErrBridgeNotInitialized
+	}
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
 

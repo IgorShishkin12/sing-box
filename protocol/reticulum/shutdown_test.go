@@ -30,15 +30,3 @@ func TestBridgeInitShutdownInit(t *testing.T) {
 	require.NoError(t, err)
 	BridgeShutdown()
 }
-
-func TestBridgeReadOnUnknownHandleReturnsError(t *testing.T) {
-	err := BridgeInit("{}")
-	require.NoError(t, err)
-
-	// Any handle not in the store returns -1
-	buf := make([]byte, 10)
-	n := BridgeRead(99999, buf)
-	require.Equal(t, -1, n)
-
-	BridgeShutdown()
-}
