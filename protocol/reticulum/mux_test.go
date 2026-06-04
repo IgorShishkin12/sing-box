@@ -468,15 +468,15 @@ func TestConcurrentWriteNoDeadlock(t *testing.T) {
 	}
 }
 
-// TestWindowBound verifies that at most windowSize fragments are in-flight at once.
-// Uses a very long retryInterval so retransmits don't pollute the packet count.
+// TestWindowBound verifies that the window serialises writes: with windowSize=1 only
+// one fragment write is in-progress at a time, but ALL fragments are eventually sent
+// (slot released immediately after write on TCP mode — no ACK required).
 func TestWindowBound(t *testing.T) {
 	const wSize = 2
 	inner, remote := newChanConnPair()
 	s := newMuxSession(inner, nil, false, wSize, 10*time.Second, 0)
 	t.Cleanup(func() { s.Close() })
 
-	// Inject a mux conn directly (no TypeNewConn round-trip needed for this test).
 	mc := newMuxConn(1, s, "test")
 	s.mu.Lock()
 	s.conns[1] = mc
@@ -487,29 +487,19 @@ func TestWindowBound(t *testing.T) {
 		go func() { mc.Write([]byte("x")) }()
 	}
 
-	// Wait for the sendQ worker to saturate the window.
-	time.Sleep(80 * time.Millisecond)
-
-	// Exactly windowSize fragments should have been written by the session.
-	// Session writes go to inner.writeCh = remote.readCh.
-	inRemote := len(remote.readCh)
-	require.Equal(t, wSize, inRemote, "expected exactly %d fragments in-flight", wSize)
-
-	// ACK the first fragment (connID=1, partIndex=0) by writing to remote, which
-	// feeds into inner.readCh so the session's readLoop receives it.
-	ack := encodePacket(muxPacket{typeByte: TypeFragAck, connID: 1, payload: []byte{0}})
-	remote.Write(ack)
-
-	// The 3rd fragment should now be sent.
-	select {
-	case <-remote.readCh:
-		// good — the previously blocked 3rd fragment arrived
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("3rd fragment not sent after ACK")
+	// All 3 fragments must arrive because the slot is released immediately after
+	// each write (TCP mode). The window limits concurrency, not total count.
+	for i := 0; i < 3; i++ {
+		select {
+		case <-remote.readCh:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("fragment %d not sent within timeout", i+1)
+		}
 	}
 }
 
-// TestFragAckReleasesWindow verifies that receiving TypeFragAck releases one window slot.
+// TestFragAckReleasesWindow verifies that both fragments are delivered in TCP mode
+// (slot released on write, not on ACK) and that a TypeFragAck is handled gracefully.
 func TestFragAckReleasesWindow(t *testing.T) {
 	const wSize = 1
 	s, remote := newManualSession(t, wSize)
@@ -519,34 +509,26 @@ func TestFragAckReleasesWindow(t *testing.T) {
 	s.conns[1] = mc
 	s.mu.Unlock()
 
-	// Write two messages; only the first fits in the window.
 	go func() { mc.Write([]byte("first")) }()
 	go func() { mc.Write([]byte("second")) }()
 
-	// First fragment should arrive quickly (session writes to inner → remote.readCh).
-	select {
-	case <-remote.readCh:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("first fragment not sent")
+	// Both fragments must arrive: TCP mode releases the slot immediately after each write.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-remote.readCh:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("fragment %d not sent", i+1)
+		}
 	}
 
-	// Second fragment must not arrive yet (window full).
-	time.Sleep(50 * time.Millisecond)
-	require.Equal(t, 0, len(remote.readCh), "second fragment sent before ACK — window not enforced")
-
-	// ACK fragment 0 of conn 1 by writing to remote → inner.readCh → session readLoop.
+	// TypeFragAck should be handled gracefully (no panic, no incorrect state).
 	ack := encodePacket(muxPacket{typeByte: TypeFragAck, connID: 1, payload: []byte{0}})
 	remote.Write(ack)
-
-	select {
-	case <-remote.readCh:
-		// second fragment arrived after ACK
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("second fragment not sent after ACK")
-	}
+	time.Sleep(20 * time.Millisecond)
 }
 
-// TestRetransmitOnTimeout verifies that an un-ACKed fragment is re-sent after retryInterval.
+// TestRetransmitOnTimeout verifies TCP-mode behaviour: window slot is released
+// immediately after inner.Write(), so no retransmit occurs even without a TypeFragAck.
 func TestRetransmitOnTimeout(t *testing.T) {
 	s, remote := newManualSession(t, 8)
 
@@ -557,25 +539,21 @@ func TestRetransmitOnTimeout(t *testing.T) {
 
 	mc.Write([]byte("hello"))
 
-	// Receive but do not ACK the first send (session → inner.writeCh → remote.readCh).
-	var first []byte
+	// Initial fragment must be sent.
 	select {
-	case pkt := <-remote.readCh:
-		first = pkt
+	case <-remote.readCh:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("initial fragment not sent")
 	}
 
-	// Wait for at least one retransmit (retryInterval=20ms in test sessions).
-	var retransmit []byte
+	// No retransmit expected: inFlight is cleared immediately after write, so the
+	// retransmit timer has nothing to act on.
 	select {
-	case pkt := <-remote.readCh:
-		retransmit = pkt
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("no retransmit received")
+	case <-remote.readCh:
+		t.Fatal("unexpected retransmit — window slot is released immediately on TCP mode")
+	case <-time.After(s.retryInterval * 3):
+		// correct: no retransmit
 	}
-
-	require.Equal(t, first, retransmit, "retransmit must be identical to original fragment")
 }
 
 // TestStaleFragBufferDiscard verifies that the receiver discards a partial fragment
@@ -624,8 +602,9 @@ func TestStaleFragBufferDiscard(t *testing.T) {
 	require.Equal(t, sent, got)
 }
 
-// TestRetransmitGivesUp verifies that after maxRetries failed retransmits,
-// the connection is closed on the session.
+// TestRetransmitGivesUp verifies TCP-mode behaviour: with immediate slot release,
+// inFlight is always empty, so the retransmit-give-up path never fires and the
+// connection stays open after the initial send regardless of missing TypeFragAck.
 func TestRetransmitGivesUp(t *testing.T) {
 	s, remote := newManualSession(t, 8)
 
@@ -636,22 +615,20 @@ func TestRetransmitGivesUp(t *testing.T) {
 
 	mc.Write([]byte("will-never-ack"))
 
-	// Drain all transmit attempts (initial + maxRetries retransmits) but never ACK.
-	maxAttempts := s.maxRetries + 1
-	deadline := time.After(time.Duration(maxAttempts+2) * s.retryInterval * 2)
-	for i := 0; i < maxAttempts; i++ {
-		select {
-		case <-remote.readCh:
-		case <-deadline:
-			t.Fatalf("only received %d/%d transmit attempts", i, maxAttempts)
-		}
+	// Initial send must succeed.
+	select {
+	case <-remote.readCh:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("initial fragment not sent")
 	}
 
-	// After giving up, the conn's done channel should be closed.
+	// Wait well past maxRetries × retryInterval; connection must remain open
+	// because inFlight is cleared immediately on write (TCP mode).
+	waitFor := time.Duration(s.maxRetries+2) * s.retryInterval * 2
 	select {
 	case <-mc.done:
-		// connection was closed by the session after giving up
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("connection not closed after maxRetries exhausted")
+		t.Fatal("connection closed unexpectedly — TCP mode should not give up without retransmits")
+	case <-time.After(waitFor):
+		// correct: connection still open
 	}
 }

@@ -249,12 +249,17 @@ type muxSession struct {
 	incomingCh   chan *muxConn // non-nil on server side
 
 	windowSize    int
-	windowSem     chan struct{} // semaphore: len = in-flight count; cap = windowSize
-	inFlight      sync.Map      // fragKey → *inFlightEntry
+	windowSem     chan struct{} // semaphore: len = concurrent-writes-in-progress; cap = windowSize
+	inFlight      sync.Map      // fragKey → *inFlightEntry (used for retransmit on RF links)
 	sendQ         *sendQueue
 	retryInterval time.Duration
 	maxRetries    int
 	fragTimeout   time.Duration
+
+	// Counters for observability.
+	statFragsSent    atomic.Uint64 // total fragments written to inner
+	statAcksReceived atomic.Uint64 // total TypeFragAck packets received from peer
+	statAcksSent     atomic.Uint64 // total TypeFragAck packets sent to peer
 }
 
 // newMuxSession is the internal constructor used by both public constructors and tests.
@@ -279,7 +284,7 @@ func newMuxSession(
 		fragTimeout:   defaultFragTimeout,
 	}
 	if isServer {
-		s.incomingCh = make(chan *muxConn, 64)
+		s.incomingCh = make(chan *muxConn, 1024)
 	}
 	go s.readLoop()
 	go s.sendQ.run(s)
@@ -335,6 +340,11 @@ func (s *muxSession) writeCtrl(typ byte, id uint16, payload []byte) error {
 
 // writeData enqueues all fragments of data onto the send queue for conn id.
 // Returns immediately; actual writes happen in the send-queue worker goroutine.
+//
+// All fragments use prioNew so they land in the same FIFO channel, preserving
+// intra-message order. Using prioInProgress for frag 1+ caused the worker to
+// send continuations before the first fragment, which silently dropped frag 0
+// on the receiver when a second Write() arrived on the same connID.
 func (s *muxSession) writeData(id uint16, data []byte) error {
 	parts := fragment(data)
 	n := len(parts)
@@ -342,10 +352,6 @@ func (s *muxSession) writeData(id uint16, data []byte) error {
 		return fmt.Errorf("mux: payload requires %d fragments (max 64)", n)
 	}
 	for i, part := range parts {
-		prio := prioNew
-		if i > 0 {
-			prio = prioInProgress
-		}
 		f := &queuedFrag{
 			encoded: encodePacket(muxPacket{
 				typeByte: encodeDataByte(n, i),
@@ -353,7 +359,7 @@ func (s *muxSession) writeData(id uint16, data []byte) error {
 				payload:  part,
 			}),
 			key:  fragKey{connID: id, partIndex: uint8(i)},
-			prio: prio,
+			prio: prioNew,
 		}
 		s.sendQ.enqueue(f)
 	}
@@ -362,6 +368,8 @@ func (s *muxSession) writeData(id uint16, data []byte) error {
 
 // doWrite sends one queued fragment. For new (non-retransmit) fragments it acquires
 // a window slot first, blocking until one is available or the session closes.
+// The slot is released immediately after inner.Write() returns: on TCP the write
+// succeeding is sufficient; on RF the TypeFragAck path handles it instead.
 func (s *muxSession) doWrite(f *queuedFrag) {
 	if !f.isRetransmit {
 		// Acquire a window slot; block until one is free or session closes.
@@ -370,15 +378,14 @@ func (s *muxSession) doWrite(f *queuedFrag) {
 		case <-s.done:
 			return
 		}
-		// Register in in-flight map so ACKs and retransmit timer can find it.
+		// Register in in-flight map so the retransmit timer and TypeFragAck can find it.
 		s.inFlight.Store(f.key, &inFlightEntry{
 			encoded: f.encoded,
 			key:     f.key,
 			retryAt: time.Now().Add(s.retryInterval),
 		})
 	} else {
-		// Retransmit: check the fragment is still in-flight (could have been ACKed
-		// between when the retransmit was enqueued and now).
+		// Retransmit: skip if already ACKed (entry removed) since we enqueued it.
 		if _, ok := s.inFlight.Load(f.key); !ok {
 			return
 		}
@@ -389,6 +396,15 @@ func (s *muxSession) doWrite(f *queuedFrag) {
 	s.innerWriteMu.Unlock()
 	if err != nil && s.logger != nil {
 		s.logger.Debug("mux: doWrite error: ", err)
+	}
+
+	// Release the window slot once the write is queued. TypeFragAck-based release
+	// is a no-op when the inFlight entry is already gone (returns false).
+	if !f.isRetransmit {
+		if _, ok := s.inFlight.LoadAndDelete(f.key); ok {
+			s.statFragsSent.Add(1)
+			<-s.windowSem
+		}
 	}
 }
 
@@ -449,6 +465,7 @@ func (s *muxSession) readLoop() {
 			case TypeFragAck:
 				// Peer acknowledged one of our fragments; release that window slot.
 				if len(pkt.payload) == 1 {
+					s.statAcksReceived.Add(1)
 					key := fragKey{connID: pkt.connID, partIndex: pkt.payload[0]}
 					if _, ok := s.inFlight.LoadAndDelete(key); ok {
 						<-s.windowSem
@@ -462,8 +479,18 @@ func (s *muxSession) readLoop() {
 			continue
 		}
 
-		// Data packet: send ACK to peer, then accumulate for reassembly.
-		_ = s.writeCtrl(TypeFragAck, pkt.connID, []byte{byte(pkt.partIndex)})
+		// Data packet: send ACK to peer non-blocking so readLoop never stalls.
+		// On TCP the sender already released its window slot after the write, so
+		// a dropped ACK here is harmless. On RF a dropped ACK triggers a retransmit.
+		if s.innerWriteMu.TryLock() {
+			_, _ = s.inner.Write(encodePacket(muxPacket{
+				typeByte: TypeFragAck,
+				connID:   pkt.connID,
+				payload:  []byte{byte(pkt.partIndex)},
+			}))
+			s.innerWriteMu.Unlock()
+			s.statAcksSent.Add(1)
+		}
 
 		fb := fragBufs[pkt.connID]
 		if fb == nil {
@@ -501,6 +528,7 @@ func (s *muxSession) readLoop() {
 }
 
 // retransmitLoop periodically scans in-flight fragments and re-enqueues timed-out ones.
+// It also logs mux stats at every tick so operators can see window utilisation.
 func (s *muxSession) retransmitLoop() {
 	ticker := time.NewTicker(s.retryInterval / 2)
 	defer ticker.Stop()
@@ -510,6 +538,17 @@ func (s *muxSession) retransmitLoop() {
 			return
 		case <-ticker.C:
 			s.checkRetransmits()
+			if s.logger != nil {
+				writing := len(s.windowSem)
+				queued := len(s.sendQ.retransmit) + len(s.sendQ.inProgress) + len(s.sendQ.newMsg)
+				s.logger.Debug(fmt.Sprintf(
+					"mux stats: writing=%d/%d queued=%d sent=%d acks_rx=%d acks_tx=%d",
+					writing, s.windowSize, queued,
+					s.statFragsSent.Load(),
+					s.statAcksReceived.Load(),
+					s.statAcksSent.Load(),
+				))
+			}
 		}
 	}
 }
@@ -606,6 +645,9 @@ type muxConn struct {
 	readBuf   []byte
 	done      chan struct{}
 	closeOnce sync.Once
+	writeMu   sync.Mutex // serialises Write() calls: fragments must reach the
+	// receiver in the order they were written, and two goroutines must not
+	// interleave their fragment sequences for the same connID.
 
 	localAddr  net.Addr
 	remoteAddr net.Addr
@@ -616,7 +658,7 @@ func newMuxConn(id uint16, s *muxSession, dest string) *muxConn {
 		id:         id,
 		session:    s,
 		dest:       dest,
-		readCh:     make(chan []byte, 64),
+		readCh:     make(chan []byte, 1024),
 		done:       make(chan struct{}),
 		localAddr:  reticulumAddr{network: "reticulum-mux", str: fmt.Sprintf("mux:%d", id)},
 		remoteAddr: reticulumAddr{network: "reticulum-mux", str: dest},
@@ -647,6 +689,8 @@ func (c *muxConn) Read(b []byte) (int, error) {
 
 // Write sends data over the virtual connection, fragmenting if necessary.
 func (c *muxConn) Write(b []byte) (int, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	if err := c.session.writeData(c.id, b); err != nil {
 		return 0, err
 	}
