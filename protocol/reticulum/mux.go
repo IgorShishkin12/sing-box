@@ -13,12 +13,11 @@ import (
 )
 
 const (
-	// MaxReticulumMessage is the maximum plaintext bytes for a single data_packet call.
-	// Derived from PACKET_MDU (464) minus Fernet overhead (IV 16 + HMAC 32 + AES padding 16).
-	// Matches rns-core LXMF_MAX_PAYLOAD. Larger payloads use the Resource protocol instead.
+	// MaxReticulumMessage is kept as the fallback Read buffer size for bare net.Conn
+	// inners (tests). In production the bridge routes all writes through the Reticulum
+	// Resource protocol, which handles splitting internally.
 	MaxReticulumMessage = 400
 	muxHeaderSize       = 3
-	maxFragPayload      = MaxReticulumMessage - muxHeaderSize // 397
 
 	// Control packet type bytes (high bit set).
 	TypeAuthCtrl     byte = 0x80 // auth exchange message
@@ -27,51 +26,20 @@ const (
 	TypeCloseConn    byte = 0x83 // close virtual connection; no payload
 	TypeRequestAuth  byte = 0x84 // challenge request (future)
 	TypeResponseAuth byte = 0x85 // auth response (future)
-	// TypeLargeData carries a payload that exceeds the 64-fragment limit (~25 KB).
-	// The sender writes the full payload in a single Write call (prefixed by the
-	// standard 3-byte mux header). The bridge routes this to the Reticulum Resource
-	// protocol; the receiver gets the reassembled data via a single on_data callback.
+	// TypeLargeData carries the full payload of a virtual connection write.
+	// The bridge routes it via the Reticulum Resource protocol (up to 64 MB),
+	// which handles splitting and retransmission. The receiver gets it whole.
 	TypeLargeData byte = 0xC0
 )
 
 // isControl reports whether a type byte represents a control packet (high bit set).
-// Data packets use the full 7 lower bits for fragmentation info.
 func isControl(b byte) bool { return b&0x80 != 0 }
-
-// encodeDataByte packs fragmentation info for a data packet into the lower 7 bits.
-//
-// Bit layout: 0b0_[isLast 1 bit]_[partIndex 6 bits]
-// isLast: 1 if this is the final fragment, 0 otherwise
-// partIndex: 0-indexed (0 = first fragment), supports up to 64 fragments
-//
-// Panics on out-of-range inputs.
-func encodeDataByte(totalParts, partIndex int) byte {
-	if totalParts < 1 || totalParts > 64 || partIndex < 0 || partIndex >= totalParts {
-		panic(fmt.Sprintf("encodeDataByte: invalid totalParts=%d partIndex=%d", totalParts, partIndex))
-	}
-	isLast := 0
-	if partIndex == totalParts-1 {
-		isLast = 1
-	}
-	return byte((isLast << 6) | (partIndex & 0x3F))
-}
-
-// decodeDataByte extracts fragmentation info from a data-packet type byte.
-// Returns isLast (true if final fragment) and the 0-indexed partIndex.
-func decodeDataByte(b byte) (isLast bool, partIndex int) {
-	isLast = (b>>6)&1 != 0
-	partIndex = int(b & 0x3F)
-	return
-}
 
 // muxPacket is a decoded Reticulum mux message.
 type muxPacket struct {
 	typeByte byte
 	connID   uint16
 	payload  []byte
-	// Decoded fragmentation fields; valid only when !isControl(typeByte).
-	isLast    bool // true if this is the final fragment
-	partIndex int  // 0-indexed
 }
 
 // encodePacket serialises a muxPacket to wire bytes (header + payload, no framing).
@@ -88,76 +56,17 @@ func decodePacket(b []byte) (muxPacket, error) {
 	if len(b) < muxHeaderSize {
 		return muxPacket{}, fmt.Errorf("mux: packet too short: %d bytes", len(b))
 	}
-	p := muxPacket{
+	return muxPacket{
 		typeByte: b[0],
 		connID:   binary.BigEndian.Uint16(b[1:3]),
 		payload:  append([]byte(nil), b[3:]...),
-	}
-	if !isControl(p.typeByte) {
-		p.isLast, p.partIndex = decodeDataByte(p.typeByte)
-	}
-	return p, nil
-}
-
-// fragment slices data into chunks of at most maxFragPayload bytes.
-// Empty or nil input returns a single empty chunk (needed for TypeCloseConn payloads).
-func fragment(data []byte) [][]byte {
-	if len(data) == 0 {
-		return [][]byte{{}}
-	}
-	var parts [][]byte
-	for len(data) > 0 {
-		size := maxFragPayload
-		if size > len(data) {
-			size = len(data)
-		}
-		parts = append(parts, data[:size])
-		data = data[size:]
-	}
-	return parts
-}
-
-// fragBuffer accumulates fragments for one logical message.
-// Only accessed from the readLoop goroutine; no locking needed.
-type fragBuffer struct {
-	parts   [][]byte
-	gotLast bool
-	lastIdx int
-}
-
-// addPart records one fragment. Returns the assembled payload and true when the final
-// fragment has been received and all preceding parts are present.
-func (fb *fragBuffer) addPart(partIndex int, isLast bool, data []byte) ([]byte, bool) {
-	for len(fb.parts) <= partIndex {
-		fb.parts = append(fb.parts, nil)
-	}
-	if fb.parts[partIndex] == nil {
-		fb.parts[partIndex] = append([]byte(nil), data...)
-	}
-	if isLast {
-		fb.gotLast = true
-		fb.lastIdx = partIndex
-	}
-	if !fb.gotLast {
-		return nil, false
-	}
-	for i := 0; i <= fb.lastIdx; i++ {
-		if i >= len(fb.parts) || fb.parts[i] == nil {
-			return nil, false
-		}
-	}
-	assembled := make([]byte, 0, (fb.lastIdx+1)*maxFragPayload)
-	for i := 0; i <= fb.lastIdx; i++ {
-		assembled = append(assembled, fb.parts[i]...)
-	}
-	*fb = fragBuffer{}
-	return assembled, true
+	}, nil
 }
 
 // muxSession manages one Reticulum connection and multiplexes virtual connections.
 type muxSession struct {
 	inner      net.Conn
-	writeMu    sync.Mutex // serialises writes so all fragments of one message are consecutive
+	writeMu    sync.Mutex // serialises writes so TypeLargeData packets are sent atomically
 	mu         sync.Mutex // protects conns
 	nextConnID uint32     // accessed via sync/atomic; cast to uint16; exhausted if > 65535
 	closedFlag uint32     // 0 = open, 1 = closed (atomic)
@@ -226,42 +135,18 @@ func (s *muxSession) writeCtrl(typ byte, id uint16, payload []byte) error {
 	return err
 }
 
-// writeData sends data for virtual connection id.
-//
-// Payloads that fit within 64 fragments (≤ 64 × maxFragPayload bytes) are
-// fragmented and sent as individual data packets — no mux-layer reassembly
-// needed on the receiver because the bridge maps each fragment to a single
-// Reticulum data_packet.
-//
-// Larger payloads are sent as a single TypeLargeData control packet. The
-// bridge routes those to the Reticulum Resource protocol, which handles
-// splitting internally and delivers the reassembled bytes to the peer via a
-// single on_data callback, preserving message boundaries.
+// writeData sends data for virtual connection id as a single TypeLargeData
+// control packet. The bridge routes it via the Reticulum Resource protocol
+// (up to 64 MB), which handles splitting and retransmission internally.
 func (s *muxSession) writeData(id uint16, data []byte) error {
-	if len(data) > maxFragPayload*64 {
-		msg := make([]byte, muxHeaderSize+len(data))
-		msg[0] = TypeLargeData
-		binary.BigEndian.PutUint16(msg[1:3], id)
-		copy(msg[3:], data)
-		s.writeMu.Lock()
-		defer s.writeMu.Unlock()
-		_, err := s.inner.Write(msg)
-		return err
-	}
-	parts := fragment(data)
+	msg := make([]byte, muxHeaderSize+len(data))
+	msg[0] = TypeLargeData
+	binary.BigEndian.PutUint16(msg[1:3], id)
+	copy(msg[3:], data)
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	for i, part := range parts {
-		pkt := muxPacket{
-			typeByte: encodeDataByte(len(parts), i),
-			connID:   id,
-			payload:  part,
-		}
-		if _, err := s.inner.Write(encodePacket(pkt)); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err := s.inner.Write(msg)
+	return err
 }
 
 // removeConn removes a virtual connection from the session map.
@@ -296,8 +181,6 @@ func (s *muxSession) readLoop() {
 		}
 	}
 
-	fragBufs := make(map[uint16]*fragBuffer)
-
 	for {
 		msg, err := readOne()
 		if err != nil {
@@ -315,70 +198,41 @@ func (s *muxSession) readLoop() {
 			continue
 		}
 
-		if isControl(pkt.typeByte) {
-			switch pkt.typeByte {
-			case TypeNewConn:
-				dest := string(pkt.payload)
-				mc := newMuxConn(pkt.connID, s, dest)
-				s.mu.Lock()
-				s.conns[pkt.connID] = mc
-				s.mu.Unlock()
-				if s.incomingCh != nil {
-					select {
-					case s.incomingCh <- mc:
-					default:
-						if s.logger != nil {
-							s.logger.Error("mux: incomingCh full, dropping conn ", pkt.connID)
-						}
-						mc.closeOnce.Do(func() { close(mc.done) })
-						s.removeConn(pkt.connID)
-					}
-				}
-			case TypeCloseConn:
-				delete(fragBufs, pkt.connID)
-				s.closeConnRemote(pkt.connID)
-			case TypeLargeData:
-				// Full payload delivered atomically via Resource protocol.
-				s.mu.Lock()
-				mc := s.conns[pkt.connID]
-				s.mu.Unlock()
-				if mc == nil {
-					continue
-				}
+		switch pkt.typeByte {
+		case TypeNewConn:
+			dest := string(pkt.payload)
+			mc := newMuxConn(pkt.connID, s, dest)
+			s.mu.Lock()
+			s.conns[pkt.connID] = mc
+			s.mu.Unlock()
+			if s.incomingCh != nil {
 				select {
-				case mc.readCh <- pkt.payload:
-				case <-mc.done:
-				}
-			default:
-				if s.logger != nil {
-					s.logger.Debug("mux: unhandled control 0x", fmt.Sprintf("%02x", pkt.typeByte))
+				case s.incomingCh <- mc:
+				default:
+					if s.logger != nil {
+						s.logger.Error("mux: incomingCh full, dropping conn ", pkt.connID)
+					}
+					mc.closeOnce.Do(func() { close(mc.done) })
+					s.removeConn(pkt.connID)
 				}
 			}
-			continue
-		}
-
-		// Data packet: accumulate fragments.
-		fb := fragBufs[pkt.connID]
-		if fb == nil {
-			fb = &fragBuffer{}
-			fragBufs[pkt.connID] = fb
-		}
-		assembled, done := fb.addPart(pkt.partIndex, pkt.isLast, pkt.payload)
-		if !done {
-			continue
-		}
-		delete(fragBufs, pkt.connID)
-
-		s.mu.Lock()
-		mc := s.conns[pkt.connID]
-		s.mu.Unlock()
-		if mc == nil {
-			continue // connection already closed
-		}
-		select {
-		case mc.readCh <- assembled:
-		case <-mc.done:
-			// conn closed by local side; discard
+		case TypeCloseConn:
+			s.closeConnRemote(pkt.connID)
+		case TypeLargeData:
+			s.mu.Lock()
+			mc := s.conns[pkt.connID]
+			s.mu.Unlock()
+			if mc == nil {
+				continue
+			}
+			select {
+			case mc.readCh <- pkt.payload:
+			case <-mc.done:
+			}
+		default:
+			if s.logger != nil {
+				s.logger.Debug("mux: unhandled packet 0x", fmt.Sprintf("%02x", pkt.typeByte))
+			}
 		}
 	}
 }
@@ -470,7 +324,7 @@ func (c *muxConn) Read(b []byte) (int, error) {
 	}
 }
 
-// Write sends data over the virtual connection, fragmenting if necessary.
+// Write sends data over the virtual connection.
 func (c *muxConn) Write(b []byte) (int, error) {
 	if err := c.session.writeData(c.id, b); err != nil {
 		return 0, err

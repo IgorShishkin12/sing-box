@@ -10,42 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// --- encodeDataByte / decodeDataByte ---
-
-func TestEncodeDataByte_single(t *testing.T) {
-	// total=1, partIdx=0 → isLast=1, partIndex=0 → 0x40
-	require.Equal(t, byte(0x40), encodeDataByte(1, 0))
-}
-
-func TestEncodeDataByte_twoOfThree(t *testing.T) {
-	// total=3, partIdx=1 → isLast=0, partIndex=1 → 0x01
-	require.Equal(t, byte(0x01), encodeDataByte(3, 1))
-}
-
-func TestDecodeDataByte_zero(t *testing.T) {
-	// 0x00: isLast=false, partIndex=0
-	isLast, idx := decodeDataByte(0x00)
-	require.False(t, isLast)
-	require.Equal(t, 0, idx)
-}
-
-func TestDecodeDataByte_multipart(t *testing.T) {
-	// middle of a 3-part message: isLast=false, partIndex=1
-	b := encodeDataByte(3, 1)
-	isLast, idx := decodeDataByte(b)
-	require.False(t, isLast)
-	require.Equal(t, 1, idx)
-}
-
-func TestDecodeDataByte_max(t *testing.T) {
-	// last of 64 parts: isLast=true, partIndex=63 → 0x7F
-	b := encodeDataByte(64, 63)
-	require.Equal(t, byte(0x7F), b)
-	isLast, idx := decodeDataByte(b)
-	require.True(t, isLast)
-	require.Equal(t, 63, idx)
-}
-
 func TestIsControl(t *testing.T) {
 	for b := 0; b < 256; b++ {
 		want := b >= 0x80
@@ -55,29 +19,21 @@ func TestIsControl(t *testing.T) {
 
 // --- encodePacket / decodePacket ---
 
-func TestEncodeDecodePacket_data(t *testing.T) {
+func TestEncodeDecodePacket_largeData(t *testing.T) {
 	payload := []byte("hello")
-	p := muxPacket{
-		typeByte:  encodeDataByte(1, 0), // single-frag: isLast=true, partIndex=0 → 0x40
-		connID:    0x1234,
-		payload:   payload,
-		isLast:    true,
-		partIndex: 0,
-	}
+	p := muxPacket{typeByte: TypeLargeData, connID: 0x1234, payload: payload}
 	encoded := encodePacket(p)
 	require.Len(t, encoded, muxHeaderSize+len(payload))
-	require.Equal(t, byte(0x40), encoded[0])
+	require.Equal(t, TypeLargeData, encoded[0])
 	require.Equal(t, byte(0x12), encoded[1])
 	require.Equal(t, byte(0x34), encoded[2])
 	require.Equal(t, payload, encoded[3:])
 
 	decoded, err := decodePacket(encoded)
 	require.NoError(t, err)
-	require.Equal(t, p.typeByte, decoded.typeByte)
-	require.Equal(t, p.connID, decoded.connID)
+	require.Equal(t, TypeLargeData, decoded.typeByte)
+	require.Equal(t, uint16(0x1234), decoded.connID)
 	require.Equal(t, payload, decoded.payload)
-	require.True(t, decoded.isLast)
-	require.Equal(t, 0, decoded.partIndex)
 }
 
 func TestEncodeDecodePacket_control(t *testing.T) {
@@ -104,72 +60,6 @@ func TestEncodeDecodePacket_control(t *testing.T) {
 func TestDecodePacket_tooShort(t *testing.T) {
 	_, err := decodePacket([]byte{0x00, 0x00}) // only 2 bytes; need ≥ 3
 	require.Error(t, err)
-}
-
-// --- fragment ---
-
-func TestFragment_small(t *testing.T) {
-	data := make([]byte, 100)
-	parts := fragment(data)
-	require.Len(t, parts, 1)
-	require.Len(t, parts[0], 100)
-}
-
-func TestFragment_exact(t *testing.T) {
-	data := make([]byte, maxFragPayload)
-	parts := fragment(data)
-	require.Len(t, parts, 1)
-	require.Len(t, parts[0], maxFragPayload)
-}
-
-func TestFragment_split(t *testing.T) {
-	data := make([]byte, maxFragPayload+1)
-	parts := fragment(data)
-	require.Len(t, parts, 2)
-	require.Len(t, parts[0], maxFragPayload)
-	require.Len(t, parts[1], 1)
-}
-
-func TestFragment_mss(t *testing.T) {
-	data := make([]byte, 6*maxFragPayload) // 1182 bytes
-	parts := fragment(data)
-	require.Len(t, parts, 6)
-	for i, p := range parts {
-		require.Len(t, p, maxFragPayload, "fragment %d wrong size", i)
-	}
-}
-
-func TestFragment_empty(t *testing.T) {
-	for _, input := range [][]byte{nil, {}} {
-		parts := fragment(input)
-		require.Len(t, parts, 1)
-		require.Empty(t, parts[0])
-	}
-}
-
-// --- fragBuffer ---
-
-func TestFragBuffer_singlePart(t *testing.T) {
-	fb := &fragBuffer{}
-	assembled, done := fb.addPart(0, true, []byte("hello"))
-	require.True(t, done)
-	require.Equal(t, []byte("hello"), assembled)
-}
-
-func TestFragBuffer_multiPart(t *testing.T) {
-	fb := &fragBuffer{}
-
-	assembled, done := fb.addPart(0, false, []byte("hel"))
-	require.False(t, done)
-	require.Nil(t, assembled)
-
-	assembled, done = fb.addPart(1, false, []byte("lo "))
-	require.False(t, done)
-	require.Nil(t, assembled)
-
-	assembled, done = fb.addPart(2, true, []byte("world"))
-	require.True(t, done)
-	require.Equal(t, []byte("hello world"), assembled)
 }
 
 // --- muxSession integration ---
@@ -220,7 +110,7 @@ func TestMuxSession_newConn(t *testing.T) {
 }
 
 func TestMuxSession_smallData(t *testing.T) {
-	client, server := newTestMuxPair(t)
+	client, server := newTestMuxPairMsg(t)
 
 	mc, err := client.OpenConn("127.0.0.1:8080")
 	require.NoError(t, err)
@@ -240,7 +130,7 @@ func TestMuxSession_smallData(t *testing.T) {
 }
 
 func TestMuxSession_largeData(t *testing.T) {
-	client, server := newTestMuxPair(t)
+	client, server := newTestMuxPairMsg(t)
 
 	mc, err := client.OpenConn("127.0.0.1:8080")
 	require.NoError(t, err)
@@ -249,7 +139,6 @@ func TestMuxSession_largeData(t *testing.T) {
 	sc := <-server.incomingCh
 	defer sc.Close()
 
-	// 1000 bytes → ceil(1000/197) = 6 fragments
 	sent := make([]byte, 1000)
 	for i := range sent {
 		sent[i] = byte(i % 251)
@@ -264,7 +153,7 @@ func TestMuxSession_largeData(t *testing.T) {
 }
 
 func TestMuxSession_multiplexing(t *testing.T) {
-	client, server := newTestMuxPair(t)
+	client, server := newTestMuxPairMsg(t)
 
 	mc1, err := client.OpenConn("host1:80")
 	require.NoError(t, err)
@@ -346,31 +235,6 @@ func TestMuxSession_veryLargeData(t *testing.T) {
 	require.Equal(t, sent, got)
 }
 
-// TestMuxSession_boundaryData verifies that exactly 64*maxFragPayload bytes
-// still uses the fragment path (not TypeLargeData).
-func TestMuxSession_boundaryData(t *testing.T) {
-	client, server := newTestMuxPair(t)
-
-	mc, err := client.OpenConn("127.0.0.1:8080")
-	require.NoError(t, err)
-	defer mc.Close()
-
-	sc := <-server.incomingCh
-	defer sc.Close()
-
-	sent := make([]byte, maxFragPayload*64) // exactly at the fragment limit
-	for i := range sent {
-		sent[i] = byte(i % 199)
-	}
-
-	_, err = mc.Write(sent)
-	require.NoError(t, err)
-
-	got := make([]byte, len(sent))
-	_, err = io.ReadFull(sc, got)
-	require.NoError(t, err)
-	require.Equal(t, sent, got)
-}
 
 func TestMuxSession_idExhaustion(t *testing.T) {
 	cc, sc := net.Pipe()
