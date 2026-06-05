@@ -130,22 +130,22 @@ impl Connection {
                             .await
                             .map_err(|e| format!("send_resource: {:?}", e))?
                     };
-                    // Block until the peer confirms receipt. This keeps BridgeWrite
-                    // blocked → mux writeMu held → ordering preserved.
-                    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                    // Block until the peer confirms receipt. The inactivity deadline
+                    // is reset whenever a Progress event reports more bytes received
+                    // than last time — i.e. the transport is visibly making progress.
+                    // Note: Progress fires only for inbound resources on this node,
+                    // so for a purely outbound transfer this still degrades to a
+                    // wall-clock timeout; a proper fix requires an OutboundProgress
+                    // event from the library (see open issue).
+                    const INACTIVITY_SECS: u64 = 60;
+                    let mut last_progress_bytes: u64 = 0;
+                    let mut deadline = tokio::time::Instant::now()
+                        + Duration::from_secs(INACTIVITY_SECS);
                     loop {
-                        let remaining =
-                            deadline.saturating_duration_since(tokio::time::Instant::now());
-                        if remaining.is_zero() {
-                            return Err(format!(
-                                "resource outbound-complete timeout for hash={}",
-                                resource_hash
-                            ));
-                        }
                         tokio::select! {
-                            _ = tokio::time::sleep(remaining) => {
+                            _ = tokio::time::sleep_until(deadline) => {
                                 return Err(format!(
-                                    "resource outbound-complete timeout for hash={}",
+                                    "resource inactivity timeout for hash={}",
                                     resource_hash
                                 ));
                             }
@@ -157,6 +157,17 @@ impl Connection {
                                         ..
                                     }) if hash == resource_hash => {
                                         return Ok(data.len());
+                                    }
+                                    Ok(ResourceEvent {
+                                        kind: ResourceEventKind::Progress(ref p),
+                                        ..
+                                    }) => {
+                                        if p.received_bytes > last_progress_bytes {
+                                            last_progress_bytes = p.received_bytes;
+                                            deadline = tokio::time::Instant::now()
+                                                + Duration::from_secs(INACTIVITY_SECS);
+                                        }
+                                        continue;
                                     }
                                     Ok(_) => continue,
                                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
