@@ -787,7 +787,9 @@ pub fn spawn_resource_event_reader(
                     if let ResourceEventKind::Complete(complete) = event.kind {
                         log::trace!(
                             "resource complete: conn={} link={} len={}",
-                            conn_id, link_id, complete.data.len()
+                            conn_id,
+                            link_id,
+                            complete.data.len()
                         );
                         crate::c_api::call_on_data(conn_id, &complete.data);
                     }

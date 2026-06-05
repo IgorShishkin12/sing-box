@@ -1,12 +1,11 @@
+use reticulum_rs::packet::LXMF_MAX_PAYLOAD;
+use reticulum_rs::resource::{ResourceEvent, ResourceEventKind};
 use reticulum_rs::transport::destination::link::Link;
 use reticulum_rs::transport::hash::AddressHash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
-
-/// Maximum plaintext bytes per `data_packet()` call.
-/// Derived from `PACKET_MDU (464) - Fernet overhead (IV 16 + HMAC 32 + AES padding 16) = 400`.
-const LXMF_MAX_PAYLOAD: usize = 400;
 
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -114,13 +113,62 @@ impl Connection {
                     }
                     Ok(data.len())
                 } else {
-                    let transport = crate::transport::get_transport()
-                        .ok_or_else(|| "transport not initialized".to_string())?;
-                    let tp = transport.lock().await;
-                    tp.send_resource(link_id, data.to_vec(), None)
-                        .await
-                        .map(|_hash| data.len())
-                        .map_err(|e| format!("send_resource: {:?}", e))
+                    // Subscribe before sending so we never miss OutboundComplete
+                    // even if the peer acknowledges very quickly.
+                    let mut resource_rx = {
+                        let tp = crate::transport::get_transport()
+                            .ok_or_else(|| "transport not initialized".to_string())?;
+                        let guard = tp.lock().await;
+                        guard.resource_events()
+                    };
+                    let resource_hash = {
+                        let tp = crate::transport::get_transport()
+                            .ok_or_else(|| "transport not initialized".to_string())?;
+                        let guard = tp.lock().await;
+                        guard
+                            .send_resource(link_id, data.to_vec(), None)
+                            .await
+                            .map_err(|e| format!("send_resource: {:?}", e))?
+                    };
+                    // Block until the peer confirms receipt. This keeps BridgeWrite
+                    // blocked → mux writeMu held → ordering preserved.
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                    loop {
+                        let remaining =
+                            deadline.saturating_duration_since(tokio::time::Instant::now());
+                        if remaining.is_zero() {
+                            return Err(format!(
+                                "resource outbound-complete timeout for hash={}",
+                                resource_hash
+                            ));
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep(remaining) => {
+                                return Err(format!(
+                                    "resource outbound-complete timeout for hash={}",
+                                    resource_hash
+                                ));
+                            }
+                            result = resource_rx.recv() => {
+                                match result {
+                                    Ok(ResourceEvent {
+                                        hash,
+                                        kind: ResourceEventKind::OutboundComplete,
+                                        ..
+                                    }) if hash == resource_hash => {
+                                        return Ok(data.len());
+                                    }
+                                    Ok(_) => continue,
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                        return Err("resource event channel closed".to_string());
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             #[cfg(test)]

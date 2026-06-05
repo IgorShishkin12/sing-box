@@ -238,30 +238,29 @@ func (s *muxSession) writeCtrl(typ byte, id uint16, payload []byte) error {
 // splitting internally and delivers the reassembled bytes to the peer via a
 // single on_data callback, preserving message boundaries.
 func (s *muxSession) writeData(id uint16, data []byte) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if len(data) > maxFragPayload*64 {
 		msg := make([]byte, muxHeaderSize+len(data))
 		msg[0] = TypeLargeData
 		binary.BigEndian.PutUint16(msg[1:3], id)
 		copy(msg[3:], data)
-		s.writeMu.Lock()
-		defer s.writeMu.Unlock()
 		_, err := s.inner.Write(msg)
 		return err
-	}
-	parts := fragment(data)
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	for i, part := range parts {
-		pkt := muxPacket{
-			typeByte: encodeDataByte(len(parts), i),
-			connID:   id,
-			payload:  part,
+	} else {
+		parts := fragment(data)
+		for i, part := range parts {
+			pkt := muxPacket{
+				typeByte: encodeDataByte(len(parts), i),
+				connID:   id,
+				payload:  part,
+			}
+			if _, err := s.inner.Write(encodePacket(pkt)); err != nil {
+				return err
+			}
 		}
-		if _, err := s.inner.Write(encodePacket(pkt)); err != nil {
-			return err
-		}
+		return nil
 	}
-	return nil
 }
 
 // removeConn removes a virtual connection from the session map.
