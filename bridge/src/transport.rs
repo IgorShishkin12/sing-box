@@ -246,14 +246,6 @@ pub fn config_dir_path(cfg: &ReticulumConfig) -> String {
 // Interface spawning
 // ---------------------------------------------------------------------------
 
-fn default_interfaces() -> Vec<ReticulumInterface> {
-    vec![ReticulumInterface {
-        name: Some("Default Interface".to_string()),
-        iface_type: "AutoInterface".to_string(),
-        ..Default::default()
-    }]
-}
-
 /// Spawn network interfaces from the config list.
 ///
 /// If `interfaces` is empty, falls back to a single AutoInterface (UDP broadcast).
@@ -263,10 +255,14 @@ async fn spawn_interfaces(
     interfaces: &[ReticulumInterface],
     iface_mgr_arc: Arc<tokio::sync::Mutex<InterfaceManager>>,
 ) {
-    let defaults = default_interfaces();
+    let default = vec![ReticulumInterface {
+        name: Some("Default Interface".to_string()),
+        iface_type: "AutoInterface".to_string(),
+        ..Default::default()
+    }];
     let ifaces = if interfaces.is_empty() {
         log::info!("no interfaces configured, using AutoInterface default");
-        defaults.as_slice()
+        default.as_slice()
     } else {
         interfaces
     };

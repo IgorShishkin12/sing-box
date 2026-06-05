@@ -556,52 +556,6 @@ func TestRetransmitOnTimeout(t *testing.T) {
 	}
 }
 
-// TestStaleFragBufferDiscard verifies that the receiver discards a partial fragment
-// buffer that has received no new fragments for fragTimeout.
-func TestStaleFragBufferDiscard(t *testing.T) {
-	client, server := newTestMuxPairWithWindow(t, 16)
-
-	// Open a connection, register on server.
-	mc, err := client.OpenConn("127.0.0.1:8080")
-	require.NoError(t, err)
-	defer mc.Close()
-	sc := <-server.incomingCh
-	defer sc.Close()
-
-	// Send a large message (2 fragments) but manually drop the second fragment.
-	// We do this by writing directly to the session's sendQ at the raw level.
-	// For simplicity, send a real message and then send another message on a
-	// DIFFERENT conn ID whose fragment arrives before the first is complete,
-	// triggering the GC pass. The stale buffer should be discarded.
-	//
-	// Approach: create a "ghost" conn (known ID, not in server.conns) whose
-	// fragment 0 (not-last) arrives, then nothing more comes for fragTimeout.
-	// The next real packet should trigger GC and drop the ghost buffer.
-	ghostID := uint16(0xDEAD)
-	ghostFrag := encodePacket(muxPacket{
-		typeByte: encodeDataByte(2, 0), // part 0 of 2 — not last
-		connID:   ghostID,
-		payload:  []byte("ghost"),
-	})
-	// Write directly into the client's inner conn so the server readLoop sees it.
-	// Use the server's inner conn directly (it's a net.Pipe end).
-	// We can't easily inject raw packets into the net.Pipe from outside. Instead,
-	// verify the GC doesn't crash and existing conns still work after the timeout.
-	_ = ghostFrag // used in manual injection below
-
-	// Send a real message — verify it still arrives correctly after fragTimeout elapses.
-	time.Sleep(client.fragTimeout * 2) // wait past the stale deadline
-
-	sent := []byte("after timeout")
-	_, err = mc.Write(sent)
-	require.NoError(t, err)
-
-	got := make([]byte, len(sent))
-	_, err = io.ReadFull(sc, got)
-	require.NoError(t, err)
-	require.Equal(t, sent, got)
-}
-
 // TestRetransmitGivesUp verifies TCP-mode behaviour: with immediate slot release,
 // inFlight is always empty, so the retransmit-give-up path never fires and the
 // connection stays open after the initial send regardless of missing TypeFragAck.

@@ -42,13 +42,3 @@ pub struct ReticulumInterface {
 pub fn parse_config(json_str: &str) -> Result<ReticulumConfig, serde_json::Error> {
     serde_json::from_str(json_str)
 }
-
-/// Validate that identity resolution will succeed at init time.
-/// Returns an error description string if validation fails.
-pub fn validate_identity(cfg: &ReticulumConfig) -> Result<(), &'static str> {
-    if cfg.identity_key.is_some() || cfg.identity_name.is_some() {
-        Ok(())
-    } else {
-        Err("config must contain either 'identity_key' (128-char hex) or 'identity_name'")
-    }
-}
