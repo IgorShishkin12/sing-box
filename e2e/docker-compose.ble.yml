@@ -1,0 +1,55 @@
+name: retv2e2e
+
+# Run via runner-hw.sh which generates configs/client-ble-resolved.json and
+# configs/server-ble-resolved.json from the templates before invoking compose.
+
+services:
+  e2e-server:
+    image: retv2e2e-server:latest
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile.server
+    command: >
+      -c "
+        sum-server &
+        sing-box run -c /etc/sing-box/config.json
+      "
+    # BlueZ requires access to the D-Bus system socket and the HCI device.
+    privileged: true
+    volumes:
+      - ./configs/server-ble-resolved.json:/etc/sing-box/config.json:ro
+      - /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket
+    networks:
+      - e2e-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8080/sum -H 'Content-Type: application/json' -d '{\"a\":1,\"b\":1}' > /dev/null 2>&1 && pgrep -x sing-box > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 24
+      start_period: 60s
+
+  e2e-client:
+    image: retv2e2e-client:latest
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile.client
+    command: >
+      -c "
+        sing-box run -c /etc/sing-box/config.json &
+        e2e-loadtest --socks 127.0.0.1:1080 --url http://127.0.0.1:8080
+          --warmup-timeout 180s --concurrency 5 --requests 20 --long-terms 2000 &&
+        echo 'ALL E2E BLE TESTS PASSED'
+      "
+    privileged: true
+    volumes:
+      - ./configs/client-ble-resolved.json:/etc/sing-box/config.json:ro
+      - /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket
+    networks:
+      - e2e-net
+    depends_on:
+      e2e-server:
+        condition: service_healthy
+
+networks:
+  e2e-net:
+    driver: bridge

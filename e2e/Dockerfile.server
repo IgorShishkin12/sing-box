@@ -1,6 +1,6 @@
 FROM golang:1.24-alpine AS builder
 
-RUN apk add --no-cache rust cargo build-base git
+RUN apk add --no-cache rust cargo build-base git dbus-dev pkgconfig
 
 WORKDIR /workspace/sing-box
 
@@ -38,7 +38,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 FROM alpine:3.20
 
-RUN apk add --no-cache bash curl ca-certificates libgcc libstdc++ coreutils
+RUN apk add --no-cache bash curl ca-certificates libgcc libstdc++ coreutils dbus-libs
 
 COPY --from=builder /usr/local/bin/sing-box /usr/local/bin/sing-box
 COPY --from=builder /usr/local/bin/sum-server /usr/local/bin/sum-server

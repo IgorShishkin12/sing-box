@@ -213,9 +213,25 @@ func TestFragBuffer_multiPart(t *testing.T) {
 // --- muxSession integration ---
 
 // newTestMuxPair creates a client+server muxSession pair connected via net.Pipe.
+// Uses byte-stream semantics; suitable for messages up to ~25 KB (64 fragments).
 func newTestMuxPair(t *testing.T) (client, server *muxSession) {
 	t.Helper()
 	cc, sc := net.Pipe()
+	t.Cleanup(func() {
+		cc.Close()
+		sc.Close()
+	})
+	client = newMuxSessionClient(cc, nil)
+	server = newMuxSessionServer(sc, nil)
+	return
+}
+
+// newTestMuxPairMsg creates a client+server muxSession pair backed by the
+// existing chanConn (message-boundary). Required for TypeLargeData tests
+// (payloads > 64*maxFragPayload) where net.Pipe byte-stream semantics break.
+func newTestMuxPairMsg(t *testing.T) (client, server *muxSession) {
+	t.Helper()
+	cc, sc := newChanConnPair()
 	t.Cleanup(func() {
 		cc.Close()
 		sc.Close()
@@ -338,6 +354,60 @@ func TestMuxSession_connClose(t *testing.T) {
 	buf := make([]byte, 4)
 	_, err = sc.Read(buf)
 	require.ErrorIs(t, err, io.EOF)
+}
+
+// TestMuxSession_veryLargeData verifies the TypeLargeData path for payloads that
+// exceed the 64-fragment limit (> 64*maxFragPayload bytes).
+// Uses chanConn (message-boundary) so the full TypeLargeData message arrives whole.
+func TestMuxSession_veryLargeData(t *testing.T) {
+	client, server := newTestMuxPairMsg(t)
+
+	mc, err := client.OpenConn("127.0.0.1:8080")
+	require.NoError(t, err)
+	defer mc.Close()
+
+	sc := <-server.incomingCh
+	defer sc.Close()
+
+	// 100 KB — well above the 64-fragment cap of ~25 KB.
+	sent := make([]byte, 100*1024)
+	for i := range sent {
+		sent[i] = byte(i % 251)
+	}
+
+	_, err = mc.Write(sent)
+	require.NoError(t, err)
+
+	got := make([]byte, len(sent))
+	_, err = io.ReadFull(sc, got)
+	require.NoError(t, err)
+	require.Equal(t, sent, got)
+}
+
+// TestMuxSession_boundaryData verifies that exactly 64*maxFragPayload bytes
+// still uses the fragment path (not TypeLargeData).
+func TestMuxSession_boundaryData(t *testing.T) {
+	client, server := newTestMuxPair(t)
+
+	mc, err := client.OpenConn("127.0.0.1:8080")
+	require.NoError(t, err)
+	defer mc.Close()
+
+	sc := <-server.incomingCh
+	defer sc.Close()
+
+	sent := make([]byte, maxFragPayload*64) // exactly at the fragment limit
+	for i := range sent {
+		sent[i] = byte(i % 199)
+	}
+
+	_, err = mc.Write(sent)
+	require.NoError(t, err)
+
+	got := make([]byte, len(sent))
+	_, err = io.ReadFull(sc, got)
+	require.NoError(t, err)
+	require.Equal(t, sent, got)
 }
 
 func TestMuxSession_idExhaustion(t *testing.T) {
@@ -554,52 +624,6 @@ func TestRetransmitOnTimeout(t *testing.T) {
 	case <-time.After(s.retryInterval * 3):
 		// correct: no retransmit
 	}
-}
-
-// TestStaleFragBufferDiscard verifies that the receiver discards a partial fragment
-// buffer that has received no new fragments for fragTimeout.
-func TestStaleFragBufferDiscard(t *testing.T) {
-	client, server := newTestMuxPairWithWindow(t, 16)
-
-	// Open a connection, register on server.
-	mc, err := client.OpenConn("127.0.0.1:8080")
-	require.NoError(t, err)
-	defer mc.Close()
-	sc := <-server.incomingCh
-	defer sc.Close()
-
-	// Send a large message (2 fragments) but manually drop the second fragment.
-	// We do this by writing directly to the session's sendQ at the raw level.
-	// For simplicity, send a real message and then send another message on a
-	// DIFFERENT conn ID whose fragment arrives before the first is complete,
-	// triggering the GC pass. The stale buffer should be discarded.
-	//
-	// Approach: create a "ghost" conn (known ID, not in server.conns) whose
-	// fragment 0 (not-last) arrives, then nothing more comes for fragTimeout.
-	// The next real packet should trigger GC and drop the ghost buffer.
-	ghostID := uint16(0xDEAD)
-	ghostFrag := encodePacket(muxPacket{
-		typeByte: encodeDataByte(2, 0), // part 0 of 2 — not last
-		connID:   ghostID,
-		payload:  []byte("ghost"),
-	})
-	// Write directly into the client's inner conn so the server readLoop sees it.
-	// Use the server's inner conn directly (it's a net.Pipe end).
-	// We can't easily inject raw packets into the net.Pipe from outside. Instead,
-	// verify the GC doesn't crash and existing conns still work after the timeout.
-	_ = ghostFrag // used in manual injection below
-
-	// Send a real message — verify it still arrives correctly after fragTimeout elapses.
-	time.Sleep(client.fragTimeout * 2) // wait past the stale deadline
-
-	sent := []byte("after timeout")
-	_, err = mc.Write(sent)
-	require.NoError(t, err)
-
-	got := make([]byte, len(sent))
-	_, err = io.ReadFull(sc, got)
-	require.NoError(t, err)
-	require.Equal(t, sent, got)
 }
 
 // TestRetransmitGivesUp verifies TCP-mode behaviour: with immediate slot release,

@@ -1,0 +1,46 @@
+{
+  "log": {
+    "level": "info",
+    "output": "/dev/stdout",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "reticulum",
+      "tag": "reticulum-in",
+      "name": "e2e-sum-server",
+      "password": "e2e-test-password",
+      "reticulum_config": {
+        "identity_name": "e2e-server",
+        "storage_path": "/var/lib/reticulum/server-serial",
+        "interfaces": [
+          {
+            "name": "RNode Serial Server",
+            "type": "RNodeSerial",
+            "device": "/dev/ttyUSB0",
+            "frequency_hz": 868000000,
+            "bandwidth_hz": 125000,
+            "tx_power_dbm": 14,
+            "spreading_factor": 9,
+            "coding_rate": 5
+          }
+        ]
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "inbound": "reticulum-in",
+        "outbound": "direct"
+      }
+    ],
+    "final": "direct"
+  }
+}
