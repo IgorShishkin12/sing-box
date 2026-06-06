@@ -198,17 +198,6 @@ func newSendQueue(bufSize int) *sendQueue {
 	}
 }
 
-func (q *sendQueue) enqueue(f *queuedFrag) {
-	switch f.prio {
-	case prioRetransmit:
-		q.retransmit <- f
-	case prioInProgress:
-		q.inProgress <- f
-	default:
-		q.newMsg <- f
-	}
-}
-
 // run is the send-queue worker goroutine. It drains items in priority order and
 // calls s.doWrite for each. Exits when s.done is closed.
 func (q *sendQueue) run(s *muxSession) {
@@ -348,25 +337,22 @@ func (s *muxSession) writeCtrl(typ byte, id uint16, payload []byte) error {
 // writeData sends data for virtual connection id.
 // Payloads exceeding the 64-fragment limit (~25 KB) are sent as a single
 // TypeLargeData control packet via the Reticulum Resource protocol.
-// Smaller payloads are enqueued as fragments; actual writes happen in the
-// send-queue worker. All fragments use prioNew to preserve intra-message order.
+// Smaller payloads are fragmented and written synchronously under innerWriteMu
+// so that a concurrent Close() cannot send TypeCloseConn before all fragments
+// have been transmitted.
 func (s *muxSession) writeData(id uint16, data []byte) error {
 	if len(data) > maxFragPayload*64 {
 		return s.writeCtrl(TypeLargeData, id, data)
 	}
 	parts := fragment(data)
 	n := len(parts)
+	s.innerWriteMu.Lock()
+	defer s.innerWriteMu.Unlock()
 	for i, part := range parts {
-		f := &queuedFrag{
-			encoded: encodePacket(muxPacket{
-				typeByte: encodeDataByte(n, i),
-				connID:   id,
-				payload:  part,
-			}),
-			key:  fragKey{connID: id, partIndex: uint8(i)},
-			prio: prioNew,
+		pkt := muxPacket{typeByte: encodeDataByte(n, i), connID: id, payload: part}
+		if _, err := s.inner.Write(encodePacket(pkt)); err != nil {
+			return err
 		}
-		s.sendQ.enqueue(f)
 	}
 	return nil
 }
