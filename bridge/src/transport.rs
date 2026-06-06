@@ -696,17 +696,27 @@ pub async fn wait_for_service_announce(name: &str, timeout: Duration) -> Option<
 /// (client) **before** the link activates so that the event is buffered and not
 /// missed.
 ///
+/// The identify is re-sent every `IDENTIFY_RETRY_INTERVAL` until the peer's
+/// identify arrives or `IDENTIFY_TIMEOUT` elapses. Fernet encryption uses a
+/// random IV per call, so each re-send has a unique packet hash and is not
+/// dropped by the transport's dedup cache.
+///
 /// Logs:
 ///   my_identity:   addr=… encrypt=… sign=…
 ///   peer_identity: addr=… encrypt=… sign=…
 ///
-/// Returns `None` if the local identity is unavailable, the identify packet
-/// cannot be sent, or the peer's identify does not arrive within 5 seconds.
+/// Returns `None` if the local identity is unavailable or the exchange times out.
 pub async fn exchange_identify_on_link(
     link: &Arc<Mutex<Link>>,
     link_id: AddressHash,
     link_events: &mut broadcast::Receiver<LinkEventData>,
 ) -> Option<AddressHash> {
+    // Timeout matches DIAL_TIMEOUT: on multicast networks the peer's link proof
+    // may be delayed by ~6 s (repeat link-request interval), so the peer's
+    // identify arrives well after the link activates on our side.
+    const IDENTIFY_TIMEOUT: Duration = Duration::from_secs(30);
+    const IDENTIFY_RETRY_INTERVAL: Duration = Duration::from_secs(3);
+
     let transport_id = get_transport_identity()?;
 
     let my_id = transport_id.as_identity();
@@ -717,46 +727,53 @@ pub async fn exchange_identify_on_link(
         hex::encode(my_id.verifying_key_bytes()),
     );
 
-    // Send our identify packet using PacketContext::LinkIdentify (0xFB).
-    let payload = build_link_identify_payload(&transport_id, &link_id);
-    let (packet, iface) = {
-        let guard = link.lock().await;
-        let mut pkt = match guard.data_packet(&payload) {
-            Ok(p) => p,
-            Err(e) => {
-                log::warn!("identify: failed to build packet: {:?}", e);
-                return None;
-            }
-        };
-        pkt.context = PacketContext::LinkIdentify;
-        (pkt, guard.ingress_iface())
-    };
-    if let Some(tp) = get_transport() {
-        let tp = tp.lock().await;
-        if let Some(iface) = iface {
-            tp.send_direct(iface, packet).await;
-        } else {
-            tp.send_broadcast(packet, None).await;
-        }
-    }
+    let identify_payload = build_link_identify_payload(&transport_id, &link_id);
 
-    // Wait for the library to fire LinkEvent::PeerIdentified on this link.
-    // The library decrypts the peer's LinkIdentify packet internally and posts
-    // this event — it does NOT forward the raw packet to received_data_events.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let send_identify = |link: &Arc<Mutex<Link>>| {
+        let payload = identify_payload.clone();
+        let link = link.clone();
+        async move {
+            let packet = {
+                let guard = link.lock().await;
+                let mut pkt = match guard.data_packet(&payload) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log::warn!("identify: failed to build packet: {:?}", e);
+                        return;
+                    }
+                };
+                pkt.context = PacketContext::LinkIdentify;
+                pkt
+            };
+            if let Some(tp) = get_transport() {
+                let tp = tp.lock().await;
+                tp.send_broadcast(packet, None).await;
+            }
+        }
+    };
+
+    send_identify(link).await;
+
+    let deadline = tokio::time::Instant::now() + IDENTIFY_TIMEOUT;
+    let mut next_retry = tokio::time::Instant::now() + IDENTIFY_RETRY_INTERVAL;
+
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            log::warn!(
-                "identify: timeout waiting for peer identify on link {}",
-                link_id
-            );
+            log::warn!("identify: timeout waiting for peer identify on link {}", link_id);
             return None;
         }
+        let until_retry = next_retry.saturating_duration_since(tokio::time::Instant::now());
         tokio::select! {
-            _ = tokio::time::sleep(remaining) => {
-                log::warn!("identify: timeout waiting for peer identify on link {}", link_id);
-                return None;
+            _ = tokio::time::sleep(remaining.min(until_retry)) => {
+                if tokio::time::Instant::now() >= next_retry {
+                    log::debug!("identify: retrying send on link {}", link_id);
+                    send_identify(link).await;
+                    next_retry = tokio::time::Instant::now() + IDENTIFY_RETRY_INTERVAL;
+                } else {
+                    log::warn!("identify: timeout waiting for peer identify on link {}", link_id);
+                    return None;
+                }
             }
             result = link_events.recv() => {
                 match result {
