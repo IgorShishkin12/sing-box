@@ -783,8 +783,8 @@ pub fn spawn_resource_event_reader(
     let handle = tokio::spawn(async move {
         loop {
             match resource_rx.recv().await {
-                Ok(event) if event.link_id == link_id => {
-                    if let ResourceEventKind::Complete(complete) = event.kind {
+                Ok(event) if event.link_id == link_id => match event.kind {
+                    ResourceEventKind::Complete(complete) => {
                         log::trace!(
                             "resource complete: conn={} link={} len={}",
                             conn_id,
@@ -793,10 +793,34 @@ pub fn spawn_resource_event_reader(
                         );
                         crate::c_api::call_on_data(conn_id, &complete.data);
                     }
+                    ResourceEventKind::Progress(ref p) => {
+                        log::trace!(
+                            "resource inbound progress: conn={} link={} received={} total={}",
+                            conn_id,
+                            link_id,
+                            p.received_bytes,
+                            p.total_bytes
+                        );
+                    }
+                    _ => {}
+                },
+                Ok(event) => {
+                    log::trace!(
+                        "resource event for other link (ignored): our={} event_link={}",
+                        link_id,
+                        event.link_id
+                    );
                 }
-                Ok(_) => {} // event for a different link — ignore
                 Err(broadcast::error::RecvError::Closed) => break,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    log::warn!(
+                        "resource inbound event channel lagged {} events: conn={} link={}",
+                        n,
+                        conn_id,
+                        link_id
+                    );
+                    continue;
+                }
             }
         }
     });

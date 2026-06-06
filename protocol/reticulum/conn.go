@@ -12,6 +12,16 @@ import (
 	"github.com/sagernet/sing-box/log"
 )
 
+// formatBuf formats up to 200 bytes of b as a quoted string, appending "…"
+// if truncated. Keeps trace log lines short enough for atomic pipe writes.
+func formatBuf(b []byte) string {
+	const max = 200
+	if len(b) <= max {
+		return fmt.Sprintf("%q", b)
+	}
+	return fmt.Sprintf("%q…(%d more)", b[:max], len(b)-max)
+}
+
 // connEntry holds the per-connection async state.
 // dataCh carries inbound packets (one Reticulum packet per send).
 // done is closed when the connection is torn down from either side.
@@ -94,7 +104,7 @@ func (c *reticulumConn) Read(b []byte) (int, error) {
 	select {
 	case chunk := <-c.entry.ch:
 		if c.logger != nil {
-			c.logger.Trace("reticulumConn.Read: handle=", c.handle, " n=", len(chunk), " data=", fmt.Sprintf("%q", chunk))
+			c.logger.Trace("reticulumConn.Read: handle=", c.handle, " n=", len(chunk), " data=", formatBuf(chunk))
 		}
 		n := copy(b, chunk)
 		if n < len(chunk) {
@@ -184,7 +194,7 @@ func (c *reticulumConn) Write(b []byte) (int, error) {
 		return 0, io.ErrClosedPipe
 	}
 	if c.logger != nil {
-		c.logger.Trace("BridgeWrite: handle=", c.handle, " len=", len(b), " data=", fmt.Sprintf("%q", b))
+		c.logger.Trace("BridgeWrite: handle=", c.handle, " len=", len(b), " data=", formatBuf(b))
 	}
 	n := BridgeWrite(c.handle, b)
 	if n < 0 {

@@ -130,6 +130,13 @@ impl Connection {
                             .await
                             .map_err(|e| format!("send_resource: {:?}", e))?
                     };
+                    log::debug!(
+                        "resource outbound start: conn={} link={} hash={} data_len={}",
+                        self.id,
+                        link_id,
+                        resource_hash,
+                        data.len()
+                    );
                     // Block until the peer confirms receipt. The inactivity deadline
                     // is reset whenever a Progress event reports more bytes received
                     // than last time — i.e. the transport is visibly making progress.
@@ -139,14 +146,14 @@ impl Connection {
                     // event from the library (see open issue).
                     const INACTIVITY_SECS: u64 = 60;
                     let mut last_progress_bytes: u64 = 0;
-                    let mut deadline = tokio::time::Instant::now()
-                        + Duration::from_secs(INACTIVITY_SECS);
+                    let mut deadline =
+                        tokio::time::Instant::now() + Duration::from_secs(INACTIVITY_SECS);
                     loop {
                         tokio::select! {
                             _ = tokio::time::sleep_until(deadline) => {
                                 return Err(format!(
-                                    "resource inactivity timeout for hash={}",
-                                    resource_hash
+                                    "resource inactivity timeout: conn={} hash={} data_len={}",
+                                    self.id, resource_hash, data.len()
                                 ));
                             }
                             result = resource_rx.recv() => {
@@ -156,24 +163,46 @@ impl Connection {
                                         kind: ResourceEventKind::OutboundComplete,
                                         ..
                                     }) if hash == resource_hash => {
+                                        log::debug!(
+                                            "resource outbound complete: conn={} hash={}",
+                                            self.id, resource_hash
+                                        );
                                         return Ok(data.len());
                                     }
                                     Ok(ResourceEvent {
                                         kind: ResourceEventKind::Progress(ref p),
                                         ..
                                     }) => {
+                                        log::trace!(
+                                            "resource event progress: conn={} received={} total={}",
+                                            self.id, p.received_bytes, p.total_bytes
+                                        );
                                         if p.received_bytes > last_progress_bytes {
                                             last_progress_bytes = p.received_bytes;
                                             deadline = tokio::time::Instant::now()
                                                 + Duration::from_secs(INACTIVITY_SECS);
+                                            log::trace!(
+                                                "resource inactivity deadline reset: conn={} bytes={}",
+                                                self.id, p.received_bytes
+                                            );
                                         }
                                         continue;
                                     }
-                                    Ok(_) => continue,
+                                    Ok(_) => {
+                                        log::trace!(
+                                            "resource event other (ignored): conn={} waiting_for={}",
+                                            self.id, resource_hash
+                                        );
+                                        continue;
+                                    }
                                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                         return Err("resource event channel closed".to_string());
                                     }
-                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                        log::warn!(
+                                            "resource event channel lagged {} events: conn={} hash={}",
+                                            n, self.id, resource_hash
+                                        );
                                         continue;
                                     }
                                 }
@@ -231,6 +260,7 @@ impl Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reticulum_rs::packet::LXMF_MAX_PAYLOAD;
 
     #[tokio::test]
     async fn test_connection_write_memory() {
