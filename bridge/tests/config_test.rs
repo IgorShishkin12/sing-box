@@ -64,3 +64,37 @@ fn test_config_auto_interface_default_port() {
     let cfg = sing_box_reticulum_bridge::config::parse_config(json).unwrap();
     assert!(cfg.interfaces[0].data_port.is_none());
 }
+
+#[test]
+fn test_config_rnode_serial_parses() {
+    let json = r#"{
+        "interfaces": [{
+            "type": "RNodeSerial",
+            "device": "/dev/ttyUSB0",
+            "frequency_hz": 868000000,
+            "bandwidth_hz": 125000,
+            "tx_power_dbm": 14,
+            "spreading_factor": 9,
+            "coding_rate": 5
+        }]
+    }"#;
+    let cfg = sing_box_reticulum_bridge::config::parse_config(json).unwrap();
+    let iface = &cfg.interfaces[0];
+    assert_eq!(iface.iface_type, "RNodeSerial");
+    assert_eq!(iface.device, Some("/dev/ttyUSB0".to_string()));
+    assert_eq!(iface.frequency_hz, Some(868_000_000));
+    assert_eq!(iface.bandwidth_hz, Some(125_000));
+    assert_eq!(iface.tx_power_dbm, Some(14));
+    assert_eq!(iface.spreading_factor, Some(9));
+    assert_eq!(iface.coding_rate, Some(5));
+}
+
+#[test]
+fn test_config_rnode_serial_defaults_optional() {
+    let json = r#"{"interfaces": [{"type": "RNodeSerial", "device": "/dev/ttyUSB0"}]}"#;
+    let cfg = sing_box_reticulum_bridge::config::parse_config(json).unwrap();
+    let iface = &cfg.interfaces[0];
+    assert!(iface.frequency_hz.is_none());
+    assert!(iface.spreading_factor.is_none());
+    assert!(iface.coding_rate.is_none());
+}

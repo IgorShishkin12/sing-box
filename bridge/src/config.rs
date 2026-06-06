@@ -37,6 +37,16 @@ pub struct ReticulumInterface {
     pub target_port: Option<u16>,
     // AutoInterface
     pub data_port: Option<u16>,
+    // RNodeSerial: serial device path (e.g. "/dev/ttyUSB0")
+    pub device: Option<String>,
+    // Shared LoRa radio parameters (RNodeSerial + RNodeBLE).
+    // Unset fields default to US915 band values via LoraConfig::us915_default().
+    pub frequency_hz: Option<u64>,
+    pub bandwidth_hz: Option<u32>,
+    pub tx_power_dbm: Option<i8>,
+    pub spreading_factor: Option<u8>,
+    /// Coding rate as an integer 5–8 (mapping to 4/5 … 4/8).
+    pub coding_rate: Option<u8>,
 }
 
 pub fn parse_config(json_str: &str) -> Result<ReticulumConfig, serde_json::Error> {

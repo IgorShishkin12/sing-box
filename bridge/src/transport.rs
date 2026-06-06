@@ -22,6 +22,7 @@ use reticulum_rs::transport::destination::{
 };
 use reticulum_rs::transport::hash::AddressHash;
 use reticulum_rs::transport::identity::{Identity, PrivateIdentity};
+use reticulum_rs::transport::iface::lora::{LoraConfig, LoraInterface};
 use reticulum_rs::transport::iface::tcp_client::TcpClient;
 use reticulum_rs::transport::iface::tcp_server::TcpServer;
 use reticulum_rs::transport::iface::udp::UdpInterface;
@@ -247,6 +248,20 @@ pub fn config_dir_path(cfg: &ReticulumConfig) -> String {
 // Interface spawning
 // ---------------------------------------------------------------------------
 
+/// Build a LoraConfig from interface config, falling back to US915 defaults for
+/// any unset field. Validation has already been done on the Go side.
+fn build_lora_config(iface: &ReticulumInterface) -> LoraConfig {
+    let base = LoraConfig::us915_default();
+    LoraConfig {
+        frequency_hz: iface.frequency_hz.unwrap_or(base.frequency_hz),
+        bandwidth_hz: iface.bandwidth_hz.unwrap_or(base.bandwidth_hz),
+        tx_power_dbm: iface.tx_power_dbm.unwrap_or(base.tx_power_dbm),
+        spreading_factor: iface.spreading_factor.unwrap_or(base.spreading_factor),
+        coding_rate: iface.coding_rate.unwrap_or(base.coding_rate),
+        ..base
+    }
+}
+
 /// Spawn network interfaces from the config list.
 ///
 /// AutoInterface uses `Transport::add_multicast_udp_interface` which registers
@@ -328,6 +343,19 @@ async fn spawn_interfaces(
                     "spawned TCPClientInterface '{}' target={} addr={}",
                     label,
                     target,
+                    addr
+                );
+            }
+            "RNodeSerial" => {
+                let device = iface.device.as_deref().unwrap_or("");
+                let lora = build_lora_config(iface);
+                let rnode = LoraInterface::new(device, 115_200, lora);
+                let addr = iface_mgr.lock().await.spawn(rnode, LoraInterface::spawn);
+                log::info!(
+                    "spawned RNodeSerial '{}' device={} freq_hz={} addr={}",
+                    label,
+                    device,
+                    lora.frequency_hz,
                     addr
                 );
             }
