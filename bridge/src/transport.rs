@@ -38,7 +38,12 @@ use crate::listener::Listener;
 use crate::runtime;
 
 /// Maximum time to wait for a link to become active during dial.
-const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
+// On multicast/AutoInterface networks the first dial attempt is expected to fail:
+// the link-request proof is dropped because the peer's virtual unicast iface isn't
+// registered yet (announce arrives ~1 s after the link request). The bridge closes
+// the link on timeout and retries with a fresh link_id, at which point the proof
+// is delivered successfully. Keep this short so retries are fast.
+const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 /// Poll interval while waiting for link activation.
 const DIAL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -711,9 +716,10 @@ pub async fn exchange_identify_on_link(
     link_id: AddressHash,
     link_events: &mut broadcast::Receiver<LinkEventData>,
 ) -> Option<AddressHash> {
-    // Timeout matches DIAL_TIMEOUT: on multicast networks the peer's link proof
-    // may be delayed by ~6 s (repeat link-request interval), so the peer's
-    // identify arrives well after the link activates on our side.
+    // On multicast networks, the first dial attempt fails silently (proof dropped)
+    // and the client retries with a fresh link after DIAL_TIMEOUT (~10 s). Keep
+    // IDENTIFY_TIMEOUT larger than DIAL_TIMEOUT so the server is still waiting
+    // when the client's second attempt activates and sends its identify.
     const IDENTIFY_TIMEOUT: Duration = Duration::from_secs(30);
     const IDENTIFY_RETRY_INTERVAL: Duration = Duration::from_secs(3);
 
@@ -949,6 +955,10 @@ pub async fn dial_and_wait(
     loop {
         if start.elapsed() >= DIAL_TIMEOUT {
             log::warn!("dial timeout for link {}", link_id);
+            // Close the link so the next tp.link() call creates a fresh one with a
+            // new key pair. Without this, tp.link() reuses the same Pending link and
+            // the server never re-sends the proof (in_links already has the link_id).
+            link_clone.lock().await.close();
             return Err("dial timed out waiting for link activation");
         }
 
