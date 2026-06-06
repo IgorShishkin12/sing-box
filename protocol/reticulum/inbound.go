@@ -20,6 +20,9 @@ import (
 // Rust requires a non-null, non-empty config string.
 func buildConfigJSON(inlineConfig *option.ReticulumConfig, configPath string) (string, error) {
 	if inlineConfig != nil {
+		if err := inlineConfig.Validate(); err != nil {
+			return "", fmt.Errorf("invalid reticulum config: %w", err)
+		}
 		b, err := json.Marshal(inlineConfig)
 		if err != nil {
 			return "", fmt.Errorf("failed to marshal reticulum config: %w", err)

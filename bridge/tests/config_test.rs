@@ -49,3 +49,18 @@ fn test_config_empty_string_fails() {
     let cfg = sing_box_reticulum_bridge::config::parse_config("");
     assert!(cfg.is_err(), "empty string should return Err");
 }
+
+#[test]
+fn test_config_auto_interface_parses() {
+    let json = r#"{"interfaces": [{"type": "AutoInterface", "data_port": 49555}]}"#;
+    let cfg = sing_box_reticulum_bridge::config::parse_config(json).unwrap();
+    assert_eq!(cfg.interfaces[0].iface_type, "AutoInterface");
+    assert_eq!(cfg.interfaces[0].data_port, Some(49555));
+}
+
+#[test]
+fn test_config_auto_interface_default_port() {
+    let json = r#"{"interfaces": [{"type": "AutoInterface"}]}"#;
+    let cfg = sing_box_reticulum_bridge::config::parse_config(json).unwrap();
+    assert!(cfg.interfaces[0].data_port.is_none());
+}

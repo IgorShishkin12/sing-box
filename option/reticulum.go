@@ -1,5 +1,7 @@
 package option
 
+import "fmt"
+
 type ReticulumInboundOptions struct {
 	ListenOptions
 	Network             NetworkList      `json:"network,omitempty"`
@@ -34,6 +36,18 @@ type ReticulumInterface struct {
 	TargetPort uint16 `json:"target_port,omitempty"`
 	// AutoInterface
 	DataPort uint16 `json:"data_port,omitempty"`
+}
+
+// Validate checks each interface entry for configuration errors.
+// Interface-type-specific required fields are enforced here so errors are
+// reported before the config is marshaled and sent to the Rust bridge.
+func (c *ReticulumConfig) Validate() error {
+	for i, iface := range c.Interfaces {
+		if iface.Type == "" {
+			return fmt.Errorf("interfaces[%d].type is required", i)
+		}
+	}
+	return nil
 }
 
 type ReticulumOutboundOptions struct {

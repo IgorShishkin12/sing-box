@@ -249,12 +249,15 @@ pub fn config_dir_path(cfg: &ReticulumConfig) -> String {
 
 /// Spawn network interfaces from the config list.
 ///
-/// If `interfaces` is empty, falls back to a single AutoInterface (UDP broadcast).
-/// Supported types: AutoInterface, UDPInterface, TCPServerInterface, TCPClientInterface.
+/// AutoInterface uses `Transport::add_multicast_udp_interface` which registers
+/// a proper PeerRouting map so point-to-point replies to discovered peers are
+/// delivered as unicast on the same socket rather than being re-broadcast.
+///
+/// All other interface types lock the InterfaceManager arc per-spawn.
 async fn spawn_interfaces(
-    iface_mgr: &mut InterfaceManager,
+    transport: &Transport,
+    iface_mgr: Arc<tokio::sync::Mutex<InterfaceManager>>,
     interfaces: &[ReticulumInterface],
-    iface_mgr_arc: Arc<tokio::sync::Mutex<InterfaceManager>>,
 ) {
     let default = vec![ReticulumInterface {
         name: Some("Default Interface".to_string()),
@@ -272,26 +275,17 @@ async fn spawn_interfaces(
         let label = iface.name.as_deref().unwrap_or(&iface.iface_type);
         match iface.iface_type.as_str() {
             "AutoInterface" => {
-                // TODO: This is a minimal approximation of Reticulum's AutoInterface.
-                // The real implementation (RNS/Interfaces/AutoInterface.py) enumerates
-                // every non-loopback interface, opens one UDP socket per interface, sends
-                // to each interface's subnet broadcast address, and uses IPv6 link-local
-                // multicast (ff02::) in addition to IPv4. We use a single site-local
-                // multicast group (239.255.0.1) instead of broadcast because the underlying
-                // socket2 socket does not set SO_BROADCAST, so 255.255.255.255 sends are
-                // silently dropped. This works on most LANs and in Docker/Podman bridge
-                // networks, but diverges from real Reticulum in multi-interface and IPv6
-                // scenarios.
                 let port = iface.data_port.unwrap_or(49555);
                 let mcast = format!("239.255.0.1:{port}");
-                let ui = UdpInterface::new(&mcast, Some(&mcast));
-                let addr = iface_mgr.spawn(ui, UdpInterface::spawn);
+                let addr = transport
+                    .add_multicast_udp_interface(mcast.clone(), Some(mcast))
+                    .await;
                 log::info!(
-                    "spawned AutoInterface (UDP multicast 239.255.0.1) port={} addr={}",
+                    "spawned AutoInterface '{}' multicast 239.255.0.1:{} addr={}",
+                    label,
                     port,
                     addr
                 );
-                log::warn!("AutoInterface here is experimental feature, incompatible with real Reticulum' implementation");
             }
             "UDPInterface" => {
                 let lip = iface.listen_ip.as_deref().unwrap_or("0.0.0.0");
@@ -302,7 +296,7 @@ async fn spawn_interfaces(
                     .as_ref()
                     .map(|ip| format!("{}:{}", ip, iface.forward_port.unwrap_or(lport)));
                 let ui = UdpInterface::new(&bind, fwd.as_ref());
-                let addr = iface_mgr.spawn(ui, UdpInterface::spawn);
+                let addr = iface_mgr.lock().await.spawn(ui, UdpInterface::spawn);
                 log::info!(
                     "spawned UDPInterface '{}' bind={} forward={:?} addr={}",
                     label,
@@ -315,8 +309,8 @@ async fn spawn_interfaces(
                 let lip = iface.listen_ip.as_deref().unwrap_or("0.0.0.0");
                 let lport = iface.listen_port.unwrap_or(7788);
                 let bind = format!("{lip}:{lport}");
-                let ts = TcpServer::new(&bind, iface_mgr_arc.clone());
-                let addr = iface_mgr.spawn(ts, TcpServer::spawn);
+                let ts = TcpServer::new(&bind, iface_mgr.clone());
+                let addr = iface_mgr.lock().await.spawn(ts, TcpServer::spawn);
                 log::info!(
                     "spawned TCPServerInterface '{}' bind={} addr={}",
                     label,
@@ -329,7 +323,7 @@ async fn spawn_interfaces(
                 let port = iface.target_port.unwrap_or(7788);
                 let target = format!("{host}:{port}");
                 let tc = TcpClient::new(&target);
-                let addr = iface_mgr.spawn(tc, TcpClient::spawn);
+                let addr = iface_mgr.lock().await.spawn(tc, TcpClient::spawn);
                 log::info!(
                     "spawned TCPClientInterface '{}' target={} addr={}",
                     label,
@@ -407,8 +401,7 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
         log::debug!("Transport created, spawning interfaces");
 
         let iface_mgr = transport.iface_manager();
-        let mut mgr = iface_mgr.lock().await;
-        spawn_interfaces(&mut mgr, &interfaces, iface_mgr.clone()).await;
+        spawn_interfaces(&transport, iface_mgr, &interfaces).await;
         log::debug!("interfaces spawned");
 
         transport
@@ -674,7 +667,7 @@ pub async fn exchange_identify_on_link(
     let payload = build_link_identify_payload(&transport_id, &link_id);
     let (packet, iface) = {
         let guard = link.lock().await;
-        let pkt = match guard.identify_packet(&payload) {
+        let pkt = match guard.data_packet(&payload) {
             Ok(p) => p,
             Err(e) => {
                 log::warn!("identify: failed to build packet: {:?}", e);
