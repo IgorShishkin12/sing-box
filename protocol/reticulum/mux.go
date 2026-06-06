@@ -13,9 +13,12 @@ import (
 )
 
 const (
-	MaxReticulumMessage = 400 //410 is passing somehow, 420 already bad: should be 400 as stated in LXMF-rs/crates/libs/rns-core/src/packet.rs:14
+	// MaxReticulumMessage is the maximum plaintext bytes for a single data_packet call.
+	// Derived from PACKET_MDU (464) minus Fernet overhead (IV 16 + HMAC 32 + AES padding 16).
+	// Matches rns-core LXMF_MAX_PAYLOAD. Larger payloads use the Resource protocol instead.
+	MaxReticulumMessage = 400
 	muxHeaderSize       = 3
-	maxFragPayload      = MaxReticulumMessage - muxHeaderSize
+	maxFragPayload      = MaxReticulumMessage - muxHeaderSize // 397
 
 	// Control packet type bytes (high bit set).
 	TypeAuthCtrl     byte = 0x80 // auth exchange message
@@ -25,6 +28,10 @@ const (
 	TypeRequestAuth  byte = 0x84 // challenge request
 	TypeResponseAuth byte = 0x85 // auth response
 	TypeFragAck      byte = 0x86 // fragment acknowledgement; payload = 1-byte partIndex
+	// TypeLargeData carries a payload that exceeds the 64-fragment limit (~25 KB).
+	// The bridge routes this to the Reticulum Resource protocol; the receiver gets
+	// the reassembled data via a single on_data callback.
+	TypeLargeData byte = 0xC0
 
 	defaultWindowSize    = 16
 	defaultMaxRetries    = 3
@@ -338,19 +345,17 @@ func (s *muxSession) writeCtrl(typ byte, id uint16, payload []byte) error {
 	return err
 }
 
-// writeData enqueues all fragments of data onto the send queue for conn id.
-// Returns immediately; actual writes happen in the send-queue worker goroutine.
-//
-// All fragments use prioNew so they land in the same FIFO channel, preserving
-// intra-message order. Using prioInProgress for frag 1+ caused the worker to
-// send continuations before the first fragment, which silently dropped frag 0
-// on the receiver when a second Write() arrived on the same connID.
+// writeData sends data for virtual connection id.
+// Payloads exceeding the 64-fragment limit (~25 KB) are sent as a single
+// TypeLargeData control packet via the Reticulum Resource protocol.
+// Smaller payloads are enqueued as fragments; actual writes happen in the
+// send-queue worker. All fragments use prioNew to preserve intra-message order.
 func (s *muxSession) writeData(id uint16, data []byte) error {
+	if len(data) > maxFragPayload*64 {
+		return s.writeCtrl(TypeLargeData, id, data)
+	}
 	parts := fragment(data)
 	n := len(parts)
-	if n > 64 {
-		return fmt.Errorf("mux: payload requires %d fragments (max 64)", n)
-	}
 	for i, part := range parts {
 		f := &queuedFrag{
 			encoded: encodePacket(muxPacket{
@@ -416,15 +421,35 @@ func (s *muxSession) removeConn(id uint16) {
 }
 
 // readLoop is the single goroutine that reads packets and dispatches them.
+//
+// When inner implements packetReader, full messages are read without size
+// limits — required for TypeLargeData payloads that arrive via the Resource
+// protocol. Falls back to the fixed-size Read path for byte-stream conns
+// (net.Pipe in tests), which only handles payloads that fit in MaxReticulumMessage.
 func (s *muxSession) readLoop() {
 	defer s.closeAll()
 
+	var readOne func() ([]byte, error)
+	if pr, ok := s.inner.(packetReader); ok {
+		readOne = pr.ReadPacket
+	} else {
+		buf := make([]byte, MaxReticulumMessage)
+		readOne = func() ([]byte, error) {
+			n, err := s.inner.Read(buf)
+			if err != nil {
+				return nil, err
+			}
+			msg := make([]byte, n)
+			copy(msg, buf[:n])
+			return msg, nil
+		}
+	}
+
 	fragBufs := make(map[uint16]*fragBuffer)
-	buf := make([]byte, MaxReticulumMessage)
 	gcCounter := 0
 
 	for {
-		n, err := s.inner.Read(buf)
+		msg, err := readOne()
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Debug("mux readLoop exit: ", err)
@@ -432,7 +457,7 @@ func (s *muxSession) readLoop() {
 			return
 		}
 
-		pkt, err := decodePacket(buf[:n])
+		pkt, err := decodePacket(msg)
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Error("mux: decode error: ", err)
@@ -470,6 +495,18 @@ func (s *muxSession) readLoop() {
 					if _, ok := s.inFlight.LoadAndDelete(key); ok {
 						<-s.windowSem
 					}
+				}
+			case TypeLargeData:
+				// Full payload delivered atomically via Resource protocol.
+				s.mu.Lock()
+				mc := s.conns[pkt.connID]
+				s.mu.Unlock()
+				if mc == nil {
+					continue
+				}
+				select {
+				case mc.readCh <- pkt.payload:
+				case <-mc.done:
 				}
 			default:
 				if s.logger != nil {
