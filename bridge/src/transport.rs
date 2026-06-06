@@ -688,12 +688,13 @@ pub async fn wait_for_service_announce(name: &str, timeout: Duration) -> Option<
 /// transport identity hash. Both sides are expected to call this concurrently
 /// right after link activation.
 ///
-/// The library handles `PacketContext::LinkIdentify` (0xFB) internally and fires
-/// `LinkEvent::PeerIdentified` — it never appears in `received_data_events`.
-/// Therefore this function listens on the transport link-event channel, not the
-/// data channel. Callers must subscribe to `in_link_events` (server) or
-/// `out_link_events` (client) **before** the link activates so that the event
-/// is buffered and not missed.
+/// The library delivers `PacketContext::LinkIdentify` (0xFB) packets as
+/// `LinkEvent::Data` with `payload.context() == LinkIdentify` on the link-event
+/// channel. This function listens there, verifies the payload with
+/// `parse_link_identify_payload`, and returns the peer's identity hash.
+/// Callers must subscribe to `in_link_events` (server) or `out_link_events`
+/// (client) **before** the link activates so that the event is buffered and not
+/// missed.
 ///
 /// Logs:
 ///   my_identity:   addr=… encrypt=… sign=…
@@ -720,13 +721,14 @@ pub async fn exchange_identify_on_link(
     let payload = build_link_identify_payload(&transport_id, &link_id);
     let (packet, iface) = {
         let guard = link.lock().await;
-        let pkt = match guard.data_packet(&payload) {
+        let mut pkt = match guard.data_packet(&payload) {
             Ok(p) => p,
             Err(e) => {
                 log::warn!("identify: failed to build packet: {:?}", e);
                 return None;
             }
         };
+        pkt.context = PacketContext::LinkIdentify;
         (pkt, guard.ingress_iface())
     };
     if let Some(tp) = get_transport() {
@@ -759,16 +761,20 @@ pub async fn exchange_identify_on_link(
             result = link_events.recv() => {
                 match result {
                     Ok(event) if event.id == link_id => {
-                        if let LinkEvent::PeerIdentified(identity) = event.event {
-                            log::info!(
-                                "peer_identity: addr={} encrypt={} sign={}",
-                                identity.address_hash,
-                                hex::encode(identity.public_key_bytes()),
-                                hex::encode(identity.verifying_key_bytes()),
-                            );
-                            return Some(identity.address_hash);
+                        if let LinkEvent::Data(payload) = event.event {
+                            if payload.context() == PacketContext::LinkIdentify {
+                                if let Some(identity) = parse_link_identify_payload(payload.as_slice(), &link_id) {
+                                    log::info!(
+                                        "peer_identity: addr={} encrypt={} sign={}",
+                                        identity.address_hash,
+                                        hex::encode(identity.public_key_bytes()),
+                                        hex::encode(identity.verifying_key_bytes()),
+                                    );
+                                    return Some(identity.address_hash);
+                                }
+                            }
                         }
-                        // Other events on this link (e.g. Data, KeepAlive) — skip.
+                        // Other events on this link (e.g. Activated, KeepAlive) — skip.
                     }
                     Ok(_) => {} // event for a different link — skip
                     Err(broadcast::error::RecvError::Closed) => return None,

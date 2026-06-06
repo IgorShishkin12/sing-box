@@ -1,6 +1,6 @@
 FROM golang:1.24-alpine AS builder
 
-RUN apk add --no-cache rust cargo build-base git
+RUN apk add --no-cache rust cargo build-base git dbus-dev pkgconfig
 
 WORKDIR /workspace/sing-box
 
