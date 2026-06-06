@@ -557,6 +557,12 @@ pub async fn register_listener_destination(
                                 event.id,
                                 peer_hash
                             );
+                            // Spawn per-link handling so the accept loop is not
+                            // blocked while exchange_identify_on_link waits.
+                            let store = store.clone();
+                            let listener = listener.clone();
+                            let link_id = event.id;
+                            let link = link.clone();
                             let mut peer_events = {
                                 let tp = transport.lock().await;
                                 tp.in_link_events()
@@ -565,28 +571,31 @@ pub async fn register_listener_destination(
                                 let tp = transport.lock().await;
                                 tp.received_data_events()
                             };
-                            let identified =
-                                exchange_identify_on_link(&link, event.id, &mut peer_events).await;
-                            let conn = crate::connection::Connection::new_from_link(
-                                link.clone(),
-                                event.id,
-                                Some(peer_hash),
-                                identified,
-                            );
-                            let conn_id = store.insert_connection(conn).await;
-                            spawn_link_data_reader(conn_id, event.id, data_rx);
                             let resource_rx = {
                                 let tp = transport.lock().await;
                                 tp.resource_events()
                             };
-                            spawn_resource_event_reader(conn_id, event.id, resource_rx);
-                            crate::c_api::call_on_accept(
-                                listener_handle,
-                                conn_id,
-                                &peer_hash.to_hex_string(),
-                            );
-                            // Keep listener alive; suppress unused-var warning.
-                            let _ = &listener;
+                            let task = tokio::spawn(async move {
+                                let identified =
+                                    exchange_identify_on_link(&link, link_id, &mut peer_events)
+                                        .await;
+                                let conn = crate::connection::Connection::new_from_link(
+                                    link.clone(),
+                                    link_id,
+                                    Some(peer_hash),
+                                    identified,
+                                );
+                                let conn_id = store.insert_connection(conn).await;
+                                spawn_link_data_reader(conn_id, link_id, data_rx);
+                                spawn_resource_event_reader(conn_id, link_id, resource_rx);
+                                crate::c_api::call_on_accept(
+                                    listener_handle,
+                                    conn_id,
+                                    &peer_hash.to_hex_string(),
+                                );
+                                let _ = &listener;
+                            });
+                            runtime::register_task(task);
                         }
                     }
                 }
@@ -766,7 +775,10 @@ pub async fn exchange_identify_on_link(
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            log::warn!("identify: timeout waiting for peer identify on link {}", link_id);
+            log::warn!(
+                "identify: timeout waiting for peer identify on link {}",
+                link_id
+            );
             return None;
         }
         let until_retry = next_retry.saturating_duration_since(tokio::time::Instant::now());
