@@ -39,6 +39,8 @@ pub struct ReticulumInterface {
     pub data_port: Option<u16>,
     // RNodeSerial: serial device path (e.g. "/dev/ttyUSB0")
     pub device: Option<String>,
+    // RNodeBLE: BLE peripheral identifier (name or MAC address)
+    pub peripheral_id: Option<String>,
     // Shared LoRa radio parameters (RNodeSerial + RNodeBLE).
     // Unset fields default to US915 band values via LoraConfig::us915_default().
     pub frequency_hz: Option<u64>,

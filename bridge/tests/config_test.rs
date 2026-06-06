@@ -90,6 +90,25 @@ fn test_config_rnode_serial_parses() {
 }
 
 #[test]
+fn test_config_rnode_ble_parses() {
+    let json = r#"{
+        "interfaces": [{
+            "type": "RNodeBLE",
+            "peripheral_id": "RNode BLE Device",
+            "frequency_hz": 915000000,
+            "spreading_factor": 9,
+            "coding_rate": 5
+        }]
+    }"#;
+    let cfg = sing_box_reticulum_bridge::config::parse_config(json).unwrap();
+    let iface = &cfg.interfaces[0];
+    assert_eq!(iface.iface_type, "RNodeBLE");
+    assert_eq!(iface.peripheral_id, Some("RNode BLE Device".to_string()));
+    assert_eq!(iface.frequency_hz, Some(915_000_000));
+    assert_eq!(iface.spreading_factor, Some(9));
+}
+
+#[test]
 fn test_config_rnode_serial_defaults_optional() {
     let json = r#"{"interfaces": [{"type": "RNodeSerial", "device": "/dev/ttyUSB0"}]}"#;
     let cfg = sing_box_reticulum_bridge::config::parse_config(json).unwrap();

@@ -38,6 +38,8 @@ type ReticulumInterface struct {
 	DataPort uint16 `json:"data_port,omitempty"`
 	// RNodeSerial: serial device path (e.g. /dev/ttyUSB0)
 	Device string `json:"device,omitempty"`
+	// RNodeBLE: BLE peripheral identifier (name or MAC address)
+	PeripheralID string `json:"peripheral_id,omitempty"`
 	// Shared LoRa radio parameters (RNodeSerial + RNodeBLE).
 	// Unset fields default to US915 band values.
 	FrequencyHz     uint64 `json:"frequency_hz,omitempty"`
@@ -68,6 +70,10 @@ func (iface ReticulumInterface) validate(index int) error {
 	case "RNodeSerial":
 		if iface.Device == "" {
 			return fmt.Errorf("interfaces[%d].device is required for RNodeSerial", index)
+		}
+	case "RNodeBLE":
+		if iface.PeripheralID == "" {
+			return fmt.Errorf("interfaces[%d].peripheral_id is required for RNodeBLE", index)
 		}
 	}
 	return iface.validateLoraFields(index)

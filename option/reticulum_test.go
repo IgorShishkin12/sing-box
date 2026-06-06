@@ -46,6 +46,33 @@ func TestValidate_NoInterfaces(t *testing.T) {
 	}
 }
 
+func TestValidate_RNodeBLE_RequiresPeripheralID(t *testing.T) {
+	cfg := &option.ReticulumConfig{
+		Interfaces: []option.ReticulumInterface{{Type: "RNodeBLE"}},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("RNodeBLE without peripheral_id should fail")
+	}
+}
+
+func TestValidate_RNodeBLE_Valid(t *testing.T) {
+	cfg := &option.ReticulumConfig{
+		Interfaces: []option.ReticulumInterface{
+			{Type: "RNodeBLE", PeripheralID: "RNode BLE Device"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid RNodeBLE: %v", err)
+	}
+}
+
+func TestValidate_RNodeBLE_LoraFieldsValidated(t *testing.T) {
+	bad := option.ReticulumInterface{Type: "RNodeBLE", PeripheralID: "RNode", SpreadingFactor: 13}
+	if err := (&option.ReticulumConfig{Interfaces: []option.ReticulumInterface{bad}}).Validate(); err == nil {
+		t.Fatal("RNodeBLE with bad SF should fail")
+	}
+}
+
 func TestValidate_RNodeSerial_RequiresDevice(t *testing.T) {
 	cfg := &option.ReticulumConfig{
 		Interfaces: []option.ReticulumInterface{{Type: "RNodeSerial"}},
@@ -70,8 +97,8 @@ func TestValidate_RNodeSerial_LoraFields(t *testing.T) {
 	base := option.ReticulumInterface{Type: "RNodeSerial", Device: "/dev/ttyUSB0"}
 
 	cases := []struct {
-		name  string
-		mutFn func(*option.ReticulumInterface)
+		name    string
+		mutFn   func(*option.ReticulumInterface)
 		wantErr bool
 	}{
 		{"sf too high", func(i *option.ReticulumInterface) { i.SpreadingFactor = 13 }, true},

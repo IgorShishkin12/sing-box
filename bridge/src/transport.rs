@@ -23,6 +23,9 @@ use reticulum_rs::transport::destination::{
 use reticulum_rs::transport::hash::AddressHash;
 use reticulum_rs::transport::identity::{Identity, PrivateIdentity};
 use reticulum_rs::transport::iface::lora::{LoraConfig, LoraInterface};
+use reticulum_rs::transport::iface::rnode_ble::{
+    NativeRnodeBleKissInterface, NativeRnodeBleSettings, RnodeBleKissConfig,
+};
 use reticulum_rs::transport::iface::tcp_client::TcpClient;
 use reticulum_rs::transport::iface::tcp_server::TcpServer;
 use reticulum_rs::transport::iface::udp::UdpInterface;
@@ -343,6 +346,28 @@ async fn spawn_interfaces(
                     "spawned TCPClientInterface '{}' target={} addr={}",
                     label,
                     target,
+                    addr
+                );
+            }
+            "RNodeBLE" => {
+                let peripheral_id = iface.peripheral_id.as_deref().unwrap_or("");
+                let lora = build_lora_config(iface);
+                let settings = NativeRnodeBleSettings::for_peripheral(peripheral_id);
+                let ble = NativeRnodeBleKissInterface::new(
+                    label,
+                    settings,
+                    RnodeBleKissConfig::default(),
+                )
+                .with_rnode_validation(lora, Duration::from_millis(1_500));
+                let addr = iface_mgr
+                    .lock()
+                    .await
+                    .spawn(ble, NativeRnodeBleKissInterface::spawn);
+                log::info!(
+                    "spawned RNodeBLE '{}' peripheral_id={} freq_hz={} addr={}",
+                    label,
+                    peripheral_id,
+                    lora.frequency_hz,
                     addr
                 );
             }
