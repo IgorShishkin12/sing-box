@@ -56,6 +56,11 @@ jobs:
         with:
           toolchain: stable
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge -> target
+
       - name: Run tests (no default features)
         run: cargo test --no-default-features -- --test-threads=1
 
@@ -85,6 +90,12 @@ jobs:
             armv7-unknown-linux-gnueabihf) sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf ;;
             *) echo "No extra toolchain needed for $TARGET" ;;
           esac
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge -> target
+          key: ${{ inputs.target || 'x86_64-unknown-linux-gnu' }}
 
       - name: Build bridge (${{ inputs.profile || 'release' }})
         run: |
@@ -135,6 +146,12 @@ jobs:
         with:
           ndk-version: r28
           local-cache: true
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge -> target
+          key: android-aarch64
 
       - name: Set up NDK toolchain
         run: |

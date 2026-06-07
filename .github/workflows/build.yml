@@ -652,6 +652,7 @@ jobs:
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
+          local-cache: true
       - name: Setup OpenJDK
         run: |-
           sudo apt update && sudo apt install -y openjdk-17-jdk-headless
@@ -660,6 +661,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge -> target
+          key: android
+      - name: Cache Go tools (gomobile/gobind)
+        id: cache-go-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin
+          key: go-tools-gomobile-v0.1.12
       - name: Set tag
         run: |-
           git ls-remote --exit-code --tags origin v${{ needs.calculate_version.outputs.version }} || echo "PUBLISHED=false" >> "$GITHUB_ENV"
@@ -668,9 +680,11 @@ jobs:
         run: make bridge_android
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+      - name: Install gomobile
+        if: steps.cache-go-tools.outputs.cache-hit != 'true'
+        run: make lib_install
       - name: Build library
         run: |-
-          make lib_install
           export PATH="$PATH:$(go env GOPATH)/bin"
           make lib_android
         env:
@@ -875,6 +889,7 @@ jobs:
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r28
+          local-cache: true
       - name: Setup OpenJDK
         run: |-
           sudo apt update && sudo apt install -y openjdk-17-jdk-headless
@@ -883,6 +898,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge -> target
+          key: android
+      - name: Cache Go tools (gomobile/gobind)
+        id: cache-go-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin
+          key: go-tools-gomobile-v0.1.12
       - name: Set tag
         run: |-
           git ls-remote --exit-code --tags origin v${{ needs.calculate_version.outputs.version }} || echo "PUBLISHED=false" >> "$GITHUB_ENV"
@@ -891,9 +917,11 @@ jobs:
         run: make bridge_android
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+      - name: Install gomobile
+        if: steps.cache-go-tools.outputs.cache-hit != 'true'
+        run: make lib_install
       - name: Build library
         run: |-
-          make lib_install
           export PATH="$PATH:$(go env GOPATH)/bin"
           make lib_android
         env:
