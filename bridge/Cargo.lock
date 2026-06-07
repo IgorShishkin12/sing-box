@@ -954,7 +954,7 @@ dependencies = [
 [[package]]
 name = "reticulum-rs"
 version = "0.2.0"
-source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=main#e3c3115093de817a1f512f56af8f9b036dc1e93a"
+source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=fix%2Fmdu_rnode#933eccdfe943952e34e1cf402e8b5210d0315923"
 dependencies = [
  "reticulum-rs-core",
  "reticulum-rs-transport",
@@ -963,7 +963,7 @@ dependencies = [
 [[package]]
 name = "reticulum-rs-core"
 version = "0.2.0"
-source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=main#e3c3115093de817a1f512f56af8f9b036dc1e93a"
+source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=fix%2Fmdu_rnode#933eccdfe943952e34e1cf402e8b5210d0315923"
 dependencies = [
  "aes",
  "cbc",
@@ -983,7 +983,7 @@ dependencies = [
 [[package]]
 name = "reticulum-rs-transport"
 version = "0.2.0"
-source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=main#e3c3115093de817a1f512f56af8f9b036dc1e93a"
+source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=fix%2Fmdu_rnode#933eccdfe943952e34e1cf402e8b5210d0315923"
 dependencies = [
  "aes",
  "btleplug",
