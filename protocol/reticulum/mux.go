@@ -16,7 +16,7 @@ const (
 	// MaxReticulumMessage is the maximum plaintext bytes for a single data_packet call.
 	// Derived from PACKET_MDU (464) minus Fernet overhead (IV 16 + HMAC 32 + AES padding 16).
 	// Matches rns-core LXMF_MAX_PAYLOAD. Larger payloads use the Resource protocol instead.
-	MaxReticulumMessage = 400
+	MaxReticulumMessage = 120
 	muxHeaderSize       = 3
 	maxFragPayload      = MaxReticulumMessage - muxHeaderSize // 397
 

@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-const authTimeout = 10 * time.Second
+const authTimeout = 20 * time.Second
 
 // RetryPolicy controls how auth failures are retried on the same connection.
 type RetryPolicy string
