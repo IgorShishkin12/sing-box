@@ -23,6 +23,7 @@ use reticulum_rs::transport::destination::{
 use reticulum_rs::transport::hash::AddressHash;
 use reticulum_rs::transport::identity::{Identity, PrivateIdentity};
 use reticulum_rs::transport::iface::lora::{LoraConfig, LoraInterface};
+#[cfg(feature = "rnode-ble")]
 use reticulum_rs::transport::iface::rnode_ble::{
     NativeRnodeBleKissInterface, NativeRnodeBleSettings, RnodeBleKissConfig,
 };
@@ -354,6 +355,7 @@ async fn spawn_interfaces(
                     addr
                 );
             }
+            #[cfg(feature = "rnode-ble")]
             "RNodeBLE" => {
                 let peripheral_id = iface.peripheral_id.as_deref().unwrap_or("");
                 let lora = build_lora_config(iface);

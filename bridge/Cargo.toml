@@ -6,6 +6,10 @@ edition = "2021"
 [lib]
 crate-type = ["rlib", "staticlib", "cdylib"]
 
+[features]
+default = ["rnode-ble"]
+rnode-ble = ["reticulum-rs-transport/rnode-ble"]
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
 once_cell = "1"
@@ -17,7 +21,7 @@ rand_core = "0.6"
 sha2 = "0.10"
 hex = "0.4"
 reticulum-rs = { git = "https://github.com/IgorShishkin12/LXMF-rs", branch = "main", features = ["core", "transport"] }
-reticulum-rs-transport = { package = "reticulum-rs-transport", git = "https://github.com/IgorShishkin12/LXMF-rs", branch = "main", features = ["rnode-ble"] }
+reticulum-rs-transport = { package = "reticulum-rs-transport", git = "https://github.com/IgorShishkin12/LXMF-rs", branch = "main" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 tracing-log = "0.2"

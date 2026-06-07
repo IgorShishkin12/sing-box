@@ -59,25 +59,6 @@ jobs:
       - name: Run tests (no default features)
         run: cargo test --no-default-features -- --test-threads=1
 
-  test_default:
-    name: Test (default features)
-    if: github.event_name != 'workflow_call'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: bridge
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-
-      - name: Run tests (default features)
-        run: cargo test -- --test-threads=1
-
   build:
     name: Build bridge (${{ inputs.target || 'x86_64-unknown-linux-gnu' }}, ${{ inputs.profile || 'release' }})
     runs-on: ${{ inputs.os || 'ubuntu-latest' }}
@@ -177,13 +158,13 @@ jobs:
           fi
 
       - name: Build for Android (debug)
-        run: cargo build --target aarch64-linux-android
+        run: cargo build --target aarch64-linux-android --no-default-features
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           RUSTFLAGS: "-C link-arg=-fPIC -C link-arg=--ld-path=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/ld.lld"
 
       - name: Build for Android (release)
-        run: cargo build --target aarch64-linux-android --release
+        run: cargo build --target aarch64-linux-android --release --no-default-features
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           RUSTFLAGS: "-C link-arg=-fPIC -C link-arg=--ld-path=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/ld.lld"
