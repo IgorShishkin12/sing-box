@@ -699,6 +699,51 @@ jobs:
         run: |-
           cd clients/android
           git checkout dev
+      - name: Add Bluetooth permissions to AndroidManifest
+        run: |
+          set -xeuo pipefail
+          MANIFEST="clients/android/app/src/main/AndroidManifest.xml"
+          
+          # Check if manifest exists
+          if [ ! -f "$MANIFEST" ]; then
+            echo "Error: AndroidManifest.xml not found at $MANIFEST"
+            exit 1
+          fi
+          
+          # Function to add permission if not present
+          add_perm() {
+            local perm="$1"
+            if ! grep -q "android:name=\"${perm}\"" "$MANIFEST"; then
+              # Insert after the <manifest> opening tag (handles both single-line and multi-line)
+              awk -v perm="$perm" '
+                BEGIN { in_manifest = 0; inserted = 0 }
+                /<manifest/ { in_manifest = 1 }
+                in_manifest && !inserted && />/ {
+                  print
+                  print "    <uses-permission android:name=\"" perm "\" />"
+                  inserted = 1
+                  next
+                }
+                { print }
+              ' "$MANIFEST" > "${MANIFEST}.tmp" && mv "${MANIFEST}.tmp" "$MANIFEST"
+              echo "Added ${perm}"
+            else
+              echo "${perm} already present"
+            fi
+          }
+          
+          # Legacy Bluetooth permissions (pre-Android 12)
+          add_perm "android.permission.BLUETOOTH"
+          add_perm "android.permission.BLUETOOTH_ADMIN"
+          
+          # Android 12+ (API 31+) permissions
+          add_perm "android.permission.BLUETOOTH_SCAN"
+          add_perm "android.permission.BLUETOOTH_CONNECT"
+          add_perm "android.permission.BLUETOOTH_ADVERTISE"
+          
+          # Show the result
+          echo "=== AndroidManifest.xml BLUETOOTH permissions ==="
+          grep -E '<uses-permission.*BLUETOOTH' "$MANIFEST"
       - name: Gradle cache
         uses: actions/cache@v4
         with:
@@ -935,6 +980,51 @@ jobs:
         run: |-
           cd clients/android
           git checkout dev
+      - name: Add Bluetooth permissions to AndroidManifest
+        run: |
+          set -xeuo pipefail
+          MANIFEST="clients/android/app/src/main/AndroidManifest.xml"
+          
+          # Check if manifest exists
+          if [ ! -f "$MANIFEST" ]; then
+            echo "Error: AndroidManifest.xml not found at $MANIFEST"
+            exit 1
+          fi
+          
+          # Function to add permission if not present
+          add_perm() {
+            local perm="$1"
+            if ! grep -q "android:name=\"${perm}\"" "$MANIFEST"; then
+              # Insert after the <manifest> opening tag (handles both single-line and multi-line)
+              awk -v perm="$perm" '
+                BEGIN { in_manifest = 0; inserted = 0 }
+                /<manifest/ { in_manifest = 1 }
+                in_manifest && !inserted && />/ {
+                  print
+                  print "    <uses-permission android:name=\"" perm "\" />"
+                  inserted = 1
+                  next
+                }
+                { print }
+              ' "$MANIFEST" > "${MANIFEST}.tmp" && mv "${MANIFEST}.tmp" "$MANIFEST"
+              echo "Added ${perm}"
+            else
+              echo "${perm} already present"
+            fi
+          }
+          
+          # Legacy Bluetooth permissions (pre-Android 12)
+          add_perm "android.permission.BLUETOOTH"
+          add_perm "android.permission.BLUETOOTH_ADMIN"
+          
+          # Android 12+ (API 31+) permissions
+          add_perm "android.permission.BLUETOOTH_SCAN"
+          add_perm "android.permission.BLUETOOTH_CONNECT"
+          add_perm "android.permission.BLUETOOTH_ADVERTISE"
+          
+          # Show the result
+          echo "=== AndroidManifest.xml BLUETOOTH permissions ==="
+          grep -E '<uses-permission.*BLUETOOTH' "$MANIFEST"
       - name: Gradle cache
         uses: actions/cache@v4
         with:
