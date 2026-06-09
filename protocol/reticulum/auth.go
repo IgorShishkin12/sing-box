@@ -20,7 +20,8 @@ import (
 	"time"
 )
 
-const authTimeout = 20 * time.Second
+// TODO: change for event-based or something, or just wait untill no data would come for x ms.
+const authTimeout = 40 * time.Second
 
 // RetryPolicy controls how auth failures are retried on the same connection.
 type RetryPolicy string

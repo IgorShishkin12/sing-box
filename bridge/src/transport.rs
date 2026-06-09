@@ -363,9 +363,14 @@ async fn spawn_interfaces(
                 let ble = NativeRnodeBleKissInterface::new(
                     label,
                     settings,
-                    RnodeBleKissConfig::default(),
+                    RnodeBleKissConfig {
+                        initial_frames: lora.probe_frames(),
+                        deferred_frames: lora.radio_config_frames(),
+                        shutdown_frames: lora.shutdown_frames(),
+                        ..RnodeBleKissConfig::default()
+                    },
                 )
-                .with_rnode_validation(lora, Duration::from_millis(1_500));
+                .with_rnode_validation(lora, Duration::from_millis(5_000)); // matches Python's ble_detect_timeout
                 let addr = iface_mgr
                     .lock()
                     .await

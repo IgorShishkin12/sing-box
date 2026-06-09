@@ -20,10 +20,10 @@ libc = "0.2"
 rand_core = "0.6"
 sha2 = "0.10"
 hex = "0.4"
-reticulum-rs = { git = "https://github.com/IgorShishkin12/LXMF-rs", branch = "fix/mdu_rnode", features = ["core", "transport"] }
-reticulum-rs-transport = { package = "reticulum-rs-transport", git = "https://github.com/IgorShishkin12/LXMF-rs", branch = "fix/mdu_rnode" }
+reticulum-rs = { git = "https://github.com/IgorShishkin12/LXMF-rs", branch = "fix/bluetooth_rnode", features = ["core", "transport"] }
+reticulum-rs-transport = { package = "reticulum-rs-transport", git = "https://github.com/IgorShishkin12/LXMF-rs", branch = "fix/bluetooth_rnode" }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter"] }
 tracing-log = "0.2"
 
 [dev-dependencies]

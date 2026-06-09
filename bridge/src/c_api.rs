@@ -94,8 +94,12 @@ pub unsafe extern "C" fn reticulum_init(
     on_close: Option<extern "C" fn(u64)>,
 ) -> i32 {
     let _ = tracing_log::LogTracer::init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("serde=off"));
     let _ = tracing::subscriber::set_global_default(
-        tracing_subscriber::Registry::default().with(crate::logger::CLogLayer),
+        tracing_subscriber::Registry::default()
+            .with(filter)
+            .with(crate::logger::CLogLayer),
     );
 
     if let Some(f) = on_accept {
