@@ -95,7 +95,7 @@ pub unsafe extern "C" fn reticulum_init(
 ) -> i32 {
     let _ = tracing_log::LogTracer::init();
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("serde=off"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("trace,serde=off"));
     let _ = tracing::subscriber::set_global_default(
         tracing_subscriber::Registry::default()
             .with(filter)
