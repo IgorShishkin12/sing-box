@@ -981,14 +981,14 @@ dependencies = [
 
 [[package]]
 name = "regex-syntax"
-version = "0.8.10"
+version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reticulum-rs"
 version = "0.2.0"
-source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=fix%2Fbluetooth_rnode#b9a95ff8eb9f9a1ee82e4af8596cb7594786e89d"
+source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=main#2435b6b1b922d74ebb413f156774160ed08a9088"
 dependencies = [
  "reticulum-rs-core",
  "reticulum-rs-transport",
@@ -997,7 +997,7 @@ dependencies = [
 [[package]]
 name = "reticulum-rs-core"
 version = "0.2.0"
-source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=fix%2Fbluetooth_rnode#b9a95ff8eb9f9a1ee82e4af8596cb7594786e89d"
+source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=main#2435b6b1b922d74ebb413f156774160ed08a9088"
 dependencies = [
  "aes",
  "cbc",
@@ -1017,7 +1017,7 @@ dependencies = [
 [[package]]
 name = "reticulum-rs-transport"
 version = "0.2.0"
-source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=fix%2Fbluetooth_rnode#b9a95ff8eb9f9a1ee82e4af8596cb7594786e89d"
+source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=main#2435b6b1b922d74ebb413f156774160ed08a9088"
 dependencies = [
  "aes",
  "btleplug",
@@ -1563,9 +1563,9 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "uuid"
-version = "1.23.2"
+version = "1.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d258b83ceec21034727ecee8c382cfa6c3e133699b0742c64571814fb420c9f7"
+checksum = "144d6b123cef80b301b8f72a9e2ca4370ddec21950d0a103dd22c437006d2db7"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
