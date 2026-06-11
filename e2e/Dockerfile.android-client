@@ -169,14 +169,14 @@ RUN curl -fsSL https://services.gradle.org/distributions/gradle-8.7-bin.zip \
     ln -s /opt/gradle-8.7/bin/gradle /usr/local/bin/gradle && \
     rm /tmp/gradle.zip
 
-# jni-utils Java sources (btleplug's dependency) — stash for direct compilation.
-# No pre-built artifacts exist publicly; native methods land in libsing-box-ble.so.
-RUN git clone --depth 1 --branch v0.1.1 \
-        https://github.com/gedgygedgy/jni-utils-rs.git /tmp/jni-utils-rs 2>/dev/null || \
-    git clone --depth 1 \
-        https://github.com/gedgygedgy/jni-utils-rs.git /tmp/jni-utils-rs && \
-    cp -r /tmp/jni-utils-rs/java/src/main/java /opt/jni-utils-java && \
-    rm -rf /tmp/jni-utils-rs
+# jni-utils Java sources — download the same crate tarball that cargo uses,
+# so the Java class names always match the Rust library version exactly.
+RUN curl -fsSL https://static.crates.io/crates/jni-utils/jni-utils-0.1.1.crate \
+        -o /tmp/jni-utils.tar.gz && \
+    mkdir /tmp/jni-utils && \
+    tar -xzf /tmp/jni-utils.tar.gz -C /tmp/jni-utils --strip-components=1 && \
+    cp -r /tmp/jni-utils/java/src/main/java /opt/jni-utils-java && \
+    rm -rf /tmp/jni-utils /tmp/jni-utils.tar.gz
 
 # btleplug Java sources — stash for direct compilation into the APK.
 # No published AAR exists; compiling sources avoids the AGP 7.x/Gradle version maze.
