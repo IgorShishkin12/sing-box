@@ -1,0 +1,42 @@
+{
+  "log": {
+    "level": "info",
+    "output": "/dev/stdout",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 1080
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "reticulum",
+      "tag": "reticulum-out",
+      "name": "e2e-sum-server",
+      "password": "e2e-test-password",
+      "reticulum_config": {
+        "identity_name": "e2e-client",
+        "storage_path": "/var/lib/reticulum/client-serial",
+        "interfaces": [
+          {
+            "name": "RNode Serial Client",
+            "type": "RNodeSerial",
+            "device": "/dev/ttyUSB0",
+            "frequency_hz": 868000000,
+            "bandwidth_hz": 125000,
+            "tx_power_dbm": 14,
+            "spreading_factor": 9,
+            "coding_rate": 5
+          }
+        ]
+      }
+    }
+  ],
+  "route": {
+    "final": "reticulum-out"
+  }
+}

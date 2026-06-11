@@ -24,6 +24,20 @@ func newChanConnPair() (*chanConn, *chanConn) {
 		&chanConn{readCh: aTob, writeCh: bToa, closed: make(chan struct{})}
 }
 
+// ReadPacket returns one complete message (no size limit), satisfying the
+// packetReader interface used by framedConn.readLoop and muxSession.readLoop.
+func (c *chanConn) ReadPacket() ([]byte, error) {
+	select {
+	case msg, ok := <-c.readCh:
+		if !ok {
+			return nil, io.EOF
+		}
+		return msg, nil
+	case <-c.closed:
+		return nil, io.EOF
+	}
+}
+
 func (c *chanConn) Read(b []byte) (int, error) {
 	select {
 	case msg, ok := <-c.readCh:
@@ -242,4 +256,61 @@ func TestFramedConn_AuthAndDataInterleaved(t *testing.T) {
 	n, err := fc.Read(buf)
 	require.NoError(t, err)
 	require.Equal(t, []byte{0x40, 0x00, 0x02, 'd'}, buf[:n])
+}
+
+// TestFramedConn_ReadPacketPreservesLargeMessage verifies that ReadPacket
+// returns the full message in one call when the inner conn implements
+// packetReader (chanConn), with no size limit.
+func TestFramedConn_ReadPacketPreservesLargeMessage(t *testing.T) {
+	peerConn, myConn := newChanConnPair()
+	fc := newFramedConn(myConn)
+	defer fc.Close()
+	fc.OpenGate()
+
+	// Build a message that is larger than MaxReticulumMessage.
+	large := make([]byte, 4*MaxReticulumMessage)
+	large[0] = TypeNewConn // first byte determines routing; TypeNewConn is control
+	for i := 1; i < len(large); i++ {
+		large[i] = byte(i % 253)
+	}
+
+	// Use a data-range first byte so the message routes to dataCh.
+	large[0] = 0x40 // encodeDataByte(1,0) — single-fragment marker (data range)
+
+	go func() { peerConn.Write(large) }()
+
+	got, err := fc.ReadPacket()
+	require.NoError(t, err)
+	require.Equal(t, large, got, "ReadPacket must return the full message untruncated")
+}
+
+// TestFramedConn_ReadPacketBlocksUntilGate verifies ReadPacket respects the gate.
+func TestFramedConn_ReadPacketBlocksUntilGate(t *testing.T) {
+	peerConn, myConn := newChanConnPair()
+	fc := newFramedConn(myConn)
+	defer fc.Close()
+
+	msg := []byte{0x40, 0x00, 0x01, 'x'}
+	peerConn.Write(msg)
+
+	done := make(chan []byte, 1)
+	go func() {
+		got, _ := fc.ReadPacket()
+		done <- got
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("ReadPacket returned before OpenGate")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	fc.OpenGate()
+
+	select {
+	case got := <-done:
+		require.Equal(t, msg, got)
+	case <-time.After(time.Second):
+		t.Fatal("ReadPacket did not return after OpenGate")
+	}
 }

@@ -22,15 +22,6 @@ pub fn register_task(handle: JoinHandle<()>) {
         .push(handle);
 }
 
-/// Abort and drain all registered task handles.
-fn abort_all_tasks() {
-    let mut handles = get_task_handles().lock().unwrap_or_else(|p| p.into_inner());
-    log::debug!("aborting {} registered task(s)", handles.len());
-    for handle in handles.drain(..) {
-        handle.abort();
-    }
-}
-
 fn get_runtime_lock() -> &'static Mutex<Option<Arc<Runtime>>> {
     RUNTIME.get_or_init(|| Mutex::new(None))
 }
@@ -81,10 +72,6 @@ thread_local! {
 
 static BLOCK_ON_LOCK: once_cell::sync::OnceCell<Mutex<()>> = once_cell::sync::OnceCell::new();
 
-fn get_block_on_lock() -> &'static Mutex<()> {
-    BLOCK_ON_LOCK.get_or_init(|| Mutex::new(()))
-}
-
 /// Check if the runtime has been initialized.
 pub fn has_runtime() -> bool {
     let guard = match get_runtime_lock().lock() {
@@ -110,10 +97,15 @@ where
     // If so, skip the serial lock to avoid deadlock on reentrant calls.
     let is_reentrant = IN_BLOCK_ON.with(|cell| cell.replace(true));
     let _serial = if !is_reentrant {
-        Some(get_block_on_lock().lock().unwrap_or_else(|poisoned| {
-            log::warn!("block_on mutex was poisoned, recovering");
-            poisoned.into_inner()
-        }))
+        Some(
+            BLOCK_ON_LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(|poisoned| {
+                    log::warn!("block_on mutex was poisoned, recovering");
+                    poisoned.into_inner()
+                }),
+        )
     } else {
         None
     };
@@ -167,7 +159,13 @@ where
 /// called.
 pub fn shutdown() {
     log::debug!("shutdown called");
-    abort_all_tasks();
+    {
+        let mut handles = get_task_handles().lock().unwrap_or_else(|p| p.into_inner());
+        log::debug!("aborting {} registered task(s)", handles.len());
+        for handle in handles.drain(..) {
+            handle.abort();
+        }
+    }
     let mut guard = lock_runtime();
     if guard.is_some() {
         *guard = None;

@@ -20,6 +20,9 @@ import (
 // Rust requires a non-null, non-empty config string.
 func buildConfigJSON(inlineConfig *option.ReticulumConfig, configPath string) (string, error) {
 	if inlineConfig != nil {
+		if err := inlineConfig.Validate(); err != nil {
+			return "", fmt.Errorf("invalid reticulum config: %w", err)
+		}
 		b, err := json.Marshal(inlineConfig)
 		if err != nil {
 			return "", fmt.Errorf("failed to marshal reticulum config: %w", err)
@@ -85,6 +88,7 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 	}
 	h.logger.Info("reticulum inbound: starting, listening on ", listenHash)
 
+	setRustLogLevelIfUnset(h.logger)
 	BridgeSetLogger(h.logger)
 
 	if err := BridgeInit(configJSON); err != nil {
@@ -153,27 +157,18 @@ func (h *Inbound) handleConn(connID uint64) {
 	fc.OpenGate()
 
 	session := newMuxSessionServer(fc, h.logger)
-	h.handleSession(session)
-}
-
-// handleSession dispatches incoming virtual connections from a mux session.
-func (h *Inbound) handleSession(s *muxSession) {
-	for mc := range s.incomingCh {
-		go h.routeVirtualConn(mc)
-	}
-}
-
-// routeVirtualConn routes one virtual connection to the configured destination.
-// mc is closed by sing-box's router when both copy goroutines finish; no explicit
-// Close call needed here.
-func (h *Inbound) routeVirtualConn(mc *muxConn) {
-	h.logger.Info("inbound virtual connection to ", mc.dest)
-	if h.router != nil {
-		metadata := adapter.InboundContext{
-			Network:     "tcp",
-			Destination: M.ParseSocksaddr(mc.dest),
-		}
-		h.router.RouteConnectionEx(context.Background(), mc, metadata, nil)
+	for mc := range session.incomingCh {
+		mc := mc
+		go func() {
+			h.logger.Info("inbound virtual connection to ", mc.dest)
+			if h.router != nil {
+				metadata := adapter.InboundContext{
+					Network:     "tcp",
+					Destination: M.ParseSocksaddr(mc.dest),
+				}
+				h.router.RouteConnectionEx(context.Background(), mc, metadata, nil)
+			}
+		}()
 	}
 }
 

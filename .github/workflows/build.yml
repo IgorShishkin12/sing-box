@@ -660,6 +660,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge -> target
+          key: android
+      - name: Cache Go tools (gomobile/gobind)
+        id: cache-go-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin
+          key: go-tools-gomobile-v0.1.12
       - name: Set tag
         run: |-
           git ls-remote --exit-code --tags origin v${{ needs.calculate_version.outputs.version }} || echo "PUBLISHED=false" >> "$GITHUB_ENV"
@@ -668,9 +679,11 @@ jobs:
         run: make bridge_android
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+      - name: Install gomobile
+        if: steps.cache-go-tools.outputs.cache-hit != 'true'
+        run: make lib_install
       - name: Build library
         run: |-
-          make lib_install
           export PATH="$PATH:$(go env GOPATH)/bin"
           make lib_android
         env:
@@ -686,6 +699,51 @@ jobs:
         run: |-
           cd clients/android
           git checkout dev
+      - name: Add Bluetooth permissions to AndroidManifest
+        run: |
+          set -xeuo pipefail
+          MANIFEST="clients/android/app/src/main/AndroidManifest.xml"
+          
+          # Check if manifest exists
+          if [ ! -f "$MANIFEST" ]; then
+            echo "Error: AndroidManifest.xml not found at $MANIFEST"
+            exit 1
+          fi
+          
+          # Function to add permission if not present
+          add_perm() {
+            local perm="$1"
+            if ! grep -q "android:name=\"${perm}\"" "$MANIFEST"; then
+              # Insert after the <manifest> opening tag (handles both single-line and multi-line)
+              awk -v perm="$perm" '
+                BEGIN { in_manifest = 0; inserted = 0 }
+                /<manifest/ { in_manifest = 1 }
+                in_manifest && !inserted && />/ {
+                  print
+                  print "    <uses-permission android:name=\"" perm "\" />"
+                  inserted = 1
+                  next
+                }
+                { print }
+              ' "$MANIFEST" > "${MANIFEST}.tmp" && mv "${MANIFEST}.tmp" "$MANIFEST"
+              echo "Added ${perm}"
+            else
+              echo "${perm} already present"
+            fi
+          }
+          
+          # Legacy Bluetooth permissions (pre-Android 12)
+          add_perm "android.permission.BLUETOOTH"
+          add_perm "android.permission.BLUETOOTH_ADMIN"
+          
+          # Android 12+ (API 31+) permissions
+          add_perm "android.permission.BLUETOOTH_SCAN"
+          add_perm "android.permission.BLUETOOTH_CONNECT"
+          add_perm "android.permission.BLUETOOTH_ADVERTISE"
+          
+          # Show the result
+          echo "=== AndroidManifest.xml BLUETOOTH permissions ==="
+          grep -E '<uses-permission.*BLUETOOTH' "$MANIFEST"
       - name: Gradle cache
         uses: actions/cache@v4
         with:
@@ -883,6 +941,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge -> target
+          key: android
+      - name: Cache Go tools (gomobile/gobind)
+        id: cache-go-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin
+          key: go-tools-gomobile-v0.1.12
       - name: Set tag
         run: |-
           git ls-remote --exit-code --tags origin v${{ needs.calculate_version.outputs.version }} || echo "PUBLISHED=false" >> "$GITHUB_ENV"
@@ -891,9 +960,11 @@ jobs:
         run: make bridge_android
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+      - name: Install gomobile
+        if: steps.cache-go-tools.outputs.cache-hit != 'true'
+        run: make lib_install
       - name: Build library
         run: |-
-          make lib_install
           export PATH="$PATH:$(go env GOPATH)/bin"
           make lib_android
         env:
@@ -909,6 +980,51 @@ jobs:
         run: |-
           cd clients/android
           git checkout dev
+      - name: Add Bluetooth permissions to AndroidManifest
+        run: |
+          set -xeuo pipefail
+          MANIFEST="clients/android/app/src/main/AndroidManifest.xml"
+          
+          # Check if manifest exists
+          if [ ! -f "$MANIFEST" ]; then
+            echo "Error: AndroidManifest.xml not found at $MANIFEST"
+            exit 1
+          fi
+          
+          # Function to add permission if not present
+          add_perm() {
+            local perm="$1"
+            if ! grep -q "android:name=\"${perm}\"" "$MANIFEST"; then
+              # Insert after the <manifest> opening tag (handles both single-line and multi-line)
+              awk -v perm="$perm" '
+                BEGIN { in_manifest = 0; inserted = 0 }
+                /<manifest/ { in_manifest = 1 }
+                in_manifest && !inserted && />/ {
+                  print
+                  print "    <uses-permission android:name=\"" perm "\" />"
+                  inserted = 1
+                  next
+                }
+                { print }
+              ' "$MANIFEST" > "${MANIFEST}.tmp" && mv "${MANIFEST}.tmp" "$MANIFEST"
+              echo "Added ${perm}"
+            else
+              echo "${perm} already present"
+            fi
+          }
+          
+          # Legacy Bluetooth permissions (pre-Android 12)
+          add_perm "android.permission.BLUETOOTH"
+          add_perm "android.permission.BLUETOOTH_ADMIN"
+          
+          # Android 12+ (API 31+) permissions
+          add_perm "android.permission.BLUETOOTH_SCAN"
+          add_perm "android.permission.BLUETOOTH_CONNECT"
+          add_perm "android.permission.BLUETOOTH_ADVERTISE"
+          
+          # Show the result
+          echo "=== AndroidManifest.xml BLUETOOTH permissions ==="
+          grep -E '<uses-permission.*BLUETOOTH' "$MANIFEST"
       - name: Gradle cache
         uses: actions/cache@v4
         with:

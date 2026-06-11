@@ -1,4 +1,4 @@
-name: retv2run
+name: retv2bench-reticulum
 
 services:
   e2e-server:
@@ -8,44 +8,42 @@ services:
       dockerfile: e2e/Dockerfile.server
     command: >
       -c "
-        sum-server &
+        sum-server &> /dev/null &
         sing-box run -c /etc/sing-box/config.json
       "
     volumes:
       - ./configs/server.json:/etc/sing-box/config.json:ro
     networks:
-      - e2e-net
+      - bench-net
+    expose:
+      - "7788"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8080/sum -H 'Content-Type: application/json' -d '{\"a\":1,\"b\":1}' > /dev/null 2>&1 && pgrep -x sing-box > /dev/null 2>&1"]
       interval: 5s
       timeout: 5s
       retries: 12
 
-  e2e-client:
+  bench-client:
     image: retv2e2e-client:latest
     build:
       context: ..
       dockerfile: e2e/Dockerfile.client
     command: >
       -c "
-        sing-box run -c /etc/sing-box/config.json | tee /tmp/singbox.log 2>&1 &
-        until grep -q 'sing-box started' /tmp/singbox.log 2>/dev/null; do sleep 0.2; done &&
-        N=2000 &&
-        { printf '{\"terms\":['; i=2; while [ $$i -le $$N ]; do printf '1, '; i=$$(($$i+1)); done; printf '1]}'; } > /tmp/payload.json &&
-        RESP=$(curl -sf --socks5-hostname 127.0.0.1:1080 http://127.0.0.1:8080/sum-terms \
-          -H 'Content-Type: application/json' -d @/tmp/payload.json) &&
-        echo \"Response: $$RESP\" &&
-        echo \"$$RESP\" | grep -q '\"sum\":'$$N &&
-        echo 'E2E LENGTH TEST PASSED'
+        sing-box run -c /etc/sing-box/config.json &
+        e2e-bench -mode proxy -socks 127.0.0.1:1080 -url http://127.0.0.1:8080 -output /bench-results/reticulum.txt &&
+        echo 'RETICULUM BENCHMARKS DONE'
       "
     volumes:
       - ./configs/client.json:/etc/sing-box/config.json:ro
+      - ./bench-results:/bench-results
     networks:
-      - e2e-net
+      - bench-net
     depends_on:
       e2e-server:
         condition: service_healthy
 
 networks:
-  e2e-net:
+  bench-net:
     driver: bridge
+

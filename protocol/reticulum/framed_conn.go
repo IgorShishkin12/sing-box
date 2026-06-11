@@ -8,6 +8,14 @@ import (
 	"time"
 )
 
+// packetReader is implemented by connections that deliver complete messages
+// without size limits (as opposed to the net.Conn byte-stream Read interface).
+// framedConn.readLoop and muxSession.readLoop use it to preserve message
+// boundaries for large Resource-delivered payloads.
+type packetReader interface {
+	ReadPacket() ([]byte, error)
+}
+
 // AuthIO sends and receives binary auth messages over typed control channels.
 // The type byte distinguishes round 1 (TypeRequestAuth) from round 2 (TypeResponseAuth),
 // so either side can detect and reject messages that arrive out of sequence.
@@ -57,30 +65,56 @@ func newFramedConn(inner net.Conn) *framedConn {
 
 // readLoop reads messages from inner and routes them by type byte.
 // Runs until the underlying connection closes or framedConn is closed.
+//
+// When inner implements packetReader, each ReadPacket() call returns a complete
+// message of arbitrary size (used for large Resource-delivered payloads).
+// Otherwise falls back to fixed-size Read for byte-stream connections (tests).
 func (fc *framedConn) readLoop() {
 	defer close(fc.dataCh) // signals EOF to Read
-	buf := make([]byte, MaxReticulumMessage)
-	for {
-		n, err := fc.inner.Read(buf)
-		if err != nil {
-			return
-		}
-		if n == 0 {
-			continue
-		}
-		msg := make([]byte, n)
-		copy(msg, buf[:n])
 
+	route := func(msg []byte) bool {
 		if msg[0] == TypeRequestAuth || msg[0] == TypeResponseAuth {
 			select {
-			case fc.ctrlCh <- msg: // include type byte so ReadMsg can verify sequence
+			case fc.ctrlCh <- msg:
 			case <-fc.done:
-				return
+				return false
 			}
 		} else {
 			select {
 			case fc.dataCh <- msg:
 			case <-fc.done:
+				return false
+			}
+		}
+		return true
+	}
+
+	if pr, ok := fc.inner.(packetReader); ok {
+		for {
+			msg, err := pr.ReadPacket()
+			if err != nil {
+				return
+			}
+			if len(msg) == 0 {
+				continue
+			}
+			if !route(msg) {
+				return
+			}
+		}
+	} else {
+		buf := make([]byte, MaxReticulumMessage)
+		for {
+			n, err := fc.inner.Read(buf)
+			if err != nil {
+				return
+			}
+			if n == 0 {
+				continue
+			}
+			msg := make([]byte, n)
+			copy(msg, buf[:n])
+			if !route(msg) {
 				return
 			}
 		}
@@ -91,6 +125,35 @@ func (fc *framedConn) readLoop() {
 // Must be called after auth completes (or when no auth is configured).
 func (fc *framedConn) OpenGate() {
 	fc.gateOnce.Do(func() { close(fc.gate) })
+}
+
+// ReadPacket returns one complete data message without any size limit.
+// Blocks until OpenGate has been called, then returns the next message from
+// dataCh as a single contiguous slice. Large Resource-delivered payloads
+// arrive whole, unlike Read which may split them across multiple calls.
+func (fc *framedConn) ReadPacket() ([]byte, error) {
+	select {
+	case <-fc.gate:
+	case <-fc.done:
+		return nil, io.ErrClosedPipe
+	}
+	select {
+	case msg, ok := <-fc.dataCh:
+		if !ok {
+			return nil, io.EOF
+		}
+		return msg, nil
+	case <-fc.done:
+		select {
+		case msg, ok := <-fc.dataCh:
+			if !ok {
+				return nil, io.EOF
+			}
+			return msg, nil
+		default:
+		}
+		return nil, io.ErrClosedPipe
+	}
 }
 
 // Read implements net.Conn. Blocks until OpenGate is called, then returns

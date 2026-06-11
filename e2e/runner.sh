@@ -9,7 +9,13 @@ COMPOSE_CMD="docker compose"
 if command -v podman-compose &>/dev/null; then
     COMPOSE_CMD="podman-compose"
 elif podman compose version &>/dev/null 2>&1; then
-    COMPOSE_CMD="podman compose"
+    # Only use podman compose if the socket is actually running; otherwise
+    # podman delegates to the docker-compose plugin which tries the Podman
+    # socket and fails (e.g. on GitHub Actions ubuntu runners).
+    PODMAN_SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"
+    if [ -S "$PODMAN_SOCK" ]; then
+        COMPOSE_CMD="podman compose"
+    fi
 fi
 echo "Using compose: $COMPOSE_CMD"
 

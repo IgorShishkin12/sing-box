@@ -94,8 +94,12 @@ pub unsafe extern "C" fn reticulum_init(
     on_close: Option<extern "C" fn(u64)>,
 ) -> i32 {
     let _ = tracing_log::LogTracer::init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("trace,serde=off"));
     let _ = tracing::subscriber::set_global_default(
-        tracing_subscriber::Registry::default().with(crate::logger::CLogLayer),
+        tracing_subscriber::Registry::default()
+            .with(filter)
+            .with(crate::logger::CLogLayer),
     );
 
     if let Some(f) = on_accept {
@@ -245,6 +249,10 @@ pub unsafe extern "C" fn reticulum_dial(task_id: u64, destination_hash: *const c
             let tp = transport.lock().await;
             tp.received_data_events()
         };
+        let resource_rx = {
+            let tp = transport.lock().await;
+            tp.resource_events()
+        };
         let mut link_events = {
             let tp = transport.lock().await;
             tp.out_link_events()
@@ -265,6 +273,7 @@ pub unsafe extern "C" fn reticulum_dial(task_id: u64, destination_hash: *const c
                 );
                 let conn_id = store.insert_connection(conn).await;
                 crate::transport::spawn_link_data_reader(conn_id, link_id, data_rx);
+                crate::transport::spawn_resource_event_reader(conn_id, link_id, resource_rx);
                 call_on_connect(task_id, conn_id);
             }
             Err(e) => {

@@ -15,8 +15,14 @@ pub enum StoreEntry {
 pub struct HandleStore {
     entries: RwLock<HashMap<u64, StoreEntry>>,
     next_handle: AtomicU64,
-    /// Recycled handles returned by `remove`. Popped before allocating a fresh ID
-    /// so the u64 space is never exhausted even under sustained churn.
+    /// Recycled handles returned by `remove`. Popped (LIFO) before allocating a
+    /// fresh ID so the u64 space is never exhausted under sustained churn.
+    ///
+    /// LIFO order is intentional: it maximises the time between a handle being
+    /// freed and being re-issued. A handle's background data-reader task may
+    /// still be alive for a brief window after `remove()` (see TODO(race)
+    /// below); reusing it last-freed-first gives that task the longest possible
+    /// runway to exit before the handle is assigned to a new connection.
     freed_handles: std::sync::Mutex<Vec<u64>>,
     /// Stores name → address-hash-hex mappings registered via `register_name`.
     name_to_hash: RwLock<HashMap<String, String>>,
@@ -127,6 +133,11 @@ mod tests {
         assert_eq!(h3, h1, "freed handle should be recycled");
     }
 
+    // Verify the LIFO recycling invariant: the most-recently-freed handle is
+    // reused first. This is a deliberate policy (see the `freed_handles` field
+    // doc), not an accidental consequence of Vec::pop — changing the order
+    // would shorten the safety window for stale background tasks and must be
+    // done intentionally.
     #[tokio::test]
     async fn test_handle_recycling_lifo() {
         let store = HandleStore::new();
@@ -136,7 +147,7 @@ mod tests {
 
         store.remove(h1).await;
         store.remove(h2).await;
-        // LIFO: h2 was pushed last, popped first.
+        // LIFO: h2 was pushed last, so it is popped (re-issued) first.
         let r1 = store.insert_connection(Connection::new()).await;
         let r2 = store.insert_connection(Connection::new()).await;
         assert_eq!(r1, h2);
