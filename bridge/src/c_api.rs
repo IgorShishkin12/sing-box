@@ -172,7 +172,24 @@ pub unsafe extern "C" fn reticulum_set_jvm(jvm: *mut std::ffi::c_void) {
         match jni::JavaVM::from_raw(jvm_ptr) {
             Ok(vm) => match vm.attach_current_thread() {
                 Ok(env) => match btleplug::platform::init(&*env) {
-                    Ok(()) => log::info!("btleplug Android platform initialized"),
+                    Ok(()) => {
+                        log::info!("btleplug Android platform initialized");
+                        // btleplug::platform::init caches its own Java classes but
+                        // not the jni-utils classes (JFuture, JStream,
+                        // FutureException) that it uses at runtime. Cache them
+                        // now while we're still on the Java thread.
+                        for cls in &[
+                            "io/github/gedgygedgy/rust/future/JFuture",
+                            "io/github/gedgygedgy/rust/future/FutureException",
+                            "io/github/gedgygedgy/rust/stream/JStream",
+                        ] {
+                            if let Err(e) =
+                                jni_utils::classcache::find_add_class(&*env, cls)
+                            {
+                                log::error!("classcache: failed to cache {cls}: {e}");
+                            }
+                        }
+                    }
                     Err(e) => log::error!("btleplug platform init: {e}"),
                 },
                 Err(e) => log::error!("attach_current_thread: {e}"),

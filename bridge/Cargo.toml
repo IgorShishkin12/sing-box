@@ -29,6 +29,7 @@ btleplug = { version = "0.11", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.19" }
+jni-utils = { version = "0.1.1" }
 
 [dev-dependencies]
 serial_test = "3"

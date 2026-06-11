@@ -1287,6 +1287,7 @@ dependencies = [
  "btleplug",
  "hex",
  "jni",
+ "jni-utils",
  "libc",
  "log",
  "once_cell",
