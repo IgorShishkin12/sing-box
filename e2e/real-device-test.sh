@@ -1,30 +1,44 @@
 #!/bin/bash
 # real-device-test.sh — Run the E2E Reticulum test against a real Android phone.
 #
-# Prerequisites:
-#   - adb is in PATH and exactly one real device is connected
-#     (USB or: adb connect <phone-ip>:5555 before running this script)
-#   - sing-box binary: looked up in order:
-#       $SINGBOX_BIN env var → PATH → ../sing-box (make build_with_bridge output)
-#   - sum-server binary: looked up in order:
-#       $SUMSERVER_BIN env var → PATH → sumserver/sum-server (go build output)
+# Usage:
+#   ./real-device-test.sh           # TCP transport (default)
+#   ./real-device-test.sh --ble     # BLE transport via minimal APK service
 #
-# The script auto-discovers the PC's IP that is reachable from the phone.
+# Prerequisites (TCP mode):
+#   - adb in PATH, exactly one real device connected
+#   - sing-box binary: $SINGBOX_BIN env → PATH → ../sing-box
+#   - sum-server binary: $SUMSERVER_BIN env → PATH → sumserver/sum-server
+#
+# Prerequisites (BLE mode, --ble):
+#   - All of the above EXCEPT sing-box binary (APK is used instead)
+#   - Android Gradle toolchain to build the APK (or pre-built APK)
+#   - RNode BLE hardware connected to the phone matching client-ble.json
+#   - A Reticulum-capable interface on the PC side (RNode serial or TCP bridge)
+#
+# The script auto-discovers the PC's IP reachable from the phone.
 # Override with: SERVER_IP=192.168.x.y ./real-device-test.sh
 #
-# Arm64 Android binaries are built on first run via Podman (or Docker) and cached in
-# e2e/android-bins-arm64/. Subsequent runs reuse the cache.
-#
-# Future (Phase 2 APK): replace the "push binaries" section below with:
-#   adb install path/to/sing-box-for-android.apk
-#   adb push client-config.json \
-#     /sdcard/Android/data/io.nekohasekai.sfa/files/config.json
-#   adb shell am start -n io.nekohasekai.sfa/.bg.SFAService
-# then wait for 127.0.0.1:1080 before running the loadtest.
+# Arm64 Android binaries are built on first run via Podman/Docker and cached
+# in e2e/android-bins/. Subsequent runs reuse the cache.
 set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Parse arguments
+# ---------------------------------------------------------------------------
+USE_BLE=false
+for arg in "$@"; do
+    case "$arg" in
+        --ble) USE_BLE=true ;;
+        *) echo "Unknown argument: $arg" >&2; exit 1 ;;
+    esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINS_CACHE="$SCRIPT_DIR/android-bins"
+BLE_APK_CACHE="$SCRIPT_DIR/android-ble-apk"
+BLE_WRAPPER_DIR="$(dirname "$SCRIPT_DIR")/android-ble-wrapper"
+BLE_PKG="com.singbox.ble"
 SERVER_RETICULUM_PORT=7788
 SINGBOX_STARTUP_WAIT=5
 LOG_DIR="$SCRIPT_DIR/logs/$(date +%Y%m%d-%H%M%S)"
@@ -49,8 +63,8 @@ if ! command -v adb &>/dev/null; then
     echo "ERROR: adb not found in PATH" >&2; exit 1
 fi
 
-# Count real (non-emulator) devices
-REAL_DEVICES=$(adb devices | tail -n +2 | grep -v '^$' | grep -v 'emulator' | grep 'device$' | wc -l)
+# Count real (non-emulator) devices. grep exits 1 when no matches; handle that.
+REAL_DEVICES=$(adb devices | tail -n +2 | grep -v '^$' | grep -v 'emulator' | grep -c 'device$') || REAL_DEVICES=0
 if [[ "$REAL_DEVICES" -eq 0 ]]; then
     echo "ERROR: no real Android device connected." >&2
     echo "  USB: plug in phone and enable ADB debugging" >&2
@@ -63,20 +77,24 @@ if [[ "$REAL_DEVICES" -gt 1 ]]; then
     exit 1
 fi
 
-# Locate sing-box: PATH, then the parent directory (where `make build_with_bridge` drops it)
+# Locate sing-box binary (TCP mode only — BLE mode uses the APK service instead)
 SINGBOX_BIN="${SINGBOX_BIN:-}"
-if [[ -z "$SINGBOX_BIN" ]]; then
-    if command -v sing-box &>/dev/null; then
-        SINGBOX_BIN="$(command -v sing-box)"
-    elif [[ -x "$SCRIPT_DIR/../sing-box" ]]; then
-        SINGBOX_BIN="$(cd "$SCRIPT_DIR/.." && pwd)/sing-box"
-    else
-        echo "ERROR: sing-box not found. Build with 'make build_with_bridge' in sing-box/" >&2
-        echo "  or set SINGBOX_BIN=/path/to/sing-box" >&2
-        exit 1
+if [[ "$USE_BLE" == "false" ]]; then
+    if [[ -z "$SINGBOX_BIN" ]]; then
+        if command -v sing-box &>/dev/null; then
+            SINGBOX_BIN="$(command -v sing-box)"
+        elif [[ -x "$SCRIPT_DIR/../sing-box" ]]; then
+            SINGBOX_BIN="$(cd "$SCRIPT_DIR/.." && pwd)/sing-box"
+        else
+            echo "ERROR: sing-box not found. Build with 'make build_with_bridge' in sing-box/" >&2
+            echo "  or set SINGBOX_BIN=/path/to/sing-box" >&2
+            exit 1
+        fi
     fi
+    echo "sing-box: $SINGBOX_BIN"
+else
+    echo "BLE mode: using Android APK service (no sing-box binary needed)"
 fi
-echo "sing-box: $SINGBOX_BIN"
 
 # Locate sum-server: PATH, then the sumserver build directory
 SUMSERVER_BIN="${SUMSERVER_BIN:-}"
@@ -150,27 +168,52 @@ fi
 echo "Server IP (PC): $SERVER_IP"
 
 # ---------------------------------------------------------------------------
-# 3. Build arm64 Android binaries if not already cached
+# 3. Build artifacts
 # ---------------------------------------------------------------------------
-if [[ ! -f "$BINS_CACHE/sing-box" || ! -f "$BINS_CACHE/e2e-loadtest" ]]; then
-    if [[ -z "$CONTAINER_CMD" ]]; then
-        echo "ERROR: arm64 binaries not found and neither podman nor docker is available." >&2
-        echo "  Pre-build them or install podman/docker." >&2
-        exit 1
+if [[ "$USE_BLE" == "false" ]]; then
+    # TCP mode: build arm64 sing-box + e2e-loadtest binaries
+    if [[ ! -f "$BINS_CACHE/sing-box" || ! -f "$BINS_CACHE/e2e-loadtest" ]]; then
+        if [[ -z "$CONTAINER_CMD" ]]; then
+            echo "ERROR: arm64 binaries not found and neither podman nor docker is available." >&2
+            echo "  Pre-build them or install podman/docker." >&2
+            exit 1
+        fi
+        echo "=== Building arm64 Android binaries via $CONTAINER_CMD (cached after first run) ==="
+        mkdir -p "$BINS_CACHE"
+        "$CONTAINER_CMD" build \
+            --build-arg GOARCH=arm64 \
+            --build-arg RUST_TARGET=aarch64-linux-android \
+            --build-arg NDK_CC=aarch64-linux-android34-clang \
+            --target export \
+            --output "type=local,dest=$SCRIPT_DIR" \
+            -f "$SCRIPT_DIR/Dockerfile.android-client" \
+            "$(dirname "$SCRIPT_DIR")"
+        echo "Binaries cached in $BINS_CACHE"
+    else
+        echo "=== Reusing cached arm64 binaries from $BINS_CACHE ==="
     fi
-    echo "=== Building arm64 Android binaries via $CONTAINER_CMD (cached after first run) ==="
-    mkdir -p "$BINS_CACHE"
-    "$CONTAINER_CMD" build \
-        --build-arg GOARCH=arm64 \
-        --build-arg RUST_TARGET=aarch64-linux-android \
-        --build-arg NDK_CC=aarch64-linux-android34-clang \
-        --target export \
-        --output "type=local,dest=$SCRIPT_DIR" \
-        -f "$SCRIPT_DIR/Dockerfile.android-client" \
-        "$(dirname "$SCRIPT_DIR")"
-    echo "Binaries cached in $BINS_CACHE"
 else
-    echo "=== Reusing cached arm64 binaries from $BINS_CACHE ==="
+    # BLE mode: build arm64 libsing-box-ble.so + APK
+    if [[ ! -f "$BLE_APK_CACHE/app-debug.apk" || ! -f "$BINS_CACHE/e2e-loadtest" ]]; then
+        if [[ -z "$CONTAINER_CMD" ]]; then
+            echo "ERROR: BLE APK not found and no container runtime available." >&2
+            echo "  Pre-build: cd android-ble-wrapper && ./gradlew assembleDebug" >&2
+            exit 1
+        fi
+        echo "=== Building BLE APK + e2e-loadtest via $CONTAINER_CMD ==="
+        mkdir -p "$BLE_APK_CACHE" "$BINS_CACHE"
+        "$CONTAINER_CMD" build \
+            --build-arg GOARCH=arm64 \
+            --build-arg RUST_TARGET=aarch64-linux-android \
+            --build-arg NDK_CC=aarch64-linux-android34-clang \
+            --target export-ble \
+            --output "type=local,dest=$SCRIPT_DIR" \
+            -f "$SCRIPT_DIR/Dockerfile.android-client" \
+            "$(dirname "$SCRIPT_DIR")"
+        echo "BLE APK cached in $BLE_APK_CACHE"
+    else
+        echo "=== Reusing cached BLE APK from $BLE_APK_CACHE ==="
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -194,7 +237,11 @@ SINGBOX_ANDROID_PID=""  # set later; initialised here so cleanup is always safe
 
 cleanup() {
     echo "=== Cleanup ==="
-    adb shell pkill -f '/data/local/tmp/sing-box' 2>/dev/null || true
+    if [[ "$USE_BLE" == "true" ]]; then
+        adb shell am stopservice -n "$BLE_PKG/.BleService" 2>/dev/null || true
+    else
+        adb shell pkill -f '/data/local/tmp/sing-box' 2>/dev/null || true
+    fi
     kill "$SINGBOX_SERVER_PID" ${SINGBOX_ANDROID_PID:+"$SINGBOX_ANDROID_PID"} "$SUMSERVER_PID" 2>/dev/null || true
     rm -f "$SERVER_CONFIG"
     rm -rf "$RETICULUM_STORAGE"
@@ -227,75 +274,85 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Generate client config with discovered SERVER_IP
+# 5. Generate client config
 # ---------------------------------------------------------------------------
 CLIENT_CONFIG=$(mktemp /tmp/sb-real-device-client-XXXXXX.json)
-cat > "$CLIENT_CONFIG" <<EOF
+if [[ "$USE_BLE" == "false" ]]; then
+    # TCP config: use discovered SERVER_IP
+    cat > "$CLIENT_CONFIG" <<EOF
 {
-  "log": {
-    "level": "debug",
-    "timestamp": true
-  },
+  "log": { "level": "debug", "timestamp": true },
   "inbounds": [
-    {
-      "type": "mixed",
-      "tag": "mixed-in",
-      "listen": "127.0.0.1",
-      "listen_port": 1080
-    }
+    { "type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 1080 }
   ],
   "outbounds": [
     {
-      "type": "reticulum",
-      "tag": "reticulum-out",
-      "name": "e2e-sum-server",
-      "password": "e2e-test-password",
-      "auth_retry": "exp",
-      "auth_on_start": true,
+      "type": "reticulum", "tag": "reticulum-out",
+      "name": "e2e-sum-server", "password": "e2e-test-password",
+      "auth_retry": "exp", "auth_on_start": true,
       "reticulum_config": {
         "identity_name": "e2e-real-device-client",
         "storage_path": "/data/local/tmp/reticulum",
         "interfaces": [
           {
-            "name": "Real Device TCP Client",
-            "type": "TCPClientInterface",
-            "target_host": "$SERVER_IP",
-            "target_port": $SERVER_RETICULUM_PORT
+            "name": "Real Device TCP Client", "type": "TCPClientInterface",
+            "target_host": "$SERVER_IP", "target_port": $SERVER_RETICULUM_PORT
           }
         ]
       }
     }
   ],
-  "route": {
-    "final": "reticulum-out"
-  }
+  "route": { "final": "reticulum-out" }
 }
 EOF
+else
+    # BLE config: use the checked-in template (peripheral_id etc. already set)
+    cp "$SCRIPT_DIR/configs/client-ble.json" "$CLIENT_CONFIG"
+fi
 
 # ---------------------------------------------------------------------------
-# 6. Push binaries and config to phone
+# 6. Push artifacts to phone and start sing-box
 # ---------------------------------------------------------------------------
-echo "=== Pushing binaries and config to phone ==="
-adb push "$BINS_CACHE/sing-box"          /data/local/tmp/sing-box
-adb push "$BINS_CACHE/e2e-loadtest"      /data/local/tmp/e2e-loadtest
-adb push "$CLIENT_CONFIG"                /data/local/tmp/sing-box-config.json
-adb shell chmod +x /data/local/tmp/sing-box /data/local/tmp/e2e-loadtest
-# Wipe stale Reticulum state — the server gets a fresh identity every run
-# (new temp dir = new key = new destination hash), so any cached
-# name→hash mapping on the phone would point to the wrong destination.
+echo "=== Pushing config and loadtest binary to phone ==="
+adb push "$BINS_CACHE/e2e-loadtest"   /data/local/tmp/e2e-loadtest
+adb push "$CLIENT_CONFIG"             /data/local/tmp/sing-box-config.json
+adb shell chmod +x /data/local/tmp/e2e-loadtest
+# Wipe stale Reticulum state — fresh server identity every run
 adb shell rm -rf /data/local/tmp/reticulum
 adb shell mkdir -p /data/local/tmp/reticulum
 rm -f "$CLIENT_CONFIG"
 
-# ---------------------------------------------------------------------------
-# 7. Start sing-box on phone — stream output to PC in real-time
-# ---------------------------------------------------------------------------
-echo "=== Starting sing-box on phone ==="
-# Run sing-box in the foreground inside adb shell; the background adb process
-# on the PC side pipes stdout/stderr here and into the log file live.
-adb shell "/data/local/tmp/sing-box run -c /data/local/tmp/sing-box-config.json" \
-    2>&1 | tee "$LOG_DIR/android-singbox.log" &
-SINGBOX_ANDROID_PID=$!
+if [[ "$USE_BLE" == "false" ]]; then
+    # TCP mode: push binary and run directly
+    adb push "$BINS_CACHE/sing-box"  /data/local/tmp/sing-box
+    adb shell chmod +x /data/local/tmp/sing-box
+
+    echo "=== Starting sing-box on phone (TCP mode) ==="
+    adb shell "/data/local/tmp/sing-box run -c /data/local/tmp/sing-box-config.json" \
+        2>&1 | tee "$LOG_DIR/android-singbox.log" &
+    SINGBOX_ANDROID_PID=$!
+else
+    # BLE mode: install APK, grant permissions, start Service
+    echo "=== Installing BLE launcher APK ==="
+    adb install -r "$BLE_APK_CACHE/app-debug.apk"
+
+    echo "=== Granting Bluetooth permissions ==="
+    adb shell pm grant "$BLE_PKG" android.permission.BLUETOOTH_SCAN    2>/dev/null || true
+    adb shell pm grant "$BLE_PKG" android.permission.BLUETOOTH_CONNECT 2>/dev/null || true
+
+    # Read config from phone-side file, written above
+    CONFIG_JSON=$(adb shell cat /data/local/tmp/sing-box-config.json | tr -d '\n')
+
+    echo "=== Starting BLE service ==="
+    adb shell am start-foreground-service \
+        -n "$BLE_PKG/.BleService" \
+        --es config_json "$CONFIG_JSON" \
+        2>&1 | tee "$LOG_DIR/android-singbox.log" &
+    SINGBOX_ANDROID_PID=$!
+
+    # Stream logcat from the service to the log file
+    adb logcat -s BleService:V &
+fi
 
 echo "Waiting ${SINGBOX_STARTUP_WAIT}s for sing-box to initialise..."
 sleep $SINGBOX_STARTUP_WAIT

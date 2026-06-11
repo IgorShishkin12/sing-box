@@ -138,3 +138,99 @@ ENTRYPOINT ["/android-entrypoint.sh"]
 FROM scratch AS export
 COPY --from=android-builder /android-bins/sing-box      /android-bins/sing-box
 COPY --from=android-builder /android-bins/e2e-loadtest  /android-bins/e2e-loadtest
+
+# ---------------------------------------------------------------------------
+# BLE builder — builds libsing-box-ble.so (Go JNI c-shared) + APK.
+# Used by real-device-test.sh --ble.
+# ---------------------------------------------------------------------------
+FROM android-builder AS ble-builder
+ARG GOARCH
+ARG RUST_TARGET
+ARG NDK_CC
+
+# JDK + Android SDK (platform + build-tools only, no emulator)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        default-jdk-headless && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV ANDROID_HOME=/opt/android-sdk
+ENV PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
+RUN mkdir -p $ANDROID_HOME/cmdline-tools && \
+    curl -fsSL -o /tmp/cmdline-tools.zip \
+        https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip && \
+    unzip -q /tmp/cmdline-tools.zip -d $ANDROID_HOME/cmdline-tools && \
+    mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest && \
+    rm /tmp/cmdline-tools.zip
+RUN yes | sdkmanager --licenses > /dev/null && \
+    sdkmanager "platforms;android-34" "build-tools;34.0.0"
+
+# Gradle (installed globally; no gradlew wrapper needed)
+RUN curl -fsSL \
+        https://services.gradle.org/distributions/gradle-8.7-bin.zip \
+        -o /tmp/gradle.zip && \
+    unzip -q /tmp/gradle.zip -d /opt && \
+    ln -s /opt/gradle-8.7/bin/gradle /usr/local/bin/gradle && \
+    rm /tmp/gradle.zip
+
+# Build libsing-box-ble.so (Go JNI shared library for Android BLE launcher)
+RUN mkdir -p /android-ble-bins
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    export TAGS=$(cat release/DEFAULT_BUILD_TAGS_OTHERS) && \
+    GOOS=android GOARCH=$GOARCH CGO_ENABLED=1 \
+    CC=$TOOLCHAIN/$NDK_CC \
+    go build -buildmode c-shared \
+        -tags "$TAGS,with_reticulum" \
+        -o /android-ble-bins/libsing-box-ble.so \
+        ./cmd/ble-launcher/
+
+# Build btleplug's Android AAR (which bundles its own Java sources + jni-utils).
+# btleplug's build.gradle depends on io.github.gedgygedgy.rust:jni-utils:SNAPSHOT
+# from mavenLocal, so we clone and publish jni-utils-rs first.
+RUN apt-get update && apt-get install -y --no-install-recommends git && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 --branch v0.1.1 \
+        https://github.com/gedgygedgy/jni-utils-rs.git /tmp/jni-utils-rs || \
+    git clone --depth 1 \
+        https://github.com/gedgygedgy/jni-utils-rs.git /tmp/jni-utils-rs
+
+RUN cd /tmp/jni-utils-rs/java && \
+    ANDROID_HOME=/opt/android-sdk ./gradlew publishToMavenLocal && \
+    rm -rf /tmp/jni-utils-rs
+
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    BTLEPLUG_JAVA=$(find /root/.cargo/registry/src \
+        -path "*/btleplug-0.11*/droidplug/java" -type d | head -1) && \
+    if [ -z "$BTLEPLUG_JAVA" ]; then \
+        echo "ERROR: btleplug Java dir not found in cargo registry" >&2; exit 1; \
+    fi && \
+    cd "$BTLEPLUG_JAVA" && \
+    ANDROID_HOME=/opt/android-sdk ./gradlew assembleRelease && \
+    mkdir -p /android-ble-bins && \
+    cp build/outputs/aar/java-release.aar /android-ble-bins/btleplug.aar
+
+# Place .so in the correct ABI subdirectory and build APK
+RUN case "$GOARCH" in \
+      arm64) ABI=arm64-v8a ;; \
+      amd64) ABI=x86_64 ;; \
+      arm)   ABI=armeabi-v7a ;; \
+      386)   ABI=x86 ;; \
+      *)     ABI=$GOARCH ;; \
+    esac && \
+    mkdir -p android-ble-wrapper/app/src/main/jniLibs/$ABI && \
+    cp /android-ble-bins/libsing-box-ble.so \
+       android-ble-wrapper/app/src/main/jniLibs/$ABI/libsing-box-ble.so
+
+RUN --mount=type=cache,target=/root/.gradle \
+    cp /android-ble-bins/btleplug.aar android-ble-wrapper/app/btleplug.aar && \
+    cd android-ble-wrapper && \
+    ANDROID_HOME=/opt/android-sdk gradle assembleDebug && \
+    cp app/build/outputs/apk/debug/app-debug.apk /android-ble-bins/sing-box-ble.apk
+
+# ---------------------------------------------------------------------------
+# BLE export stage — extracts APK + e2e-loadtest for real-device-test.sh --ble
+# ---------------------------------------------------------------------------
+FROM scratch AS export-ble
+COPY --from=ble-builder   /android-ble-bins/sing-box-ble.apk  /android-ble-apk/app-debug.apk
+COPY --from=android-builder /android-bins/e2e-loadtest         /android-bins/e2e-loadtest

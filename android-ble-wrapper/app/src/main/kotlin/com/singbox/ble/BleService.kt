@@ -1,0 +1,98 @@
+package com.singbox.ble
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
+import android.bluetooth.BluetoothManager
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
+import android.os.Build
+import android.os.IBinder
+import android.util.Log
+
+class BleService : Service() {
+
+    companion object {
+        const val TAG = "BleService"
+        const val EXTRA_CONFIG_JSON = "config_json"
+        const val EXTRA_CONFIG_PATH = "config_path"
+        private const val NOTIF_CHANNEL = "ble_service"
+        private const val NOTIF_ID = 1
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        Bridge.nativeSetJVM()
+        Log.i(TAG, "bridge JVM registered")
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startForegroundCompat()
+
+        val config = when {
+            intent?.hasExtra(EXTRA_CONFIG_JSON) == true ->
+                intent.getStringExtra(EXTRA_CONFIG_JSON) ?: "{}"
+            intent?.hasExtra(EXTRA_CONFIG_PATH) == true ->
+                java.io.File(intent.getStringExtra(EXTRA_CONFIG_PATH)!!).readText()
+            else -> "{}"
+        }
+
+        if (!checkBluetoothPermissions()) {
+            Log.e(TAG, "missing Bluetooth permissions — grant with 'pm grant'")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        if (Bridge.nativeInit(config) != 0) {
+            Log.e(TAG, "bridge init failed")
+            stopSelf()
+        } else {
+            Log.i(TAG, "bridge started")
+        }
+        return START_NOT_STICKY
+    }
+
+    override fun onDestroy() {
+        Bridge.nativeShutdown()
+        Log.i(TAG, "bridge stopped")
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun startForegroundCompat() {
+        val mgr = getSystemService(NotificationManager::class.java)
+        mgr.createNotificationChannel(
+            NotificationChannel(NOTIF_CHANNEL, "BLE Bridge", NotificationManager.IMPORTANCE_LOW)
+        )
+        val notif = Notification.Builder(this, NOTIF_CHANNEL)
+            .setContentTitle("SingBox BLE")
+            .setContentText("Reticulum BLE bridge running")
+            .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            .build()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(NOTIF_ID, notif,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        } else {
+            startForeground(NOTIF_ID, notif)
+        }
+    }
+
+    private fun checkBluetoothPermissions(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (checkSelfPermission(android.Manifest.permission.BLUETOOTH_SCAN)
+                    != PackageManager.PERMISSION_GRANTED ||
+                checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT)
+                    != PackageManager.PERMISSION_GRANTED) {
+                return false
+            }
+        }
+        val adapter = getSystemService(BluetoothManager::class.java)?.adapter
+        if (adapter == null || !adapter.isEnabled)
+            Log.w(TAG, "Bluetooth is disabled — enable it on the device")
+        return true
+    }
+}
