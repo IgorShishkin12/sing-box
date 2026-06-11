@@ -39,7 +39,9 @@ class BleService : Service() {
             else -> "{}"
         }
 
-        if (Bridge.nativeInit(config) != 0) {
+        val storagePath = filesDir.absolutePath + "/reticulum"
+        java.io.File(storagePath).mkdirs()
+        if (Bridge.nativeInit(config, storagePath) != 0) {
             Log.e(TAG, "bridge init failed")
             stopSelf()
         } else {

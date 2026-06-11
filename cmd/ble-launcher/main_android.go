@@ -70,20 +70,36 @@ func Java_com_singbox_ble_Bridge_nativeSetJVM(env *C.JNIEnv, cls C.jobject) {
 }
 
 //export Java_com_singbox_ble_Bridge_nativeInit
-func Java_com_singbox_ble_Bridge_nativeInit(env *C.JNIEnv, cls C.jobject, configJSON C.jstring) C.jint {
+func Java_com_singbox_ble_Bridge_nativeInit(env *C.JNIEnv, cls C.jobject, configJSON C.jstring, storagePathJ C.jstring) C.jint {
 	cstr := C.jni_get_utf(env, configJSON)
 	defer C.jni_release_utf(env, configJSON, cstr)
 	raw := C.GoString((*C.char)(unsafe.Pointer(cstr)))
 
-	// BridgeInit expects only the reticulum_config sub-object.
-	// Extract it from the first reticulum outbound in the full sing-box config.
-	cfg := extractReticulumConfig(raw)
+	spcs := C.jni_get_utf(env, storagePathJ)
+	defer C.jni_release_utf(env, storagePathJ, spcs)
+	storagePath := C.GoString((*C.char)(unsafe.Pointer(spcs)))
+
+	// BridgeInit expects only the reticulum_config sub-object with storage_path
+	// pointing to the app's private files dir (not the shell-writable /data/local/tmp).
+	cfg := injectStoragePath(extractReticulumConfig(raw), storagePath)
 
 	reticulum.BridgeSetLogger(logcatLogger{})
 	if err := reticulum.BridgeInit(cfg); err != nil {
 		return -1
 	}
 	return 0
+}
+
+// injectStoragePath overwrites the storage_path field in a reticulum config JSON.
+func injectStoragePath(cfg, path string) string {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(cfg), &m); err != nil {
+		return cfg
+	}
+	b, _ := json.Marshal(path)
+	m["storage_path"] = b
+	out, _ := json.Marshal(m)
+	return string(out)
 }
 
 // extractReticulumConfig pulls the reticulum_config object from the first
