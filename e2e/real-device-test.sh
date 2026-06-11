@@ -77,23 +77,22 @@ if [[ "$REAL_DEVICES" -gt 1 ]]; then
     exit 1
 fi
 
-# Locate sing-box binary (TCP mode only — BLE mode uses the APK service instead)
+# Locate sing-box binary (needed on PC in all modes)
 SINGBOX_BIN="${SINGBOX_BIN:-}"
-if [[ "$USE_BLE" == "false" ]]; then
-    if [[ -z "$SINGBOX_BIN" ]]; then
-        if command -v sing-box &>/dev/null; then
-            SINGBOX_BIN="$(command -v sing-box)"
-        elif [[ -x "$SCRIPT_DIR/../sing-box" ]]; then
-            SINGBOX_BIN="$(cd "$SCRIPT_DIR/.." && pwd)/sing-box"
-        else
-            echo "ERROR: sing-box not found. Build with 'make build_with_bridge' in sing-box/" >&2
-            echo "  or set SINGBOX_BIN=/path/to/sing-box" >&2
-            exit 1
-        fi
+if [[ -z "$SINGBOX_BIN" ]]; then
+    if command -v sing-box &>/dev/null; then
+        SINGBOX_BIN="$(command -v sing-box)"
+    elif [[ -x "$SCRIPT_DIR/../sing-box" ]]; then
+        SINGBOX_BIN="$(cd "$SCRIPT_DIR/.." && pwd)/sing-box"
+    else
+        echo "ERROR: sing-box not found. Build with 'make build_with_bridge' in sing-box/" >&2
+        echo "  or set SINGBOX_BIN=/path/to/sing-box" >&2
+        exit 1
     fi
-    echo "sing-box: $SINGBOX_BIN"
-else
-    echo "BLE mode: using Android APK service (no sing-box binary needed)"
+fi
+echo "sing-box: $SINGBOX_BIN"
+if [[ "$USE_BLE" == "true" ]]; then
+    echo "BLE mode: Android APK handles client; sing-box runs server-serial on PC"
 fi
 
 # Locate sum-server: PATH, then the sumserver build directory
