@@ -31,10 +31,8 @@ android {
 
 dependencies {
     implementation 'androidx.core:core-ktx:1.12.0'
-    // btleplug AAR (includes btleplug's Java layer + jni-utils).
-    // In local dev: copy btleplug.aar here from the btleplug droidplug build.
-    // In Docker: the ble-builder stage drops it into this directory.
-    if (file("btleplug.aar").exists()) {
-        implementation files("btleplug.aar")
-    }
+    // jni-utils: btleplug's Java layer uses SimpleFuture/QueueStream from here.
+    // Published to mavenLocal by the ble-deps Docker stage (or manually via
+    // jni-utils-rs/java: gradle publishToMavenLocal).
+    implementation 'io.github.gedgygedgy.rust:jni-utils:0.1.1-SNAPSHOT'
 }
