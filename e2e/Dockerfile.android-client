@@ -181,7 +181,20 @@ RUN curl -fsSL https://services.gradle.org/distributions/gradle-8.7-bin.zip \
     ln -s /opt/gradle-8.7/bin/gradle /usr/local/bin/gradle && \
     rm /tmp/gradle.zip
 
-# Build btleplug Java AAR using btleplug's own ./gradlew (downloads Gradle 7.x,
+# Step 1: build jni-utils Java library and publish to mavenLocal.
+# btleplug's build.gradle depends on it as a SNAPSHOT via mavenLocal().
+RUN git clone --depth 1 --branch v0.1.1 \
+        https://github.com/gedgygedgy/jni-utils-rs.git /tmp/jni-utils-rs 2>/dev/null || \
+    git clone --depth 1 \
+        https://github.com/gedgygedgy/jni-utils-rs.git /tmp/jni-utils-rs && \
+    echo "sdk.dir=$ANDROID_HOME" > /tmp/jni-utils-rs/java/local.properties && \
+    sed -i 's/\r//' /tmp/jni-utils-rs/java/gradlew && \
+    chmod +x /tmp/jni-utils-rs/java/gradlew && \
+    cd /tmp/jni-utils-rs/java && \
+    ./gradlew publishToMavenLocal && \
+    rm -rf /tmp/jni-utils-rs
+
+# Step 2: build btleplug Java AAR using btleplug's own ./gradlew (downloads Gradle 7.x,
 # compatible with AGP 7.4.2 + Java 17). Mirrors build-java.sh from btleplug.
 RUN curl -fsSL https://static.crates.io/crates/btleplug/btleplug-0.11.8.crate \
         -o /tmp/btleplug.tar.gz && \
