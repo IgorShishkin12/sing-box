@@ -147,20 +147,8 @@ COPY --from=android-builder /android-bins/e2e-loadtest  /android-bins/e2e-loadte
 FROM golang:1.24 AS ble-deps
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl unzip ca-certificates git && \
+        curl unzip ca-certificates git default-jdk-headless && \
     rm -rf /var/lib/apt/lists/*
-
-# Java 17 via Eclipse Temurin — btleplug's gradlew uses AGP 7.4 which needs
-# Java >= 11 but breaks on Java 21 (Groovy ASM "class file major version 65").
-# Debian trixie only ships Java 21, so we fetch Temurin 17 directly.
-ENV JAVA_HOME=/opt/jdk-17
-RUN curl -fsSL \
-    "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.11%2B9/OpenJDK17U-jdk_x64_linux_hotspot_17.0.11_9.tar.gz" \
-    -o /tmp/jdk17.tar.gz && \
-    mkdir -p $JAVA_HOME && \
-    tar -xzf /tmp/jdk17.tar.gz -C $JAVA_HOME --strip-components=1 && \
-    rm /tmp/jdk17.tar.gz
-ENV PATH=$PATH:$JAVA_HOME/bin
 
 # Android SDK (cmdline-tools + platform + build-tools; no emulator)
 ENV ANDROID_HOME=/opt/android-sdk
@@ -174,38 +162,29 @@ RUN mkdir -p $ANDROID_HOME/cmdline-tools && \
 RUN yes | sdkmanager --licenses > /dev/null && \
     sdkmanager "platforms;android-34" "build-tools;34.0.0"
 
-# Gradle 8.7 for our own APK (separate from btleplug's ./gradlew below)
+# Gradle 8.7 for our APK build
 RUN curl -fsSL https://services.gradle.org/distributions/gradle-8.7-bin.zip \
         -o /tmp/gradle.zip && \
     unzip -q /tmp/gradle.zip -d /opt && \
     ln -s /opt/gradle-8.7/bin/gradle /usr/local/bin/gradle && \
     rm /tmp/gradle.zip
 
-# Step 1: build jni-utils Java library and publish to mavenLocal.
-# btleplug's build.gradle depends on it as a SNAPSHOT via mavenLocal().
+# jni-utils Java sources (btleplug's dependency) — stash for direct compilation.
+# No pre-built artifacts exist publicly; native methods land in libsing-box-ble.so.
 RUN git clone --depth 1 --branch v0.1.1 \
         https://github.com/gedgygedgy/jni-utils-rs.git /tmp/jni-utils-rs 2>/dev/null || \
     git clone --depth 1 \
         https://github.com/gedgygedgy/jni-utils-rs.git /tmp/jni-utils-rs && \
-    echo "sdk.dir=$ANDROID_HOME" > /tmp/jni-utils-rs/java/local.properties && \
-    sed -i 's/\r//' /tmp/jni-utils-rs/java/gradlew && \
-    chmod +x /tmp/jni-utils-rs/java/gradlew && \
-    cd /tmp/jni-utils-rs/java && \
-    ./gradlew publishToMavenLocal && \
+    cp -r /tmp/jni-utils-rs/java/src/main/java /opt/jni-utils-java && \
     rm -rf /tmp/jni-utils-rs
 
-# Step 2: build btleplug Java AAR using btleplug's own ./gradlew (downloads Gradle 7.x,
-# compatible with AGP 7.4.2 + Java 17). Mirrors build-java.sh from btleplug.
+# btleplug Java sources — stash for direct compilation into the APK.
+# No published AAR exists; compiling sources avoids the AGP 7.x/Gradle version maze.
 RUN curl -fsSL https://static.crates.io/crates/btleplug/btleplug-0.11.8.crate \
         -o /tmp/btleplug.tar.gz && \
     mkdir /tmp/btleplug && \
     tar -xzf /tmp/btleplug.tar.gz -C /tmp/btleplug --strip-components=1 && \
-    echo "sdk.dir=$ANDROID_HOME" > /tmp/btleplug/src/droidplug/java/local.properties && \
-    sed -i 's/\r//' /tmp/btleplug/src/droidplug/java/gradlew && \
-    chmod +x /tmp/btleplug/src/droidplug/java/gradlew && \
-    cd /tmp/btleplug/src/droidplug/java && \
-    ./gradlew assembleRelease && \
-    cp build/outputs/aar/java-release.aar /opt/btleplug.aar && \
+    cp -r /tmp/btleplug/src/droidplug/java/src/main/java /opt/btleplug-java && \
     rm -rf /tmp/btleplug /tmp/btleplug.tar.gz
 
 # ---------------------------------------------------------------------------
@@ -251,7 +230,9 @@ RUN case "$GOARCH" in \
     mkdir -p android-ble-wrapper/app/src/main/jniLibs/$ABI && \
     cp /android-ble-bins/libsing-box-ble.so \
        android-ble-wrapper/app/src/main/jniLibs/$ABI/libsing-box-ble.so && \
-    cp /opt/btleplug.aar android-ble-wrapper/app/btleplug.aar
+    mkdir -p android-ble-wrapper/app/src/main/java && \
+    cp -r /opt/btleplug-java/. android-ble-wrapper/app/src/main/java/ && \
+    cp -r /opt/jni-utils-java/. android-ble-wrapper/app/src/main/java/
 
 RUN --mount=type=cache,target=/root/.gradle \
     cd android-ble-wrapper && \
