@@ -26,6 +26,7 @@ static void do_log(int prio, const char* msg) {
 import "C"
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"unsafe"
 
@@ -72,13 +73,38 @@ func Java_com_singbox_ble_Bridge_nativeSetJVM(env *C.JNIEnv, cls C.jobject) {
 func Java_com_singbox_ble_Bridge_nativeInit(env *C.JNIEnv, cls C.jobject, configJSON C.jstring) C.jint {
 	cstr := C.jni_get_utf(env, configJSON)
 	defer C.jni_release_utf(env, configJSON, cstr)
-	cfg := C.GoString((*C.char)(unsafe.Pointer(cstr)))
+	raw := C.GoString((*C.char)(unsafe.Pointer(cstr)))
+
+	// BridgeInit expects only the reticulum_config sub-object.
+	// Extract it from the first reticulum outbound in the full sing-box config.
+	cfg := extractReticulumConfig(raw)
 
 	reticulum.BridgeSetLogger(logcatLogger{})
 	if err := reticulum.BridgeInit(cfg); err != nil {
 		return -1
 	}
 	return 0
+}
+
+// extractReticulumConfig pulls the reticulum_config object from the first
+// reticulum outbound in a full sing-box config JSON, or returns the input
+// unchanged if it is already a bare reticulum config (no "outbounds" key).
+func extractReticulumConfig(raw string) string {
+	var top struct {
+		Outbounds []struct {
+			Type            string          `json:"type"`
+			ReticulumConfig json.RawMessage `json:"reticulum_config"`
+		} `json:"outbounds"`
+	}
+	if err := json.Unmarshal([]byte(raw), &top); err != nil || len(top.Outbounds) == 0 {
+		return raw
+	}
+	for _, ob := range top.Outbounds {
+		if ob.Type == "reticulum" && len(ob.ReticulumConfig) > 0 {
+			return string(ob.ReticulumConfig)
+		}
+	}
+	return raw
 }
 
 //export Java_com_singbox_ble_Bridge_nativeShutdown
