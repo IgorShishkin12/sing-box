@@ -31,6 +31,9 @@ android {
 
 dependencies {
     implementation 'androidx.core:core-ktx:1.12.0'
-    // jni-utils and btleplug Java sources are compiled directly from src/main/java/
-    // (copied in by the ble-builder Docker stage). No Maven dep needed.
+    // btleplug AAR — built by ble-deps via btleplug's own ./gradlew (AGP 7.4 + Gradle 7.x).
+    // Bundles btleplug's Java layer + jni-utils. Dropped in by ble-builder Docker stage.
+    if (file("btleplug.aar").exists()) {
+        implementation files("btleplug.aar")
+    }
 }
