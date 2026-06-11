@@ -153,6 +153,16 @@ func BridgeSetLogger(logger log.ContextLogger) {
 	C.reticulum_set_log_callback(C.reticulum_log_fn(C.goOnLog))
 }
 
+// BridgeSetJVM passes the Android JavaVM pointer to the Rust bridge so that
+// btleplug can initialize its BLE backend. Must be called before BridgeInit
+// when using RNodeBLE interfaces on Android. No-op on other platforms.
+//
+// Obtain jvm from Java: env.GetJavaVM() or from a JNI_OnLoad hook in the
+// Android UI wrapper, then pass it through as unsafe.Pointer.
+func BridgeSetJVM(jvm unsafe.Pointer) {
+	C.reticulum_set_jvm(jvm)
+}
+
 // BridgeInit initializes the Rust bridge. Safe to call after BridgeShutdown.
 func BridgeInit(configJSON string) error {
 	bridgeStateMu.Lock()
