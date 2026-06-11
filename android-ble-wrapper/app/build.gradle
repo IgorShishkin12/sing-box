@@ -31,8 +31,6 @@ android {
 
 dependencies {
     implementation 'androidx.core:core-ktx:1.12.0'
-    // jni-utils: btleplug's Java layer uses SimpleFuture/QueueStream from here.
-    // Published to mavenLocal by the ble-deps Docker stage (or manually via
-    // jni-utils-rs/java: gradle publishToMavenLocal).
-    implementation 'io.github.gedgygedgy.rust:jni-utils:0.1.1-SNAPSHOT'
+    // jni-utils and btleplug Java sources are compiled directly from src/main/java/
+    // (copied in by the ble-builder Docker stage). No Maven dep needed.
 }

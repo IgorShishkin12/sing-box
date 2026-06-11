@@ -169,13 +169,13 @@ RUN curl -fsSL https://services.gradle.org/distributions/gradle-8.7-bin.zip \
     ln -s /opt/gradle-8.7/bin/gradle /usr/local/bin/gradle && \
     rm /tmp/gradle.zip
 
-# jni-utils (btleplug's Java dependency) → published to mavenLocal
+# jni-utils Java sources — stash for inclusion in the APK project directly.
+# Avoids SNAPSHOT Maven resolution; native methods are compiled into libsing-box-ble.so.
 RUN git clone --depth 1 --branch v0.1.1 \
-        https://github.com/gedgygedgy/jni-utils-rs.git /tmp/jni-utils-rs || \
+        https://github.com/gedgygedgy/jni-utils-rs.git /tmp/jni-utils-rs 2>/dev/null || \
     git clone --depth 1 \
         https://github.com/gedgygedgy/jni-utils-rs.git /tmp/jni-utils-rs && \
-    cd /tmp/jni-utils-rs/java && \
-    ANDROID_HOME=/opt/android-sdk gradle publishToMavenLocal && \
+    cp -r /tmp/jni-utils-rs/java/src/main/java /opt/jni-utils-java && \
     rm -rf /tmp/jni-utils-rs
 
 # btleplug Java sources — download crate tarball and stash just the Java tree.
@@ -232,7 +232,8 @@ RUN case "$GOARCH" in \
     cp /android-ble-bins/libsing-box-ble.so \
        android-ble-wrapper/app/src/main/jniLibs/$ABI/libsing-box-ble.so && \
     mkdir -p android-ble-wrapper/app/src/main/java && \
-    cp -r /opt/btleplug-java/. android-ble-wrapper/app/src/main/java/
+    cp -r /opt/btleplug-java/. android-ble-wrapper/app/src/main/java/ && \
+    cp -r /opt/jni-utils-java/. android-ble-wrapper/app/src/main/java/
 
 RUN --mount=type=cache,target=/root/.gradle \
     cd android-ble-wrapper && \
