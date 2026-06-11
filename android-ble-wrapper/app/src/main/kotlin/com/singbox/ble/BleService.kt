@@ -39,12 +39,6 @@ class BleService : Service() {
             else -> "{}"
         }
 
-        if (!checkBluetoothPermissions()) {
-            Log.e(TAG, "missing Bluetooth permissions — grant with 'pm grant'")
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
         if (Bridge.nativeInit(config) != 0) {
             Log.e(TAG, "bridge init failed")
             stopSelf()
@@ -81,18 +75,4 @@ class BleService : Service() {
         }
     }
 
-    private fun checkBluetoothPermissions(): Boolean {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (checkSelfPermission(android.Manifest.permission.BLUETOOTH_SCAN)
-                    != PackageManager.PERMISSION_GRANTED ||
-                checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT)
-                    != PackageManager.PERMISSION_GRANTED) {
-                return false
-            }
-        }
-        val adapter = getSystemService(BluetoothManager::class.java)?.adapter
-        if (adapter == null || !adapter.isEnabled)
-            Log.w(TAG, "Bluetooth is disabled — enable it on the device")
-        return true
-    }
 }
