@@ -88,6 +88,7 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 	}
 	h.logger.Info("reticulum inbound: starting, listening on ", listenHash)
 
+	setRustLogLevelIfUnset(h.logger)
 	BridgeSetLogger(h.logger)
 
 	if err := BridgeInit(configJSON); err != nil {

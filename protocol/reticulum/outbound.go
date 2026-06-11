@@ -65,6 +65,7 @@ func (h *Outbound) Start(stage adapter.StartStage) error {
 		return err
 	}
 
+	setRustLogLevelIfUnset(h.logger)
 	BridgeSetLogger(h.logger)
 	if err := BridgeInit(configJSON); err != nil {
 		return fmt.Errorf("bridge init failed: %w", err)
