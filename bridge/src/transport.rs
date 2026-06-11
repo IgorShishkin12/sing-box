@@ -408,30 +408,41 @@ async fn spawn_interfaces(
 // ---------------------------------------------------------------------------
 
 /// On Android, initialize the btleplug BLE platform by locating the running
-/// JVM via `JNI_GetCreatedJavaVMs` and attaching the current thread.
+/// JVM and attaching the current thread.
 /// Must be called before any BLE interface is spawned.
 /// Temporary workaround until `reticulum-rs-transport` handles this internally.
+///
+/// `JNI_GetCreatedJavaVMs` is not in any NDK stub lib — it lives in ART which
+/// is already loaded in the process, so we resolve it at runtime via dlsym.
 #[cfg(all(feature = "rnode-ble", target_os = "android"))]
 fn init_btleplug_android() -> Result<(), String> {
-    extern "C" {
-        fn JNI_GetCreatedJavaVMs(
-            vm_buf: *mut *mut jni::sys::JavaVM,
-            buf_len: jni::sys::jsize,
-            num_vms: *mut jni::sys::jsize,
-        ) -> jni::sys::jint;
-    }
+    type GetCreatedJavaVMsFn = unsafe extern "C" fn(
+        *mut *mut jni::sys::JavaVM,
+        jni::sys::jsize,
+        *mut jni::sys::jsize,
+    ) -> jni::sys::jint;
+
     unsafe {
+        let sym_ptr = libc::dlsym(
+            libc::RTLD_DEFAULT,
+            b"JNI_GetCreatedJavaVMs\0".as_ptr() as *const libc::c_char,
+        );
+        if sym_ptr.is_null() {
+            return Err("dlsym(JNI_GetCreatedJavaVMs) returned NULL".into());
+        }
+        let get_vms: GetCreatedJavaVMsFn = std::mem::transmute(sym_ptr);
+
         let mut jvm_ptr: *mut jni::sys::JavaVM = std::ptr::null_mut();
         let mut num_vms: jni::sys::jsize = 0;
-        let rc = JNI_GetCreatedJavaVMs(&mut jvm_ptr, 1, &mut num_vms);
+        let rc = get_vms(&mut jvm_ptr, 1, &mut num_vms);
         if rc != 0 || num_vms == 0 || jvm_ptr.is_null() {
             return Err(format!(
                 "JNI_GetCreatedJavaVMs failed: rc={rc} num_vms={num_vms}"
             ));
         }
-        // btleplug::platform::init takes &JNIEnv; obtain one by attaching the
-        // current thread. btleplug internally extracts and stores the JavaVM,
-        // so the AttachGuard (and its thread attachment) can be dropped after.
+        // btleplug::platform::init takes &JNIEnv (jni 0.19); attach the current
+        // thread to get one. btleplug stores the JavaVM internally, so the
+        // AttachGuard can be dropped immediately after.
         let jvm = jni::JavaVM::from_raw(jvm_ptr)
             .map_err(|e| format!("JavaVM::from_raw: {e}"))?;
         let env = jvm
