@@ -224,8 +224,10 @@ RETICULUM_STORAGE="$(mktemp -d)"
 
 # Patch storage_path in the server config to a writable temp dir
 SERVER_CONFIG="$(mktemp /tmp/sb-real-device-server-XXXXXX.json)"
+_SERVER_TMPL="$SCRIPT_DIR/configs/server.json"
+[[ "$USE_BLE" == "true" ]] && _SERVER_TMPL="$SCRIPT_DIR/configs/server-serial.json"
 sed "s|\"storage_path\":.*|\"storage_path\": \"$RETICULUM_STORAGE\",|" \
-    "$SCRIPT_DIR/configs/server.json" > "$SERVER_CONFIG"
+    "$_SERVER_TMPL" > "$SERVER_CONFIG"
 
 # Process substitution keeps $! as the binary's PID, not tee's.
 ADDR=0.0.0.0 "$SUMSERVER_BIN" > >(tee "$LOG_DIR/pc-sumserver.log") 2>&1 &
