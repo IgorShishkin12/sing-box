@@ -42,11 +42,35 @@ class BleService : Service() {
         val storagePath = filesDir.absolutePath + "/reticulum"
         java.io.File(storagePath).mkdirs()
 
-        // Diagnose BT state before handing off to native code
         val btMgr = getSystemService(android.bluetooth.BluetoothManager::class.java)
         val btAdapter = btMgr?.adapter
-        Log.i(TAG, "BT adapter=${btAdapter != null} enabled=${btAdapter?.isEnabled} " +
-            "scanner=${btAdapter?.bluetoothLeScanner != null}")
+        val scanner = btAdapter?.bluetoothLeScanner
+        Log.i(TAG, "BT adapter=${btAdapter != null} enabled=${btAdapter?.isEnabled} scanner=${scanner != null}")
+
+        // Direct Kotlin scan test — runs on the Java main thread with same permissions.
+        // If this fails, it's a permission/BT issue. If this succeeds but btleplug fails,
+        // it's a JNI cross-thread issue inside btleplug.
+        var scanStarted = false
+        val cb = object : android.bluetooth.le.ScanCallback() {
+            override fun onScanResult(t: Int, r: android.bluetooth.le.ScanResult?) {
+                Log.i(TAG, "direct scan result: ${r?.device?.name} ${r?.device?.address}")
+            }
+            override fun onScanFailed(errorCode: Int) {
+                Log.e(TAG, "direct scan FAILED errorCode=$errorCode")
+            }
+        }
+        try {
+            scanner?.startScan(cb)
+            scanStarted = true
+            Log.i(TAG, "direct Kotlin scan started OK")
+            Thread.sleep(1000)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "direct scan SecurityException: ${e.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "direct scan exception: ${e.javaClass.name}: ${e.message}")
+        } finally {
+            if (scanStarted) try { scanner?.stopScan(cb) } catch (_: Exception) {}
+        }
 
         if (Bridge.nativeInit(config, storagePath) != 0) {
             Log.e(TAG, "bridge init failed")

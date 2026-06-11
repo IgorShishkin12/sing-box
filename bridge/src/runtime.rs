@@ -44,7 +44,34 @@ pub fn init_runtime() -> Result<(), String> {
         return Ok(());
     }
     log::debug!("Building runtime (multi-thread)");
-    match Builder::new_multi_thread().enable_all().build() {
+    let mut builder = Builder::new_multi_thread();
+    builder.enable_all();
+
+    // On Android with BLE enabled, btleplug's start_scan calls
+    // global_jvm().get_env() from whatever thread it runs on. Tokio worker
+    // threads are native (non-Java) threads; GetEnv returns JNI_EDETACHED for
+    // them, causing "JNI call failed". Attaching each worker thread to the JVM
+    // as a daemon thread before it runs any tasks fixes this.
+    // Daemon threads auto-detach when their OS thread exits, so no
+    // on_thread_stop is needed.
+    #[cfg(all(feature = "rnode-ble", target_os = "android"))]
+    if let Some(jvm_addr) = crate::transport::android_jvm_addr() {
+        builder.on_thread_start(move || {
+            // SAFETY: jvm_addr is a *mut *const JNIInvokeInterface_ valid for
+            // the process lifetime; we only call a function pointer through it.
+            let raw_jvm = jvm_addr as *mut jni::sys::JavaVM;
+            unsafe {
+                let fn_table = &**raw_jvm;
+                if let Some(attach) = fn_table.AttachCurrentThreadAsDaemon {
+                    let mut env_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+                    attach(raw_jvm, &mut env_ptr, std::ptr::null_mut());
+                }
+            }
+            log::debug!("tokio worker thread attached to JVM");
+        });
+    }
+
+    match builder.build() {
         Ok(rt) => {
             *guard = Some(Arc::new(rt));
             log::info!("Runtime created successfully");

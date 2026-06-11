@@ -429,6 +429,13 @@ pub(crate) fn set_android_jvm(jvm: *mut jni::sys::JavaVM) {
     let _ = ANDROID_JVM.set(JavaVmPtr(jvm));
 }
 
+/// Returns the raw `JavaVM` pointer as `usize` so `runtime.rs` can pass it
+/// into Tokio `on_thread_start` closures (which require `'static + Send`).
+#[cfg(all(feature = "rnode-ble", target_os = "android"))]
+pub(crate) fn android_jvm_addr() -> Option<usize> {
+    ANDROID_JVM.get().map(|p| p.0 as usize)
+}
+
 /// On Android, check that btleplug was already initialized by `reticulum_set_jvm`.
 /// If not, log a warning — BLE interfaces will fail when used, but other transports
 /// continue normally. btleplug init itself happens in `c_api::reticulum_set_jvm`
