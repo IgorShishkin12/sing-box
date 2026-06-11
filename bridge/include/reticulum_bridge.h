@@ -38,6 +38,16 @@ typedef void (*reticulum_log_fn)(uint8_t, const char*, const char*);
 void reticulum_set_log_callback(reticulum_log_fn on_log);
 
 /*
+ * (Android + BLE only) Pass the JavaVM pointer to the bridge so btleplug can
+ * initialize its Android BLE backend. Must be called before reticulum_init
+ * when using RNodeBLE interfaces on Android. No-op on other platforms.
+ *
+ * Obtain the JavaVM pointer from Java via env.GetJavaVM() or from a JNI_OnLoad
+ * callback and forward it here before starting the bridge.
+ */
+void reticulum_set_jvm(void* jvm);
+
+/*
  * Register the name-resolution callback.
  * Must be set before calling reticulum_resolve_name.
  */

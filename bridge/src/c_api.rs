@@ -144,6 +144,46 @@ fn ffi_catch_void(f: impl FnOnce() + std::panic::UnwindSafe) {
 // Init / shutdown
 // ---------------------------------------------------------------------------
 
+/// (Android + BLE only) Register the JavaVM pointer so btleplug can initialize
+/// its Android BLE backend. Must be called before `reticulum_init` when using
+/// RNodeBLE interfaces on Android. No-op on all other platforms/configs.
+///
+/// **Call this from a Java thread** (e.g. Service.onCreate). btleplug's
+/// `platform::init` is invoked immediately on the calling thread so its
+/// internal `Adapter::new()` has a properly-bound JNIEnv.
+///
+/// Obtain `jvm` via `env->GetJavaVM(env, &jvm)` in JNI code or from the
+/// `JavaVM*` parameter of a `JNI_OnLoad` callback.
+///
+/// # Safety
+/// `jvm` must be a valid `*mut JavaVM` for the lifetime of the process.
+#[no_mangle]
+pub unsafe extern "C" fn reticulum_set_jvm(jvm: *mut std::ffi::c_void) {
+    #[cfg(all(feature = "rnode-ble", target_os = "android"))]
+    {
+        if jvm.is_null() {
+            return;
+        }
+        let jvm_ptr = jvm as *mut jni::sys::JavaVM;
+        crate::transport::set_android_jvm(jvm_ptr);
+        // Initialize btleplug on the calling Java thread now.
+        // `attach_current_thread` is a no-op when already attached (Java threads
+        // are always attached), so this runs synchronously on the caller's thread.
+        match jni::JavaVM::from_raw(jvm_ptr) {
+            Ok(vm) => match vm.attach_current_thread() {
+                Ok(env) => match btleplug::platform::init(&*env) {
+                    Ok(()) => log::info!("btleplug Android platform initialized"),
+                    Err(e) => log::error!("btleplug platform init: {e}"),
+                },
+                Err(e) => log::error!("attach_current_thread: {e}"),
+            },
+            Err(e) => log::error!("JavaVM::from_raw: {e}"),
+        }
+    }
+    #[cfg(not(all(feature = "rnode-ble", target_os = "android")))]
+    let _ = jvm;
+}
+
 /// Initialize the reticulum bridge.
 /// `config_json` must not be NULL; pass at least `"{}"` for defaults.
 /// The four callback pointers are called from Rust tokio threads — they must

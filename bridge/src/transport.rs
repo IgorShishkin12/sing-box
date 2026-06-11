@@ -407,51 +407,42 @@ async fn spawn_interfaces(
 // Transport initialization
 // ---------------------------------------------------------------------------
 
-/// On Android, initialize the btleplug BLE platform by locating the running
-/// JVM and attaching the current thread.
-/// Must be called before any BLE interface is spawned.
-/// Temporary workaround until `reticulum-rs-transport` handles this internally.
-///
-/// `JNI_GetCreatedJavaVMs` is not in any NDK stub lib — it lives in ART which
-/// is already loaded in the process, so we resolve it at runtime via dlsym.
+/// Stores a JavaVM pointer set by the Android UI layer via `reticulum_set_jvm`.
+// SAFETY: *mut JavaVM is a stable global handle owned by ART; we only read it.
 #[cfg(all(feature = "rnode-ble", target_os = "android"))]
-fn init_btleplug_android() -> Result<(), String> {
-    type GetCreatedJavaVMsFn = unsafe extern "C" fn(
-        *mut *mut jni::sys::JavaVM,
-        jni::sys::jsize,
-        *mut jni::sys::jsize,
-    ) -> jni::sys::jint;
+struct JavaVmPtr(*mut jni::sys::JavaVM);
+#[cfg(all(feature = "rnode-ble", target_os = "android"))]
+unsafe impl Send for JavaVmPtr {}
+#[cfg(all(feature = "rnode-ble", target_os = "android"))]
+unsafe impl Sync for JavaVmPtr {}
 
-    unsafe {
-        let sym_ptr = libc::dlsym(
-            libc::RTLD_DEFAULT,
-            b"JNI_GetCreatedJavaVMs\0".as_ptr() as *const libc::c_char,
+#[cfg(all(feature = "rnode-ble", target_os = "android"))]
+static ANDROID_JVM: once_cell::sync::OnceCell<JavaVmPtr> = once_cell::sync::OnceCell::new();
+
+/// Called by the Android UI wrapper to provide the JavaVM pointer before
+/// any BLE interface is started. Not needed in non-BLE deployments.
+///
+/// # Safety
+/// `jvm` must be a valid `*mut JavaVM` for the lifetime of the process.
+#[cfg(all(feature = "rnode-ble", target_os = "android"))]
+pub(crate) fn set_android_jvm(jvm: *mut jni::sys::JavaVM) {
+    let _ = ANDROID_JVM.set(JavaVmPtr(jvm));
+}
+
+/// On Android, check that btleplug was already initialized by `reticulum_set_jvm`.
+/// If not, log a warning — BLE interfaces will fail when used, but other transports
+/// continue normally. btleplug init itself happens in `c_api::reticulum_set_jvm`
+/// on the calling Java thread (before this function runs).
+#[cfg(all(feature = "rnode-ble", target_os = "android"))]
+fn init_btleplug_android() -> Result<bool, String> {
+    if ANDROID_JVM.get().is_none() {
+        log::warn!(
+            "no JavaVM registered; RNodeBLE interfaces will not work. \
+             Call reticulum_set_jvm() from the Android layer before reticulum_init."
         );
-        if sym_ptr.is_null() {
-            return Err("dlsym(JNI_GetCreatedJavaVMs) returned NULL".into());
-        }
-        let get_vms: GetCreatedJavaVMsFn = std::mem::transmute(sym_ptr);
-
-        let mut jvm_ptr: *mut jni::sys::JavaVM = std::ptr::null_mut();
-        let mut num_vms: jni::sys::jsize = 0;
-        let rc = get_vms(&mut jvm_ptr, 1, &mut num_vms);
-        if rc != 0 || num_vms == 0 || jvm_ptr.is_null() {
-            return Err(format!(
-                "JNI_GetCreatedJavaVMs failed: rc={rc} num_vms={num_vms}"
-            ));
-        }
-        // btleplug::platform::init takes &JNIEnv (jni 0.19); attach the current
-        // thread to get one. btleplug stores the JavaVM internally, so the
-        // AttachGuard can be dropped immediately after.
-        let jvm = jni::JavaVM::from_raw(jvm_ptr)
-            .map_err(|e| format!("JavaVM::from_raw: {e}"))?;
-        let env = jvm
-            .attach_current_thread()
-            .map_err(|e| format!("attach_current_thread: {e}"))?;
-        btleplug::platform::init(&*env).map_err(|e| format!("btleplug platform init: {e}"))?;
+        return Ok(false);
     }
-    log::info!("btleplug Android platform initialized");
-    Ok(())
+    Ok(true)
 }
 
 /// Initialize the global Transport singleton with the given config.
@@ -505,10 +496,16 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
     }
 
     // 5. On Android, initialize btleplug before spawning any BLE interface.
+    // Non-fatal when no JVM is registered (e.g. running as a shell binary in
+    // tests): a warning is logged and BLE interfaces will fail when used, but
+    // other transports continue normally.
     #[cfg(all(feature = "rnode-ble", target_os = "android"))]
-    if let Err(e) = init_btleplug_android() {
-        log::error!("btleplug Android init failed: {}", e);
-        return Err(e);
+    match init_btleplug_android() {
+        Ok(_) => {}
+        Err(e) => {
+            log::error!("btleplug Android init failed: {}", e);
+            return Err(e);
+        }
     }
 
     // 6. Create Transport and spawn interfaces (no transport lock held during block_on)
