@@ -407,6 +407,42 @@ async fn spawn_interfaces(
 // Transport initialization
 // ---------------------------------------------------------------------------
 
+/// On Android, initialize the btleplug BLE platform by locating the running
+/// JVM via `JNI_GetCreatedJavaVMs` and attaching the current thread.
+/// Must be called before any BLE interface is spawned.
+/// Temporary workaround until `reticulum-rs-transport` handles this internally.
+#[cfg(all(feature = "rnode-ble", target_os = "android"))]
+fn init_btleplug_android() -> Result<(), String> {
+    extern "C" {
+        fn JNI_GetCreatedJavaVMs(
+            vm_buf: *mut *mut jni::sys::JavaVM,
+            buf_len: jni::sys::jsize,
+            num_vms: *mut jni::sys::jsize,
+        ) -> jni::sys::jint;
+    }
+    unsafe {
+        let mut jvm_ptr: *mut jni::sys::JavaVM = std::ptr::null_mut();
+        let mut num_vms: jni::sys::jsize = 0;
+        let rc = JNI_GetCreatedJavaVMs(&mut jvm_ptr, 1, &mut num_vms);
+        if rc != 0 || num_vms == 0 || jvm_ptr.is_null() {
+            return Err(format!(
+                "JNI_GetCreatedJavaVMs failed: rc={rc} num_vms={num_vms}"
+            ));
+        }
+        // btleplug::platform::init takes &JNIEnv; obtain one by attaching the
+        // current thread. btleplug internally extracts and stores the JavaVM,
+        // so the AttachGuard (and its thread attachment) can be dropped after.
+        let jvm = jni::JavaVM::from_raw(jvm_ptr)
+            .map_err(|e| format!("JavaVM::from_raw: {e}"))?;
+        let env = jvm
+            .attach_current_thread()
+            .map_err(|e| format!("attach_current_thread: {e}"))?;
+        btleplug::platform::init(&*env).map_err(|e| format!("btleplug platform init: {e}"))?;
+    }
+    log::info!("btleplug Android platform initialized");
+    Ok(())
+}
+
 /// Initialize the global Transport singleton with the given config.
 /// Safe to call after `clear_transport()` — will re-initialize cleanly.
 pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
@@ -457,7 +493,14 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
         tp_config.set_ratchet_store_path(rstore.clone());
     }
 
-    // 5. Create Transport and spawn interfaces (no transport lock held during block_on)
+    // 5. On Android, initialize btleplug before spawning any BLE interface.
+    #[cfg(all(feature = "rnode-ble", target_os = "android"))]
+    if let Err(e) = init_btleplug_android() {
+        log::error!("btleplug Android init failed: {}", e);
+        return Err(e);
+    }
+
+    // 6. Create Transport and spawn interfaces (no transport lock held during block_on)
     let interfaces = cfg.interfaces.clone();
     log::debug!("about to block_on for Transport::new");
     let transport = runtime::block_on(async move {
@@ -473,7 +516,7 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
     });
     log::info!("Transport initialized successfully");
 
-    // 6. Store — re-check under lock to handle concurrent init races
+    // 7. Store — re-check under lock to handle concurrent init races
     {
         let mut guard = transport_store().lock().unwrap_or_else(|p| p.into_inner());
         if guard.is_some() {
