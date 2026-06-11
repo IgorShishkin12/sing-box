@@ -13,12 +13,14 @@ class PermissionActivity : Activity() {
         private const val TAG = "PermissionActivity"
         private const val REQ = 1
 
-        private val BLE_PERMS = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            arrayOf(
-                android.Manifest.permission.BLUETOOTH_SCAN,
-                android.Manifest.permission.BLUETOOTH_CONNECT,
-            )
-        } else emptyArray()
+        private val BLE_PERMS = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                add(android.Manifest.permission.BLUETOOTH_SCAN)
+                add(android.Manifest.permission.BLUETOOTH_CONNECT)
+            }
+            // Required on Android < 12; also covers some Android 12 OEMs with targetSdk ≤ 31
+            add(android.Manifest.permission.ACCESS_FINE_LOCATION)
+        }.toTypedArray()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

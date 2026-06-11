@@ -9,6 +9,8 @@
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation"/>
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <!-- Location permission required for BLE scan on Android < 12 (and some Android 12 OEMs) -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
     <!-- Foreground service (required on API 26+) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>

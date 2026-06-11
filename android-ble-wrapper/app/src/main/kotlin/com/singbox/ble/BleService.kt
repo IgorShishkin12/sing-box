@@ -41,6 +41,13 @@ class BleService : Service() {
 
         val storagePath = filesDir.absolutePath + "/reticulum"
         java.io.File(storagePath).mkdirs()
+
+        // Diagnose BT state before handing off to native code
+        val btMgr = getSystemService(android.bluetooth.BluetoothManager::class.java)
+        val btAdapter = btMgr?.adapter
+        Log.i(TAG, "BT adapter=${btAdapter != null} enabled=${btAdapter?.isEnabled} " +
+            "scanner=${btAdapter?.bluetoothLeScanner != null}")
+
         if (Bridge.nativeInit(config, storagePath) != 0) {
             Log.e(TAG, "bridge init failed")
             stopSelf()

@@ -343,15 +343,17 @@ else
     # Read config from phone-side file, written above
     CONFIG_JSON=$(adb shell cat /data/local/tmp/sing-box-config.json | tr -d '\n')
 
-    echo "=== Starting BLE service ==="
-    adb shell am start-foreground-service \
-        -n "$BLE_PKG/.BleService" \
-        --es config_json "$CONFIG_JSON" \
+    # Launch PermissionActivity — it requests BLUETOOTH_SCAN + BLUETOOTH_CONNECT
+    # then starts BleService automatically once the user grants them.
+    echo "=== Requesting BLE permissions + starting service ==="
+    adb shell am start \
+        -n "$BLE_PKG/.PermissionActivity" \
+        --es config_path /data/local/tmp/sing-box-config.json \
         2>&1 | tee "$LOG_DIR/android-singbox.log" &
     SINGBOX_ANDROID_PID=$!
 
-    # Stream logcat from the service to the log file
-    adb logcat -s BleService:V &
+    # Stream logcat from the service (-T 1 = only lines from now on)
+    adb logcat -T 1 -s BleService:V sing-box-ble:V PermissionActivity:V &
 fi
 
 echo "Waiting ${SINGBOX_STARTUP_WAIT}s for sing-box to initialise..."
