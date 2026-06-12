@@ -28,6 +28,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"unsafe"
 
@@ -112,6 +113,14 @@ func Java_com_singbox_ble_Bridge_nativeInit(env *C.JNIEnv, cls C.jobject, config
 
 	ctx, cancel := context.WithCancel(baseCtx)
 
+	// Set Rust log level to trace before box.Start() triggers BridgeInit.
+	// The Reticulum outbound's Start() calls setRustLogLevelIfUnset, which is a
+	// no-op when RUST_LOG is already set. Without this it defaults to "info"
+	// because the sing-box logger doesn't expose a Level() method.
+	if os.Getenv("RUST_LOG") == "" {
+		os.Setenv("RUST_LOG", "trace,serde=off,jni=off")
+	}
+
 	// Start the full sing-box box. This drives:
 	//   - mixed inbound → SOCKS5 proxy on :1080 (for e2e-loadtest)
 	//   - reticulum outbound → calls BridgeSetLogger + BridgeInit internally
@@ -128,6 +137,12 @@ func Java_com_singbox_ble_Bridge_nativeInit(env *C.JNIEnv, cls C.jobject, config
 		logToLogcat(C.ANDROID_LOG_ERROR, fmt.Sprintf("box.Start: %v", err))
 		return -1
 	}
+
+	// Restore logcatLogger as the Rust log sink. outbound.Start() called
+	// BridgeSetLogger with the sing-box log factory logger, which on Android
+	// writes to stdout → /dev/null (not logcat). Override it here so Rust logs
+	// remain visible via adb logcat -s sing-box-ble:V.
+	reticulum.BridgeSetLogger(logcatLogger{})
 
 	singBoxMu.Lock()
 	singBoxInstance = instance

@@ -1,6 +1,37 @@
 package option
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
+
+// TxPower is an optional LoRa transmit-power field in dBm.
+// The zero value means "not configured" and is omitted from JSON output
+// (via the json:",omitzero" tag and IsZero). Use TxPow(v) to set an
+// explicit value, including 0 dBm.
+type TxPower struct {
+	dbm   int8
+	valid bool
+}
+
+// TxPow returns a TxPower set to v dBm.
+func TxPow(v int8) TxPower { return TxPower{dbm: v, valid: true} }
+
+// DBm returns the configured transmit power in dBm.
+// Only meaningful when IsZero returns false.
+func (p TxPower) DBm() int8 { return p.dbm }
+
+// IsZero reports whether p is not configured; used by json:",omitzero".
+func (p TxPower) IsZero() bool { return !p.valid }
+
+func (p TxPower) MarshalJSON() ([]byte, error)  { return json.Marshal(p.dbm) }
+func (p *TxPower) UnmarshalJSON(data []byte) error {
+	if err := json.Unmarshal(data, &p.dbm); err != nil {
+		return err
+	}
+	p.valid = true
+	return nil
+}
 
 type ReticulumInboundOptions struct {
 	ListenOptions
@@ -44,7 +75,7 @@ type ReticulumInterface struct {
 	// Unset fields default to US915 band values.
 	FrequencyHz     uint64 `json:"frequency_hz,omitempty"`
 	BandwidthHz     uint32 `json:"bandwidth_hz,omitempty"`
-	TxPowerDBm      int8   `json:"tx_power_dbm,omitempty"`
+	TxPowerDBm      TxPower `json:"tx_power_dbm,omitzero"`
 	SpreadingFactor uint8  `json:"spreading_factor,omitempty"`
 	// CodingRate as an integer 5–8 (maps to 4/5 … 4/8).
 	CodingRate uint8 `json:"coding_rate,omitempty"`
@@ -99,7 +130,7 @@ func (iface ReticulumInterface) validateLoraFields(index int) error {
 	if iface.CodingRate != 0 && (iface.CodingRate < 5 || iface.CodingRate > 8) {
 		return fmt.Errorf("interfaces[%d].coding_rate must be between 5 and 8", index)
 	}
-	if iface.TxPowerDBm != 0 && (iface.TxPowerDBm < 0 || iface.TxPowerDBm > 37) {
+	if !iface.TxPowerDBm.IsZero() && (iface.TxPowerDBm.DBm() < 0 || iface.TxPowerDBm.DBm() > 37) {
 		return fmt.Errorf("interfaces[%d].tx_power_dbm must be between 0 and 37", index)
 	}
 	return nil
