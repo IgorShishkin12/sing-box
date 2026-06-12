@@ -360,24 +360,27 @@ async fn spawn_interfaces(
                 let peripheral_id = iface.peripheral_id.as_deref().unwrap_or("");
                 let lora = build_lora_config(iface);
                 let settings = NativeRnodeBleSettings::for_peripheral(peripheral_id);
-                // Send probe + radio config together on startup (no deferred/validation).
-                // Validation via with_rnode_validation() compares echoed config values against
-                // what we set, but the RNode also sends periodic status broadcasts with its
-                // *previous* stored config. Those arrive during the 5s validation window and
-                // overwrite the echoed values, causing false validation failures and a
-                // reconnect loop. BLE device identity is already confirmed by the NUS
-                // service UUID match in the scan, so probe detection adds no extra safety here.
-                let mut initial_frames = lora.probe_frames();
-                initial_frames.extend(lora.radio_config_frames());
+                // Two-phase startup: probe frames sent first (initial_frames), radio
+                // config sent only after the RNode responds to the probe (deferred_frames,
+                // triggered when command_monitor.is_detected()). Sending everything at once
+                // causes CMD_RADIO_STATE ON to be ignored by the firmware — the RNode never
+                // enters bridge mode and delivers no KISS data frames.
+                //
+                // with_rnode_validation enables command_monitor and sets a validation
+                // deadline. The 5-second default caused reconnect loops (RNode's periodic
+                // EEPROM status broadcasts overwrite echoed SF before validation).
+                // 1-hour deadline: fires long after the test ends, so it never triggers.
                 let ble = NativeRnodeBleKissInterface::new(
                     label,
                     settings,
                     RnodeBleKissConfig {
-                        initial_frames,
+                        initial_frames: lora.probe_frames(),
+                        deferred_frames: lora.radio_config_frames(),
                         shutdown_frames: lora.shutdown_frames(),
                         ..RnodeBleKissConfig::default()
                     },
-                );
+                )
+                .with_rnode_validation(lora, Duration::from_secs(3600));
                 let addr = iface_mgr
                     .lock()
                     .await
