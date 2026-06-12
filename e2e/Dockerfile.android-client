@@ -232,7 +232,8 @@ RUN case "$GOARCH" in \
        android-ble-wrapper/app/src/main/jniLibs/$ABI/libsing-box-ble.so && \
     mkdir -p android-ble-wrapper/app/src/main/java && \
     cp -r /opt/btleplug-java/. android-ble-wrapper/app/src/main/java/ && \
-    cp -r /opt/jni-utils-java/. android-ble-wrapper/app/src/main/java/
+    cp -r /opt/jni-utils-java/. android-ble-wrapper/app/src/main/java/ && \
+    cp -r android-ble-wrapper/app/btleplug-patches/. android-ble-wrapper/app/src/main/java/
 
 RUN --mount=type=cache,target=/root/.gradle \
     cd android-ble-wrapper && \
