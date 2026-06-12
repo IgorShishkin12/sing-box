@@ -174,24 +174,14 @@ pub unsafe extern "C" fn reticulum_set_jvm(jvm: *mut std::ffi::c_void) {
                 Ok(env) => match btleplug::platform::init(&*env) {
                     Ok(()) => {
                         log::info!("btleplug Android platform initialized");
-                        // btleplug::platform::init caches its own Java classes but
-                        // not the jni-utils classes it uses at runtime. Cache
-                        // them now while we're still on the Java thread.
-                        // Class names are the *interface* names (Future, Stream),
-                        // not the Rust wrapper names (JFuture, JStream).
-                        for cls in &[
-                            "io/github/gedgygedgy/rust/future/Future",
-                            "io/github/gedgygedgy/rust/future/FutureException",
-                            "io/github/gedgygedgy/rust/stream/Stream",
-                            "io/github/gedgygedgy/rust/stream/StreamPoll",
-                            "io/github/gedgygedgy/rust/task/PollResult",
-                            "io/github/gedgygedgy/rust/task/Waker",
-                        ] {
-                            if let Err(e) =
-                                jni_utils::classcache::find_add_class(&*env, cls)
-                            {
-                                log::error!("classcache: failed to cache {cls}: {e}");
-                            }
+                        // jni_utils::init seeds all jni-utils Java classes into the
+                        // classcache and registers native callback methods. Must run
+                        // on a Java thread (here: the calling Java thread) before any
+                        // async BLE future is polled on a Tokio worker thread.
+                        if let Err(e) = jni_utils::init(&*env) {
+                            log::error!("jni_utils::init failed: {e}");
+                        } else {
+                            log::info!("jni_utils initialized");
                         }
                     }
                     Err(e) => log::error!("btleplug platform init: {e}"),
@@ -229,7 +219,7 @@ pub unsafe extern "C" fn reticulum_init(
     ffi_catch_i32(std::panic::AssertUnwindSafe(|| {
         let _ = tracing_log::LogTracer::init();
         let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("trace,serde=off"));
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("trace,serde=off,jni=off"));
         let _ = tracing::subscriber::set_global_default(
             tracing_subscriber::Registry::default()
                 .with(filter)
