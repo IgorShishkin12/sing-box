@@ -551,6 +551,36 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
     *identity_hash_store()
         .lock()
         .unwrap_or_else(|p| p.into_inner()) = Some(identity_hash);
+
+    // Diagnostic: subscribe to raw interface packets so we can verify the
+    // BLE → KISS → Packet::deserialize chain without patching the library.
+    // Logged at DEBUG level; only active when RUST_LOG includes debug for
+    // this module (e.g. "debug" or "sing_box_reticulum_bridge::transport=debug").
+    if let Some(tp_arc) = get_transport() {
+        let iface_rx_task = runtime::spawn(async move {
+            let mut rx = {
+                let tp = tp_arc.lock().await;
+                tp.iface_rx()
+            };
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        log::debug!(
+                            "iface_rx: addr={} packet_type={:?}",
+                            msg.address,
+                            msg.packet.header.packet_type
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        log::warn!("iface_rx lagged by {} messages", n);
+                    }
+                }
+            }
+        });
+        runtime::register_task(iface_rx_task);
+    }
+
     Ok(())
 }
 
