@@ -360,17 +360,24 @@ async fn spawn_interfaces(
                 let peripheral_id = iface.peripheral_id.as_deref().unwrap_or("");
                 let lora = build_lora_config(iface);
                 let settings = NativeRnodeBleSettings::for_peripheral(peripheral_id);
+                // Send probe + radio config together on startup (no deferred/validation).
+                // Validation via with_rnode_validation() compares echoed config values against
+                // what we set, but the RNode also sends periodic status broadcasts with its
+                // *previous* stored config. Those arrive during the 5s validation window and
+                // overwrite the echoed values, causing false validation failures and a
+                // reconnect loop. BLE device identity is already confirmed by the NUS
+                // service UUID match in the scan, so probe detection adds no extra safety here.
+                let mut initial_frames = lora.probe_frames();
+                initial_frames.extend(lora.radio_config_frames());
                 let ble = NativeRnodeBleKissInterface::new(
                     label,
                     settings,
                     RnodeBleKissConfig {
-                        initial_frames: lora.probe_frames(),
-                        deferred_frames: lora.radio_config_frames(),
+                        initial_frames,
                         shutdown_frames: lora.shutdown_frames(),
                         ..RnodeBleKissConfig::default()
                     },
-                )
-                .with_rnode_validation(lora, Duration::from_millis(5_000)); // matches Python's ble_detect_timeout
+                );
                 let addr = iface_mgr
                     .lock()
                     .await
