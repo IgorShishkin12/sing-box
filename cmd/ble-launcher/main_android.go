@@ -113,12 +113,15 @@ func Java_com_singbox_ble_Bridge_nativeInit(env *C.JNIEnv, cls C.jobject, config
 
 	ctx, cancel := context.WithCancel(baseCtx)
 
-	// Set Rust log level to trace before box.Start() triggers BridgeInit.
-	// The Reticulum outbound's Start() calls setRustLogLevelIfUnset, which is a
-	// no-op when RUST_LOG is already set. Without this it defaults to "info"
-	// because the sing-box logger doesn't expose a Level() method.
+	// Set RUST_LOG before box.Start() so the tracing subscriber reads it
+	// when BridgeInit is called by the Reticulum outbound's Start(). The
+	// outbound's setRustLogLevelIfUnset is then a no-op.
 	if os.Getenv("RUST_LOG") == "" {
-		os.Setenv("RUST_LOG", "trace,serde=off,jni=off")
+		rustLog := extractRustLog(opts)
+		if rustLog == "" {
+			rustLog = "trace,serde=off,jni=off" // Android default when not configured
+		}
+		os.Setenv("RUST_LOG", rustLog)
 	}
 
 	// Start the full sing-box box. This drives:
@@ -175,6 +178,19 @@ func logToLogcat(prio C.int, msg string) {
 	cs := C.CString(msg)
 	C.do_log(prio, cs)
 	C.free(unsafe.Pointer(cs))
+}
+
+// extractRustLog returns the rust_log value from the first reticulum outbound's
+// reticulum_config, or "" if none is configured.
+func extractRustLog(opts option.Options) string {
+	for _, ob := range opts.Outbounds {
+		if ob.Type == "reticulum" {
+			if retOpts, ok := ob.Options.(*option.ReticulumOutboundOptions); ok && retOpts.ReticulumConfig != nil {
+				return retOpts.ReticulumConfig.RustLog
+			}
+		}
+	}
+	return ""
 }
 
 // injectReticulumStoragePath overwrites storage_path in the first reticulum

@@ -6,11 +6,17 @@ import (
 	"github.com/sagernet/sing-box/log"
 )
 
-// setRustLogLevelIfUnset sets RUST_LOG from the sing-box log level if it is
-// not already set in the environment. Must be called before BridgeInit because
-// Rust reads RUST_LOG exactly once during tracing subscriber initialization.
-func setRustLogLevelIfUnset(logger log.ContextLogger) {
+// setRustLogLevelIfUnset sets RUST_LOG if it is not already set in the
+// environment. Must be called before BridgeInit because Rust reads RUST_LOG
+// exactly once during tracing subscriber initialization.
+//
+// Priority: existing env var > explicit rustLog > sing-box log level.
+func setRustLogLevelIfUnset(logger log.ContextLogger, rustLog string) {
 	if os.Getenv("RUST_LOG") != "" {
+		return
+	}
+	if rustLog != "" {
+		os.Setenv("RUST_LOG", rustLog)
 		return
 	}
 	level := log.LevelInfo // safe default if level cannot be read

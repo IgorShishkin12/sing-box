@@ -52,6 +52,11 @@ type ReticulumConfig struct {
 	IdentityName        string               `json:"identity_name,omitempty"`
 	ReticulumConfigPath string               `json:"reticulum_config_path,omitempty"`
 	Interfaces          []ReticulumInterface `json:"interfaces,omitempty"`
+	// RustLog sets the RUST_LOG tracing filter for the Reticulum bridge.
+	// If empty, the level is derived from the sing-box log level. Ignored
+	// when RUST_LOG is already set in the environment.
+	// Example: "trace,btleplug=debug,serde=off,jni=off"
+	RustLog string `json:"rust_log,omitempty"`
 }
 
 type ReticulumInterface struct {
