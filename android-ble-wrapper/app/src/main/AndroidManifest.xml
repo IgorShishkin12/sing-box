@@ -14,6 +14,8 @@
     <!-- Foreground service (required on API 26+) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
+    <!-- Required to bind the SOCKS5 proxy TCP socket on localhost -->
+    <uses-permission android:name="android.permission.INTERNET"/>
 
     <application android:label="SingBox BLE">
         <activity
