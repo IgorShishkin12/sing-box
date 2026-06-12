@@ -20,8 +20,8 @@ libc = "0.2"
 rand_core = "0.6"
 sha2 = "0.10"
 hex = "0.4"
-reticulum-rs = { git = "https://github.com/IgorShishkin12/LXMF-rs", branch = "main", features = ["core", "transport"] }
-reticulum-rs-transport = { package = "reticulum-rs-transport", git = "https://github.com/IgorShishkin12/LXMF-rs", branch = "main" }
+reticulum-rs = { git = "https://github.com/IgorShishkin12/LXMF-rs", branch = "detection-fallback", features = ["core", "transport"] }
+reticulum-rs-transport = { package = "reticulum-rs-transport", git = "https://github.com/IgorShishkin12/LXMF-rs", branch = "detection-fallback" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter"] }
 tracing-log = "0.2"

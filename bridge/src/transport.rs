@@ -380,7 +380,11 @@ async fn spawn_interfaces(
                         ..RnodeBleKissConfig::default()
                     },
                 )
-                .with_rnode_validation(lora, Duration::from_secs(3600));
+                .with_rnode_validation(lora, Duration::from_secs(3600))
+                // Fallback: some firmware ignores the first CMD_DETECT probe on a
+                // fresh BLE connect. After 3 s without detection, send radio config
+                // unconditionally so the RNode enters KISS bridge mode regardless.
+                .with_detection_fallback_timeout(Duration::from_secs(3));
                 let addr = iface_mgr
                     .lock()
                     .await
