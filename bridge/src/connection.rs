@@ -73,6 +73,7 @@ impl Connection {
     }
 
     #[cfg(test)]
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             id: NEXT_CONN_ID.fetch_add(1, Ordering::SeqCst),
