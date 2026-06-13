@@ -408,12 +408,30 @@ async fn spawn_interfaces(
                 let peripheral_id = iface.peripheral_id.as_deref().unwrap_or("");
                 let lora = build_lora_config(iface);
                 let settings = NativeRnodeBleSettings::for_peripheral(peripheral_id);
+                // Two-phase startup: probe first, radio config only after the RNode
+                // responds to the probe (deferred_frames, triggered by is_detected()).
+                // Sending everything at once causes CMD_RADIO_STATE ON to be ignored —
+                // the RNode never enters KISS bridge mode and delivers no data frames.
+                //
+                // 1h validation deadline: the 5s default triggers a reconnect loop
+                // because the RNode's periodic EEPROM status broadcasts (every ~5s)
+                // overwrite the echoed radio config before validation completes.
+                //
+                // 3s detection fallback: some firmware ignores the first CMD_DETECT
+                // probe on a fresh BLE connect; after 3s we send radio config
+                // unconditionally so the RNode enters KISS bridge mode regardless.
                 let ble = NativeRnodeBleKissInterface::new(
                     label,
                     settings,
-                    RnodeBleKissConfig::default(),
+                    RnodeBleKissConfig {
+                        initial_frames: lora.probe_frames(),
+                        deferred_frames: lora.radio_config_frames(),
+                        shutdown_frames: lora.shutdown_frames(),
+                        ..RnodeBleKissConfig::default()
+                    },
                 )
-                .with_rnode_validation(lora, Duration::from_millis(1_500));
+                .with_rnode_validation(lora, Duration::from_secs(3600))
+                .with_detection_fallback_timeout(Duration::from_secs(3));
                 let addr = iface_mgr
                     .lock()
                     .await
