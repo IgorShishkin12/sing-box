@@ -145,6 +145,13 @@ void reticulum_resolve_name(uint64_t task_id, const char* name);
  */
 void reticulum_free(void* ptr);
 
+/*
+ * Provide the JavaVM pointer for Android BLE initialization.
+ * jvm must be a valid JavaVM* for the lifetime of the process (or NULL).
+ * Called automatically from JNI_OnLoad; also callable from Go via CGo.
+ */
+void reticulum_set_jvm(void* jvm);
+
 #ifdef __cplusplus
 }
 #endif

@@ -6,10 +6,10 @@ package reticulum
 #cgo CFLAGS: -I${SRCDIR}/../../bridge/include
 #cgo !android LDFLAGS: ${SRCDIR}/../../bridge/target/release/libsing_box_reticulum_bridge.a -lpthread -ldl -lm
 #cgo linux,!android LDFLAGS: -ldbus-1
-#cgo android,arm64 LDFLAGS: ${SRCDIR}/../../bridge/target/aarch64-linux-android/release/libsing_box_reticulum_bridge.a
-#cgo android,arm   LDFLAGS: ${SRCDIR}/../../bridge/target/armv7-linux-androideabi/release/libsing_box_reticulum_bridge.a
-#cgo android,386   LDFLAGS: ${SRCDIR}/../../bridge/target/i686-linux-android/release/libsing_box_reticulum_bridge.a
-#cgo android,amd64 LDFLAGS: ${SRCDIR}/../../bridge/target/x86_64-linux-android/release/libsing_box_reticulum_bridge.a
+#cgo android,arm64 LDFLAGS: ${SRCDIR}/../../bridge/target/aarch64-linux-android/release/libsing_box_reticulum_bridge.a -lm -llog
+#cgo android,arm   LDFLAGS: ${SRCDIR}/../../bridge/target/armv7-linux-androideabi/release/libsing_box_reticulum_bridge.a -lm -llog
+#cgo android,386   LDFLAGS: ${SRCDIR}/../../bridge/target/i686-linux-android/release/libsing_box_reticulum_bridge.a -lm -llog
+#cgo android,amd64 LDFLAGS: ${SRCDIR}/../../bridge/target/x86_64-linux-android/release/libsing_box_reticulum_bridge.a -lm -llog
 #include "reticulum_bridge.h"
 #include <stdlib.h>
 extern void goOnLog    (uint8_t level,        char*       target,    char*  message);
@@ -268,6 +268,13 @@ func BridgeRegisterName(name string, hash string) error {
 		return ErrBridgeRegisterNameFailed
 	}
 	return nil
+}
+
+// BridgeSetJVM passes the Android JavaVM pointer to the Rust bridge so btleplug
+// can initialize its Android platform. Must be called on a Java thread before
+// BridgeInit when the rnode-ble feature is active. No-op on non-Android builds.
+func BridgeSetJVM(jvm unsafe.Pointer) {
+	C.reticulum_set_jvm(jvm)
 }
 
 // BridgeShutdown shuts down the bridge. Safe to call multiple times or without a prior BridgeInit.
