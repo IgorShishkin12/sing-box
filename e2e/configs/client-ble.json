@@ -1,6 +1,6 @@
 {
   "log": {
-    "level": "info",
+    "level": "debug",
     "output": "/dev/stdout",
     "timestamp": true
   },
@@ -21,16 +21,17 @@
       "reticulum_config": {
         "identity_name": "e2e-client-ble",
         "storage_path": "/var/lib/reticulum/client-ble",
+        "rust_log": "debug,serde=off,jni=off,btleplug=off,rns_transport::iface::rnode_ble=trace",
         "interfaces": [
           {
             "name": "RNode BLE Client",
             "type": "RNodeBLE",
             "peripheral_id": "${RNODE_BLE_CLIENT}",
-            "frequency_hz": 868000000,
-            "bandwidth_hz": 125000,
-            "tx_power_dbm": 14,
-            "spreading_factor": 9,
-            "coding_rate": 5
+            "frequency_hz": 433000000,
+            "bandwidth_hz": 62500,
+            "tx_power_dbm": 0,
+            "spreading_factor": 8,
+            "coding_rate": 6
           }
         ]
       }
