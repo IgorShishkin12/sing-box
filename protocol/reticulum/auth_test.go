@@ -2,6 +2,8 @@ package reticulum
 
 import (
 	"io"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
@@ -179,9 +181,8 @@ func TestAuthWithRetry_NoneMatchesAuth(t *testing.T) {
 //   - ReadMsg on even calls (round 2) returns TypeResponseAuth + a wrong MAC for
 //     the first failFor attempts, then the correct MAC so auth succeeds.
 //
-// authAttempt calls ReadMsg and WriteMsg from two goroutines but never calls them
-// concurrently with each other (round-1 read finishes before round-2 starts), so
-// no mutex is needed.
+// authAttempt calls WriteMsg before ReadMsg in each round (never concurrently),
+// so no mutex is needed.
 type selfServingAuthIO struct {
 	password     string
 	peerID       string // this mock's identity (= caller's peerID argument)
@@ -251,6 +252,94 @@ func TestAuthWithRetry_ExpDelays(t *testing.T) {
 	for i, d := range want {
 		if calls[i] != d {
 			t.Errorf("sleep[%d]: got %v, want %v", i, calls[i], d)
+		}
+	}
+}
+
+// orderRecordingIO wraps a chanAuthIO and records the sequence of WriteMsg/ReadMsg
+// calls so tests can assert write-before-read ordering within each round.
+type orderRecordingIO struct {
+	mu  sync.Mutex
+	ops []string
+	*chanAuthIO
+}
+
+func (o *orderRecordingIO) WriteMsg(typeByte byte, payload []byte) error {
+	o.mu.Lock()
+	if typeByte == TypeRequestAuth {
+		o.ops = append(o.ops, "W1")
+	} else {
+		o.ops = append(o.ops, "W2")
+	}
+	o.mu.Unlock()
+	return o.chanAuthIO.WriteMsg(typeByte, payload)
+}
+
+func (o *orderRecordingIO) ReadMsg() (byte, []byte, error) {
+	typB, data, err := o.chanAuthIO.ReadMsg()
+	o.mu.Lock()
+	if typB == TypeRequestAuth {
+		o.ops = append(o.ops, "R1")
+	} else if typB == TypeResponseAuth {
+		o.ops = append(o.ops, "R2")
+	}
+	o.mu.Unlock()
+	return typB, data, err
+}
+
+// TestAuth_WriteBeforeRead verifies that WriteMsg is always called before ReadMsg
+// in each round. This is the key invariant that prevents false auth timeouts on
+// high-latency links: the idle timer in ReadMsg starts only after our own
+// transmission completes, not while waiting for the TX queue to drain.
+func TestAuth_WriteBeforeRead(t *testing.T) {
+	a, b := newChanAuthPair()
+	rec := &orderRecordingIO{chanAuthIO: a}
+
+	errs := make(chan error, 2)
+	go func() { errs <- Auth(rec, "pw", "id-a", "id-b") }()
+	go func() { errs <- Auth(b, "pw", "id-b", "id-a") }()
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	rec.mu.Lock()
+	ops := append([]string{}, rec.ops...)
+	rec.mu.Unlock()
+
+	want := []string{"W1", "R1", "W2", "R2"}
+	if !reflect.DeepEqual(ops, want) {
+		t.Errorf("operation order: got %v, want %v (write must precede read in each round)", ops, want)
+	}
+}
+
+// slowWriteIO wraps a chanAuthIO and adds a configurable delay to WriteMsg,
+// simulating a slow TX queue (e.g. LoRa interface draining radio-config ACKs).
+type slowWriteIO struct {
+	delay time.Duration
+	*chanAuthIO
+}
+
+func (s *slowWriteIO) WriteMsg(typeByte byte, payload []byte) error {
+	time.Sleep(s.delay)
+	return s.chanAuthIO.WriteMsg(typeByte, payload)
+}
+
+// TestAuth_SlowWriteNoTimeout verifies that a slow WriteMsg does not cause a
+// false auth timeout. Previously, the ReadMsg timer started before WriteMsg
+// completed, causing timeouts on LoRa links where TX takes several seconds.
+func TestAuth_SlowWriteNoTimeout(t *testing.T) {
+	const writeDelay = 50 * time.Millisecond
+	a, b := newChanAuthPair()
+	slow := &slowWriteIO{delay: writeDelay, chanAuthIO: a}
+
+	errs := make(chan error, 2)
+	go func() { errs <- Auth(slow, "pw", "id-a", "id-b") }()
+	go func() { errs <- Auth(b, "pw", "id-b", "id-a") }()
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("auth failed with slow write (delay=%v): %v", writeDelay, err)
 		}
 	}
 }
