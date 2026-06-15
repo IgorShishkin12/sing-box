@@ -1,4 +1,4 @@
-use reticulum_rs::packet::LXMF_MAX_PAYLOAD;
+use reticulum_rs::transport::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
 use reticulum_rs::resource::{ResourceEvent, ResourceEventKind};
 use reticulum_rs::transport::destination::link::Link;
 use reticulum_rs::transport::hash::AddressHash;
@@ -73,6 +73,7 @@ impl Connection {
     }
 
     #[cfg(test)]
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             id: NEXT_CONN_ID.fetch_add(1, Ordering::SeqCst),
@@ -88,21 +89,29 @@ impl Connection {
 
     /// Write data to the connection via the Reticulum link.
     ///
-    /// Small payloads (≤ LXMF_MAX_PAYLOAD) are sent as a single `data_packet` for low latency.
-    /// Larger payloads are sent via the Resource protocol, which handles splitting and
-    /// retransmission internally and supports up to 64 MB.
+    /// Small payloads (≤ `link.packet_mdu() - FERNET_OVERHEAD - FERNET_PADDING`) are sent as a
+    /// single `data_packet` for low latency. Larger payloads are sent via the Resource protocol,
+    /// which handles splitting and retransmission internally and supports up to 64 MB.
     pub async fn write(&self, data: &[u8]) -> Result<usize, String> {
         match &self.inner {
             ConnectionInner::Link { link, link_id, .. } => {
-                if data.len() <= LXMF_MAX_PAYLOAD {
-                    let (packet, iface) = {
-                        let link_guard = link.lock().await;
+                let maybe_packet_and_iface = {
+                    let link_guard = link.lock().await;
+                    let max_plain = link_guard
+                        .packet_mdu()
+                        .saturating_sub(FERNET_OVERHEAD_SIZE + FERNET_MAX_PADDING_SIZE);
+                    if data.len() <= max_plain {
                         let packet = match link_guard.data_packet(data) {
                             Ok(p) => p,
                             Err(e) => return Err(format!("{:?}", e)),
                         };
-                        (packet, link_guard.ingress_iface())
-                    };
+                        let iface = link_guard.ingress_iface();
+                        Some((packet, iface))
+                    } else {
+                        None
+                    }
+                };
+                if let Some((packet, iface)) = maybe_packet_and_iface {
                     if let Some(transport) = crate::transport::get_transport() {
                         let tp = transport.lock().await;
                         if let Some(iface) = iface {
@@ -260,7 +269,6 @@ impl Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reticulum_rs::packet::LXMF_MAX_PAYLOAD;
 
     #[tokio::test]
     async fn test_connection_write_memory() {
@@ -272,21 +280,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_connection_write_memory_small_uses_buffer() {
-        // Small writes (≤ LXMF_MAX_PAYLOAD) go to the write buffer in Memory variant.
         let conn = Connection::new();
-        let data = vec![0xAB; LXMF_MAX_PAYLOAD];
+        let data = vec![0xAB; 400];
         let written = conn.write(&data).await.unwrap();
-        assert_eq!(written, LXMF_MAX_PAYLOAD);
+        assert_eq!(written, 400);
     }
 
     #[tokio::test]
     async fn test_connection_write_memory_large_uses_buffer() {
         // Memory variant has no size distinction — it always writes to buffer.
-        // This confirms the Memory branch doesn't panic or reject large writes.
         let conn = Connection::new();
-        let data = vec![0xCD; LXMF_MAX_PAYLOAD + 1];
+        let data = vec![0xCD; 401];
         let written = conn.write(&data).await.unwrap();
-        assert_eq!(written, LXMF_MAX_PAYLOAD + 1);
+        assert_eq!(written, 401);
+    }
+
+    #[tokio::test]
+    async fn test_data_packet_threshold_lora_default() {
+        use reticulum_rs::transport::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
+        let (link, _) = make_test_link();
+        let link_guard = link.lock().await;
+        // Default test link has no MTU → packet_mdu() returns 184 (220 - 36 LoRa default)
+        assert_eq!(link_guard.packet_mdu(), 184);
+        let threshold = link_guard
+            .packet_mdu()
+            .saturating_sub(FERNET_OVERHEAD_SIZE + FERNET_MAX_PADDING_SIZE);
+        // 184 - 48 - 16 = 120; matches MaxReticulumMessage on the Go mux side
+        assert_eq!(threshold, 120);
     }
 
     #[tokio::test]
