@@ -485,8 +485,10 @@ func (s *muxSession) doWrite(f *queuedFrag) {
 	}
 	if !f.isRetransmit {
 		s.statFragsSent.Add(1)
+		s.logStats("fragment sent")
+	} else {
+		s.logStats("retransmit sent")
 	}
-	s.logStats()
 	// inFlight entry and window slot are held until the TypeFragAck handler
 	// (readLoop) calls LoadAndDelete + releases windowSem, or checkRetransmits
 	// gives up and releases both after maxRetries.
@@ -589,7 +591,7 @@ func (s *muxSession) readLoop() {
 							}
 						}
 						<-s.windowSem
-							s.logStats()
+							s.logStats("ack received")
 						}
 					}
 			case TypeLargeData:
@@ -676,17 +678,18 @@ func (s *muxSession) readLoop() {
 	}
 }
 
-// logStats emits the current mux counters at DEBUG level.
+// logStats emits the current mux counters at DEBUG level with a reason label.
 // Called on every significant event (send, ACK, retransmit/give-up) so the log
 // reflects state changes immediately rather than on a fixed timer.
-func (s *muxSession) logStats() {
+func (s *muxSession) logStats(reason string) {
 	if s.logger == nil {
 		return
 	}
 	writing := len(s.windowSem)
 	queued := len(s.sendQ.retransmit) + len(s.sendQ.inProgress) + len(s.sendQ.newMsg)
 	s.logger.Debug(fmt.Sprintf(
-		"mux stats: writing=%d/%d queued=%d sent=%d acks_rx=%d acks_tx=%d rtt_est=%s bw_est=%d B/s",
+		"mux stats [%s]: writing=%d/%d queued=%d sent=%d acks_rx=%d acks_tx=%d rtt_est=%s bw_est=%d B/s",
+		reason,
 		writing, s.windowSize, queued,
 		s.statFragsSent.Load(),
 		s.statAcksReceived.Load(),
@@ -751,15 +754,7 @@ func (s *muxSession) checkRetransmits() {
 			if prevBw := s.bwEst.Load(); prevBw > 0 {
 				s.bwEst.Store(max(prevBw*7/8, 1))
 			}
-			if s.logger != nil {
-				s.logger.Warn(fmt.Sprintf(
-					"mux: conn=%d part=%d LOST (gave up after %d retransmits) rtt_est=%s bw_est=%d B/s",
-					entry.key.connID, entry.key.partIndex, s.maxRetries,
-					time.Duration(s.rttEst.Load()).Round(time.Millisecond),
-					s.bwEst.Load(),
-				))
-			}
-			s.logStats()
+			s.logStats("packet lost (all retries exausted)")
 			// Release the window slot this fragment was holding.
 			select {
 			case <-s.windowSem:
@@ -779,17 +774,7 @@ func (s *muxSession) checkRetransmits() {
 		// Exponential backoff: each failure doubles the wait.
 		delay := fragRetransmitDelay(entry.retries, rttEst)
 		entry.retryAt = now.Add(delay)
-		if s.logger != nil {
-			s.logger.Warn(fmt.Sprintf(
-				"mux: conn=%d part=%d no ACK (attempt %d/%d) rtt_est=%s bw_est=%d B/s next_retry=%s",
-				entry.key.connID, entry.key.partIndex,
-				entry.retries, s.maxRetries,
-				rttEst.Round(time.Millisecond),
-				s.bwEst.Load(),
-				delay.Round(time.Millisecond),
-			))
-		}
-		s.logStats()
+		s.logStats("retransmit queued (no ACK)")
 		select {
 		case s.sendQ.retransmit <- &queuedFrag{
 			encoded:      entry.encoded,
