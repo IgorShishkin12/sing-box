@@ -373,8 +373,12 @@ func newMuxSession(
 	// SF8 BW62.5 (retryInterval=500ms, maxMsg=120): initial ≈ 58 B/s → ~2 s per fragment,
 	// leaving airtime for ACKs and return-path traffic.
 	if withPacing {
+		// floor = initial prevents bwEst from decaying below a LoRa-appropriate
+		// value. The EWMA measures bytes/RTT, which underestimates true channel
+		// capacity (RTT >> airtime on LoRa). Keeping bwEst ≥ initial caps the
+		// pacing interval at ~4×retryInterval per first-of-message fragment.
 		initial := max(int64(s.maxFragPayload)*int64(time.Second)/(4*int64(retryInterval)), 1)
-		s.bwEst.Store(newEWMA(0.5, initial, 1))
+		s.bwEst.Store(newEWMA(0.5, initial, initial))
 	}
 	if isServer {
 		s.incomingCh = make(chan *muxConn, 1024)
