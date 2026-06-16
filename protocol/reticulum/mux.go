@@ -43,8 +43,9 @@ const (
 	TypeLargeData byte = 0xC0
 
 	defaultWindowSize    = 16
-	defaultMaxRetries    = 3
+	defaultMaxRetries    = 6
 	defaultRetryInterval = 500 * time.Millisecond
+	maxRetransmitDelay   = 30 * time.Second
 	defaultFragTimeout   = 2 * time.Second
 )
 
@@ -281,8 +282,9 @@ type muxSession struct {
 	statAcksSent     atomic.Uint64 // total TypeFragAck packets sent to peer
 
 	// rttEst is the EWMA round-trip-time estimate in nanoseconds (alpha=0.125).
-	// Initialised from retryInterval; updated on every TypeFragAck.
-	// Retransmit timeout = 2 × rttEst, floored at retryInterval.
+	// Initialised from retryInterval; updated on every TypeFragAck and on fragment
+	// give-up (failed packets: time from first send to give-up is treated as a lower
+	// bound sample).  Retransmit timeout = 2 × rttEst, floored at retryInterval.
 	rttEst atomic.Int64
 }
 
@@ -415,7 +417,7 @@ func (s *muxSession) doWrite(f *queuedFrag) {
 			encoded: f.encoded,
 			key:     f.key,
 			sentAt:  now,
-			retryAt: now.Add(2 * time.Duration(s.rttEst.Load())),
+			retryAt: now.Add(fragRetransmitDelay(0, time.Duration(s.rttEst.Load()))),
 		})
 	} else {
 		// Retransmit: skip if already ACKed (entry removed) since we enqueued it.
@@ -625,10 +627,27 @@ func (s *muxSession) retransmitLoop() {
 	}
 }
 
+// fragRetransmitDelay returns the backoff delay before the next retransmit.
+// Each failure doubles the wait (exponential backoff): 2^retries × rttEst,
+// capped at maxRetransmitDelay. retries is the attempt number after incrementing
+// (so 1 for the first retransmit, 2 for the second, etc.).
+func fragRetransmitDelay(retries int, rttEst time.Duration) time.Duration {
+	shift := uint(retries)
+	if shift > 5 {
+		shift = 5 // prevent overflow; 2^5=32 is already above maxRetransmitDelay/rttEst for any sane rttEst
+	}
+	d := time.Duration(2<<shift) * rttEst
+	if d > maxRetransmitDelay {
+		d = maxRetransmitDelay
+	}
+	return d
+}
+
 // checkRetransmits re-enqueues fragments whose retryAt has elapsed.
 // Fragments exceeding maxRetries cause their connection to be closed.
 func (s *muxSession) checkRetransmits() {
 	now := time.Now()
+	rttEst := time.Duration(s.rttEst.Load())
 	var toClose []uint16
 	s.inFlight.Range(func(k, v any) bool {
 		entry := v.(*inFlightEntry)
@@ -639,6 +658,15 @@ func (s *muxSession) checkRetransmits() {
 		if entry.retries > s.maxRetries {
 			toClose = append(toClose, entry.key.connID)
 			s.inFlight.Delete(k)
+			// Treat total wait (first send → give-up) as an RTT sample so the
+			// estimate reflects the real link latency even when ACKs never arrive.
+			rttSample := time.Since(entry.sentAt)
+			prev := time.Duration(s.rttEst.Load())
+			updated := (7*prev + rttSample) / 8
+			if updated < s.retryInterval {
+				updated = s.retryInterval
+			}
+			s.rttEst.Store(int64(updated))
 			// Release the window slot this fragment was holding.
 			select {
 			case <-s.windowSem:
@@ -646,8 +674,18 @@ func (s *muxSession) checkRetransmits() {
 			}
 			return true
 		}
-		// Update deadline before enqueuing to prevent double-enqueue on next tick.
-		entry.retryAt = now.Add(2 * time.Duration(s.rttEst.Load()))
+		// Exponential backoff: each failure doubles the wait.
+		delay := fragRetransmitDelay(entry.retries, rttEst)
+		entry.retryAt = now.Add(delay)
+		if s.logger != nil {
+			s.logger.Debug(fmt.Sprintf(
+				"mux: retransmit conn=%d part=%d attempt=%d/%d rtt_est=%s next_in=%s",
+				entry.key.connID, entry.key.partIndex,
+				entry.retries, s.maxRetries,
+				rttEst.Round(time.Millisecond),
+				delay.Round(time.Millisecond),
+			))
+		}
 		select {
 		case s.sendQ.retransmit <- &queuedFrag{
 			encoded:      entry.encoded,

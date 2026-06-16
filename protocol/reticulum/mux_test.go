@@ -694,12 +694,53 @@ func TestRetransmitGivesUp(t *testing.T) {
 			}
 		}
 	}()
-	waitFor := time.Duration(s.maxRetries+2) * s.retryInterval * 3
+	// With exponential backoff the total giveup time is roughly
+	// sum_{i=0}^{maxRetries} 2^(i+1)*retryInterval.  Use 2^(maxRetries+2)*retryInterval
+	// as an upper bound with a comfortable margin.
+	waitFor := time.Duration(1<<uint(s.maxRetries+2)) * s.retryInterval
 	select {
 	case <-mc.done:
 		// correct: connection closed after max retries
 	case <-time.After(waitFor):
 		t.Fatal("connection not closed after max retries exceeded")
+	}
+}
+
+// TestRetransmitGivesUp_UpdatesRttEst verifies that rttEst increases after a fragment
+// exhausts maxRetries (no ACKs), so the estimate reflects the actual link latency
+// even when the peer is completely silent.
+func TestRetransmitGivesUp_UpdatesRttEst(t *testing.T) {
+	s, remote := newManualSession(t, 8)
+	initRtt := time.Duration(s.rttEst.Load())
+
+	mc := newMuxConn(1, s, "test")
+	s.mu.Lock()
+	s.conns[1] = mc
+	s.mu.Unlock()
+
+	go mc.Write([]byte("will-never-ack"))
+
+	// Drain retransmits so sendQ doesn't stall.
+	go func() {
+		for {
+			select {
+			case <-remote.readCh:
+			case <-mc.done:
+				return
+			}
+		}
+	}()
+
+	waitFor := time.Duration(1<<uint(s.maxRetries+2)) * s.retryInterval
+	select {
+	case <-mc.done:
+	case <-time.After(waitFor):
+		t.Fatal("connection not closed after max retries exceeded")
+	}
+
+	finalRtt := time.Duration(s.rttEst.Load())
+	if finalRtt <= initRtt {
+		t.Errorf("rttEst should have increased after give-up: init=%s final=%s", initRtt, finalRtt)
 	}
 }
 
