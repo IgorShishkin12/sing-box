@@ -508,8 +508,16 @@ func (s *muxSession) doWrite(f *queuedFrag) {
 	s.innerWriteMu.Lock()
 	_, err := s.inner.Write(f.encoded)
 	s.innerWriteMu.Unlock()
-	if err != nil && s.logger != nil {
-		s.logger.Debug("mux: doWrite error: ", err)
+	if err != nil {
+		// Write failure means the underlying link is dead — Reticulum already
+		// timed out on its side.  Retrying via the retransmit loop is pointless;
+		// close the session now so callers fail fast instead of waiting maxRetries
+		// × rttEst for each in-flight fragment to give up individually.
+		if s.logger != nil {
+			s.logger.Warn("mux: write failed, closing session: ", err)
+		}
+		s.closeAll()
+		return
 	}
 	if !f.isRetransmit {
 		s.statFragsSent.Add(1)
@@ -772,7 +780,7 @@ func (s *muxSession) checkRetransmits() {
 			s.inFlight.Delete(k)
 			// Treat total wait (first send → give-up) as an RTT sample.
 			s.rttEst.Update(int64(time.Since(entry.sentAt)))
-			// Give-up is a strong congestion signal; EWMA toward 0 → 7/8 × old.
+			// Give-up is a strong congestion signal; EWMA toward 0.
 			if bw := s.bwEst.Load(); bw != nil {
 				bw.Update(0)
 			}
@@ -784,9 +792,9 @@ func (s *muxSession) checkRetransmits() {
 			}
 			return true
 		}
-		// Timeout: nudge rttEst up by 12.5% (EWMA with sample = 2×current = 9/8×old).
+		// Timeout: nudge rttEst up.
 		s.rttEst.Update(2 * s.rttEst.Value())
-		// Retransmit timeout is a mild congestion signal; EWMA toward 0 → 7/8 × old.
+		// Retransmit timeout is a mild congestion signal; EWMA toward 0
 		if bw := s.bwEst.Load(); bw != nil {
 			bw.Update(0)
 		}
