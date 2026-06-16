@@ -16,8 +16,8 @@ func newTestMuxPairWithWindow(t *testing.T, windowSize int) (client, server *mux
 	t.Helper()
 	cc, sc := net.Pipe()
 	t.Cleanup(func() { cc.Close(); sc.Close() })
-	client = newMuxSession(cc, nil, false, windowSize, 20*time.Millisecond, 2, MaxReticulumMessage)
-	server = newMuxSession(sc, nil, true, windowSize, 20*time.Millisecond, 2, MaxReticulumMessage)
+	client = newMuxSession(cc, nil, false, windowSize, 20*time.Millisecond, 2, MaxReticulumMessage, false)
+	server = newMuxSession(sc, nil, true, windowSize, 20*time.Millisecond, 2, MaxReticulumMessage, false)
 	return
 }
 
@@ -26,7 +26,7 @@ func newTestMuxPairWithWindow(t *testing.T, windowSize int) (client, server *mux
 func newManualSession(t *testing.T, windowSize int) (s *muxSession, remote *chanConn) {
 	t.Helper()
 	inner, remote := newChanConnPair()
-	s = newMuxSession(inner, nil, false, windowSize, 20*time.Millisecond, 2, MaxReticulumMessage)
+	s = newMuxSession(inner, nil, false, windowSize, 20*time.Millisecond, 2, MaxReticulumMessage, false)
 	t.Cleanup(func() { s.Close() })
 	return
 }
@@ -249,8 +249,8 @@ func newTestMuxPair(t *testing.T) (client, server *muxSession) {
 		cc.Close()
 		sc.Close()
 	})
-	client = newMuxSession(cc, nil, false, defaultWindowSize, 20*time.Millisecond, defaultMaxRetries, MaxReticulumMessage)
-	server = newMuxSession(sc, nil, true, defaultWindowSize, 20*time.Millisecond, defaultMaxRetries, MaxReticulumMessage)
+	client = newMuxSession(cc, nil, false, defaultWindowSize, 20*time.Millisecond, defaultMaxRetries, MaxReticulumMessage, false)
+	server = newMuxSession(sc, nil, true, defaultWindowSize, 20*time.Millisecond, defaultMaxRetries, MaxReticulumMessage, false)
 	return
 }
 
@@ -265,8 +265,8 @@ func newTestMuxPairMsg(t *testing.T) (client, server *muxSession) {
 		cc.Close()
 		sc.Close()
 	})
-	client = newMuxSession(cc, nil, false, defaultWindowSize, 20*time.Millisecond, defaultMaxRetries, MaxReticulumMessage)
-	server = newMuxSession(sc, nil, true, defaultWindowSize, 20*time.Millisecond, defaultMaxRetries, MaxReticulumMessage)
+	client = newMuxSession(cc, nil, false, defaultWindowSize, 20*time.Millisecond, defaultMaxRetries, MaxReticulumMessage, false)
+	server = newMuxSession(sc, nil, true, defaultWindowSize, 20*time.Millisecond, defaultMaxRetries, MaxReticulumMessage, false)
 	return
 }
 
@@ -573,7 +573,7 @@ func TestConcurrentWriteNoDeadlock(t *testing.T) {
 func TestWindowBound(t *testing.T) {
 	const wSize = 2
 	inner, remote := newChanConnPair()
-	s := newMuxSession(inner, nil, false, wSize, 10*time.Second, 0, MaxReticulumMessage)
+	s := newMuxSession(inner, nil, false, wSize, 10*time.Second, 0, MaxReticulumMessage, false)
 	t.Cleanup(func() { s.Close() })
 
 	// Three separate connections so each fragment has a unique fragKey.
@@ -714,7 +714,7 @@ func TestRetransmitGivesUp(t *testing.T) {
 // even when the peer is completely silent.
 func TestRetransmitGivesUp_UpdatesRttEst(t *testing.T) {
 	s, remote := newManualSession(t, 8)
-	initRtt := time.Duration(s.rttEst.Load())
+	initRtt := time.Duration(s.rttEst.Value())
 
 	mc := newMuxConn(1, s, "test")
 	s.mu.Lock()
@@ -744,7 +744,7 @@ func TestRetransmitGivesUp_UpdatesRttEst(t *testing.T) {
 		t.Fatal("connection not closed after max retries exceeded")
 	}
 
-	finalRtt := time.Duration(s.rttEst.Load())
+	finalRtt := time.Duration(s.rttEst.Value())
 	if finalRtt <= initRtt {
 		t.Errorf("rttEst should have increased after give-up: init=%s final=%s", initRtt, finalRtt)
 	}
@@ -755,7 +755,7 @@ func TestRetransmitGivesUp_UpdatesRttEst(t *testing.T) {
 // only once to the upper layer, not twice.
 func TestFragBuffer_DuplicateDelivery(t *testing.T) {
 	inner, remote := newChanConnPair()
-	s := newMuxSession(inner, nil, true, defaultWindowSize, 20*time.Millisecond, 2, MaxReticulumMessage)
+	s := newMuxSession(inner, nil, true, defaultWindowSize, 20*time.Millisecond, 2, MaxReticulumMessage, false)
 	t.Cleanup(func() { s.Close() })
 
 	const connID = uint16(1)
@@ -801,7 +801,7 @@ func TestMuxSession_DynamicMaxMsg(t *testing.T) {
 
 	// Use chanConn (packetReader path) so the receiver handles arbitrary packet sizes.
 	inner, remote := newChanConnPair()
-	s := newMuxSession(inner, nil, false, defaultWindowSize, 20*time.Millisecond, 2, bigMaxMsg)
+	s := newMuxSession(inner, nil, false, defaultWindowSize, 20*time.Millisecond, 2, bigMaxMsg, false)
 	t.Cleanup(func() { s.Close() })
 
 	mc := newMuxConn(1, s, "test")

@@ -256,6 +256,41 @@ func (q *sendQueue) run(s *muxSession) {
 
 // ── muxSession ───────────────────────────────────────────────────────────────
 
+// ewma is a thread-safe Exponentially Weighted Moving Average.
+// alpha controls smoothing: smaller α → slower adaptation, larger α → faster.
+// A common choice is α = 0.125 (1/8): new = 7/8·old + 1/8·sample.
+type ewma struct {
+	val   atomic.Int64
+	alpha float64
+	floor int64 // lower bound enforced after every update; 0 = no floor
+}
+
+// newEWMA creates an EWMA with the given smoothing factor, initial value, and floor.
+func newEWMA(alpha float64, initial, floor int64) *ewma {
+	e := &ewma{alpha: alpha, floor: floor}
+	e.val.Store(initial)
+	return e
+}
+
+// Update incorporates sample into the moving average using a CAS retry loop.
+func (e *ewma) Update(sample int64) {
+	for {
+		old := e.val.Load()
+		n := int64(float64(old)*(1-e.alpha) + float64(sample)*e.alpha)
+		if e.floor > 0 && n < e.floor {
+			n = e.floor
+		}
+		if e.val.CompareAndSwap(old, n) {
+			return
+		}
+	}
+}
+
+// Value returns the current EWMA value.
+func (e *ewma) Value() int64 {
+	return e.val.Load()
+}
+
 // muxSession manages one Reticulum connection and multiplexes virtual connections.
 type muxSession struct {
 	inner        net.Conn
@@ -290,13 +325,12 @@ type muxSession struct {
 	// Initialised from retryInterval; updated on every TypeFragAck and on fragment
 	// give-up (failed packets: time from first send to give-up is treated as a lower
 	// bound sample).  Retransmit timeout = 2 × rttEst, floored at retryInterval.
-	rttEst atomic.Int64
+	rttEst *ewma
 
 	// bwEst is the EWMA throughput estimate in bytes/second (alpha=0.125).
 	// Increases when ACKs arrive (link is delivering), decreases on retransmit
-	// timeouts (congestion / loss).  Used to pace sends so the LoRa channel is
-	// used near capacity without causing CSMA starvation of the return path.
-	bwEst atomic.Int64
+	// timeouts (congestion / loss).  Nil when pacing is disabled (test sessions).
+	bwEst atomic.Pointer[ewma]
 
 	// lastSendAt is the unix-nano timestamp of the most recent doWrite; used for
 	// pacing so sends are spaced by at least len(frag)/bwEst seconds.
@@ -306,6 +340,8 @@ type muxSession struct {
 // newMuxSession is the internal constructor used by both public constructors and tests.
 // maxMsg is the maximum total mux-packet size (header + payload) for this session;
 // pass MaxReticulumMessage for the LoRa default.
+// withPacing enables bandwidth-based send pacing; pass true for real LoRa/RF links,
+// false for test sessions (net.Pipe) where pacing would make tests take minutes.
 func newMuxSession(
 	inner net.Conn,
 	logger log.ContextLogger,
@@ -314,6 +350,7 @@ func newMuxSession(
 	retryInterval time.Duration,
 	maxRetries int,
 	maxMsg int,
+	withPacing bool,
 ) *muxSession {
 	if maxMsg <= muxHeaderSize {
 		maxMsg = MaxReticulumMessage
@@ -332,10 +369,13 @@ func newMuxSession(
 		maxRetries:     maxRetries,
 		fragTimeout:    defaultFragTimeout,
 	}
-	s.rttEst.Store(int64(retryInterval))
-	// bwEst (pacing) is NOT initialised here; callers that represent real constrained
-	// links (newMuxSessionClient/Server) call s.initPacing() after construction.
-	// Test helpers that call newMuxSession directly get no pacing by default.
+	s.rttEst = newEWMA(0.5, int64(retryInterval), int64(retryInterval))
+	// SF8 BW62.5 (retryInterval=500ms, maxMsg=120): initial ≈ 58 B/s → ~2 s per fragment,
+	// leaving airtime for ACKs and return-path traffic.
+	if withPacing {
+		initial := max(int64(s.maxFragPayload)*int64(time.Second)/(4*int64(retryInterval)), 1)
+		s.bwEst.Store(newEWMA(0.5, initial, 1))
+	}
 	if isServer {
 		s.incomingCh = make(chan *muxConn, 1024)
 	}
@@ -345,26 +385,12 @@ func newMuxSession(
 	return s
 }
 
-// initPacing enables bandwidth-based send pacing with a conservative initial estimate.
-// Call this after newMuxSession for real constrained links (LoRa/RF) but NOT in tests
-// where net.Pipe throughput is effectively unlimited.
-//
-// SF8 BW62.5 (retryInterval=500ms, maxMsg=120): initial ≈ 58 B/s → ~2 s per fragment,
-// leaving airtime for ACKs and return-path traffic.
-func (s *muxSession) initPacing() {
-	s.bwEst.Store(max(int64(s.maxFragPayload)*int64(time.Second)/(4*int64(s.retryInterval)), 1))
-}
-
 func newMuxSessionClient(inner net.Conn, logger log.ContextLogger, maxMsg int) *muxSession {
-	s := newMuxSession(inner, logger, false, defaultWindowSize, defaultRetryInterval, defaultMaxRetries, maxMsg)
-	s.initPacing()
-	return s
+	return newMuxSession(inner, logger, false, defaultWindowSize, defaultRetryInterval, defaultMaxRetries, maxMsg, true)
 }
 
 func newMuxSessionServer(inner net.Conn, logger log.ContextLogger, maxMsg int) *muxSession {
-	s := newMuxSession(inner, logger, true, defaultWindowSize, defaultRetryInterval, defaultMaxRetries, maxMsg)
-	s.initPacing()
-	return s
+	return newMuxSession(inner, logger, true, defaultWindowSize, defaultRetryInterval, defaultMaxRetries, maxMsg, true)
 }
 
 // isClosed reports whether this session has been shut down.
@@ -449,7 +475,7 @@ func (s *muxSession) doWrite(f *queuedFrag) {
 			encoded: f.encoded,
 			key:     f.key,
 			sentAt:  now,
-			retryAt: now.Add(fragRetransmitDelay(0, time.Duration(s.rttEst.Load()))),
+			retryAt: now.Add(fragRetransmitDelay(0, time.Duration(s.rttEst.Value()))),
 		})
 	} else {
 		// Retransmit: skip if already ACKed (entry removed) since we enqueued it.
@@ -460,17 +486,19 @@ func (s *muxSession) doWrite(f *queuedFrag) {
 
 	// Pace sends to the estimated link throughput so the LoRa channel is not
 	// saturated with our traffic, leaving airtime for ACKs and the return path.
-	bwEst := s.bwEst.Load()
-	if bwEst > 0 {
-		fragBytes := int64(len(f.encoded))
-		pacingInterval := time.Duration(fragBytes * int64(time.Second) / bwEst)
-		if lastNano := s.lastSendAt.Load(); lastNano > 0 {
-			elapsed := time.Duration(time.Now().UnixNano() - lastNano)
-			if elapsed < pacingInterval {
-				select {
-				case <-time.After(pacingInterval - elapsed):
-				case <-s.done:
-					return
+	if bw := s.bwEst.Load(); bw != nil {
+		bwVal := bw.Value()
+		if bwVal > 0 {
+			fragBytes := int64(len(f.encoded))
+			pacingInterval := time.Duration(fragBytes * int64(time.Second) / bwVal)
+			if lastNano := s.lastSendAt.Load(); lastNano > 0 {
+				elapsed := time.Duration(time.Now().UnixNano() - lastNano)
+				if elapsed < pacingInterval {
+					select {
+					case <-time.After(pacingInterval - elapsed):
+					case <-s.done:
+						return
+					}
 				}
 			}
 		}
@@ -576,18 +604,12 @@ func (s *muxSession) readLoop() {
 					if v, ok := s.inFlight.LoadAndDelete(key); ok {
 						entry := v.(*inFlightEntry)
 						rtt := time.Since(entry.sentAt)
-						// Update RTT EWMA: α=0.125 → new = 7/8·prev + 1/8·sample
-						prevRtt := time.Duration(s.rttEst.Load())
-						updatedRtt := (7*prevRtt + rtt) / 8
-						if updatedRtt < s.retryInterval {
-							updatedRtt = s.retryInterval
-						}
-						s.rttEst.Store(int64(updatedRtt))
-						// Update bandwidth EWMA: ACK is evidence of delivery; increase estimate (if pacing is active).
+						s.rttEst.Update(int64(rtt))
+						// Update bandwidth EWMA on ACK (if pacing is active).
 						if rtt > time.Millisecond {
-							if prevBw := s.bwEst.Load(); prevBw > 0 {
+							if bw := s.bwEst.Load(); bw != nil {
 								sample := int64(len(entry.encoded)) * int64(time.Second) / int64(rtt)
-								s.bwEst.Store(max((7*prevBw+sample)/8, 1))
+								bw.Update(sample)
 							}
 						}
 						<-s.windowSem
@@ -694,8 +716,13 @@ func (s *muxSession) logStats(reason string) {
 		s.statFragsSent.Load(),
 		s.statAcksReceived.Load(),
 		s.statAcksSent.Load(),
-		time.Duration(s.rttEst.Load()).Round(time.Millisecond),
-		s.bwEst.Load(),
+		time.Duration(s.rttEst.Value()).Round(time.Millisecond),
+		func() int64 {
+			if bw := s.bwEst.Load(); bw != nil {
+				return bw.Value()
+			}
+			return 0
+		}(),
 	))
 }
 
@@ -733,7 +760,6 @@ func fragRetransmitDelay(retries int, rttEst time.Duration) time.Duration {
 // Fragments exceeding maxRetries cause their connection to be closed.
 func (s *muxSession) checkRetransmits() {
 	now := time.Now()
-	rttEst := time.Duration(s.rttEst.Load())
 	var toClose []uint16
 	s.inFlight.Range(func(k, v any) bool {
 		entry := v.(*inFlightEntry)
@@ -744,17 +770,13 @@ func (s *muxSession) checkRetransmits() {
 		if entry.retries > s.maxRetries {
 			toClose = append(toClose, entry.key.connID)
 			s.inFlight.Delete(k)
-			// Treat total wait (first send → give-up) as an RTT sample so the
-			// estimate reflects the real link latency even when ACKs never arrive.
-			rttSample := time.Since(entry.sentAt)
-			prevRtt := time.Duration(s.rttEst.Load())
-			updatedRtt := max((7*prevRtt+rttSample)/8, s.retryInterval)
-			s.rttEst.Store(int64(updatedRtt))
-			// Give-up is a strong congestion signal; reduce bwEst (if pacing is active).
-			if prevBw := s.bwEst.Load(); prevBw > 0 {
-				s.bwEst.Store(max(prevBw*7/8, 1))
+			// Treat total wait (first send → give-up) as an RTT sample.
+			s.rttEst.Update(int64(time.Since(entry.sentAt)))
+			// Give-up is a strong congestion signal; EWMA toward 0 → 7/8 × old.
+			if bw := s.bwEst.Load(); bw != nil {
+				bw.Update(0)
 			}
-			s.logStats("packet lost (all retries exausted)")
+			s.logStats("packet lost (all retries exhausted)")
 			// Release the window slot this fragment was holding.
 			select {
 			case <-s.windowSem:
@@ -762,16 +784,14 @@ func (s *muxSession) checkRetransmits() {
 			}
 			return true
 		}
-		// Timeout: evidence that RTT is larger than estimated — nudge rttEst up by 12.5%.
-		prevRtt := time.Duration(s.rttEst.Load())
-		nudgedRtt := max((7*prevRtt+2*prevRtt)/8, s.retryInterval) // = 9/8 × prevRtt
-		s.rttEst.Store(int64(nudgedRtt))
-		rttEst = nudgedRtt // use updated value for delay calculation below
-		// Retransmit timeout is a mild congestion signal; reduce bwEst by 12.5% (if pacing is active).
-		if prevBw := s.bwEst.Load(); prevBw > 0 {
-			s.bwEst.Store(max(prevBw*7/8, 1))
+		// Timeout: nudge rttEst up by 12.5% (EWMA with sample = 2×current = 9/8×old).
+		s.rttEst.Update(2 * s.rttEst.Value())
+		// Retransmit timeout is a mild congestion signal; EWMA toward 0 → 7/8 × old.
+		if bw := s.bwEst.Load(); bw != nil {
+			bw.Update(0)
 		}
 		// Exponential backoff: each failure doubles the wait.
+		rttEst := time.Duration(s.rttEst.Value())
 		delay := fragRetransmitDelay(entry.retries, rttEst)
 		entry.retryAt = now.Add(delay)
 		s.logStats("retransmit queued (no ACK)")
