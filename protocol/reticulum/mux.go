@@ -138,6 +138,11 @@ type fragBuffer struct {
 	gotLast      bool
 	lastIdx      int
 	lastActivity time.Time
+	// delivered is set after the assembled message has been sent to readCh.
+	// Subsequent retransmits of the same connID are ACKed but not re-delivered,
+	// preventing duplicate HTTP handler invocations when the sender retransmits
+	// before its ACK arrives.
+	delivered bool
 }
 
 // addPart records one fragment. Returns the assembled payload and true when complete.
@@ -286,6 +291,16 @@ type muxSession struct {
 	// give-up (failed packets: time from first send to give-up is treated as a lower
 	// bound sample).  Retransmit timeout = 2 × rttEst, floored at retryInterval.
 	rttEst atomic.Int64
+
+	// bwEst is the EWMA throughput estimate in bytes/second (alpha=0.125).
+	// Increases when ACKs arrive (link is delivering), decreases on retransmit
+	// timeouts (congestion / loss).  Used to pace sends so the LoRa channel is
+	// used near capacity without causing CSMA starvation of the return path.
+	bwEst atomic.Int64
+
+	// lastSendAt is the unix-nano timestamp of the most recent doWrite; used for
+	// pacing so sends are spaced by at least len(frag)/bwEst seconds.
+	lastSendAt atomic.Int64
 }
 
 // newMuxSession is the internal constructor used by both public constructors and tests.
@@ -318,6 +333,9 @@ func newMuxSession(
 		fragTimeout:    defaultFragTimeout,
 	}
 	s.rttEst.Store(int64(retryInterval))
+	// bwEst (pacing) is NOT initialised here; callers that represent real constrained
+	// links (newMuxSessionClient/Server) call s.initPacing() after construction.
+	// Test helpers that call newMuxSession directly get no pacing by default.
 	if isServer {
 		s.incomingCh = make(chan *muxConn, 1024)
 	}
@@ -327,12 +345,26 @@ func newMuxSession(
 	return s
 }
 
+// initPacing enables bandwidth-based send pacing with a conservative initial estimate.
+// Call this after newMuxSession for real constrained links (LoRa/RF) but NOT in tests
+// where net.Pipe throughput is effectively unlimited.
+//
+// SF8 BW62.5 (retryInterval=500ms, maxMsg=120): initial ≈ 58 B/s → ~2 s per fragment,
+// leaving airtime for ACKs and return-path traffic.
+func (s *muxSession) initPacing() {
+	s.bwEst.Store(max(int64(s.maxFragPayload)*int64(time.Second)/(4*int64(s.retryInterval)), 1))
+}
+
 func newMuxSessionClient(inner net.Conn, logger log.ContextLogger, maxMsg int) *muxSession {
-	return newMuxSession(inner, logger, false, defaultWindowSize, defaultRetryInterval, defaultMaxRetries, maxMsg)
+	s := newMuxSession(inner, logger, false, defaultWindowSize, defaultRetryInterval, defaultMaxRetries, maxMsg)
+	s.initPacing()
+	return s
 }
 
 func newMuxSessionServer(inner net.Conn, logger log.ContextLogger, maxMsg int) *muxSession {
-	return newMuxSession(inner, logger, true, defaultWindowSize, defaultRetryInterval, defaultMaxRetries, maxMsg)
+	s := newMuxSession(inner, logger, true, defaultWindowSize, defaultRetryInterval, defaultMaxRetries, maxMsg)
+	s.initPacing()
+	return s
 }
 
 // isClosed reports whether this session has been shut down.
@@ -426,6 +458,25 @@ func (s *muxSession) doWrite(f *queuedFrag) {
 		}
 	}
 
+	// Pace sends to the estimated link throughput so the LoRa channel is not
+	// saturated with our traffic, leaving airtime for ACKs and the return path.
+	bwEst := s.bwEst.Load()
+	if bwEst > 0 {
+		fragBytes := int64(len(f.encoded))
+		pacingInterval := time.Duration(fragBytes * int64(time.Second) / bwEst)
+		if lastNano := s.lastSendAt.Load(); lastNano > 0 {
+			elapsed := time.Duration(time.Now().UnixNano() - lastNano)
+			if elapsed < pacingInterval {
+				select {
+				case <-time.After(pacingInterval - elapsed):
+				case <-s.done:
+					return
+				}
+			}
+		}
+	}
+	s.lastSendAt.Store(time.Now().UnixNano())
+
 	s.innerWriteMu.Lock()
 	_, err := s.inner.Write(f.encoded)
 	s.innerWriteMu.Unlock()
@@ -435,6 +486,7 @@ func (s *muxSession) doWrite(f *queuedFrag) {
 	if !f.isRetransmit {
 		s.statFragsSent.Add(1)
 	}
+	s.logStats()
 	// inFlight entry and window slot are held until the TypeFragAck handler
 	// (readLoop) calls LoadAndDelete + releases windowSem, or checkRetransmits
 	// gives up and releases both after maxRetries.
@@ -522,16 +574,24 @@ func (s *muxSession) readLoop() {
 					if v, ok := s.inFlight.LoadAndDelete(key); ok {
 						entry := v.(*inFlightEntry)
 						rtt := time.Since(entry.sentAt)
-						prev := time.Duration(s.rttEst.Load())
-						// EWMA: α=0.125 → new = 7/8·prev + 1/8·sample
-						updated := (7*prev + rtt) / 8
-						if updated < s.retryInterval {
-							updated = s.retryInterval
+						// Update RTT EWMA: α=0.125 → new = 7/8·prev + 1/8·sample
+						prevRtt := time.Duration(s.rttEst.Load())
+						updatedRtt := (7*prevRtt + rtt) / 8
+						if updatedRtt < s.retryInterval {
+							updatedRtt = s.retryInterval
 						}
-						s.rttEst.Store(int64(updated))
+						s.rttEst.Store(int64(updatedRtt))
+						// Update bandwidth EWMA: ACK is evidence of delivery; increase estimate (if pacing is active).
+						if rtt > time.Millisecond {
+							if prevBw := s.bwEst.Load(); prevBw > 0 {
+								sample := int64(len(entry.encoded)) * int64(time.Second) / int64(rtt)
+								s.bwEst.Store(max((7*prevBw+sample)/8, 1))
+							}
+						}
 						<-s.windowSem
+							s.logStats()
+						}
 					}
-				}
 			case TypeLargeData:
 				// Full payload delivered atomically via Resource protocol.
 				s.mu.Lock()
@@ -569,10 +629,16 @@ func (s *muxSession) readLoop() {
 		if fb == nil {
 			fb = &fragBuffer{}
 			fragBufs[pkt.connID] = fb
+		} else if fb.delivered {
+			// Already fully delivered.  The ACK was already sent above so the
+			// sender will eventually stop retransmitting.  Update lastActivity
+			// so the GC doesn't expire the marker too early.
+			fb.lastActivity = time.Now()
+			continue
 		}
 		assembled, done := fb.addPart(pkt.partIndex, pkt.isLast, pkt.payload)
 		if !done {
-			// Periodically GC stale incomplete buffers.
+			// Periodically GC stale incomplete buffers and expired delivery markers.
 			gcCounter++
 			if gcCounter >= 100 {
 				gcCounter = 0
@@ -581,11 +647,21 @@ func (s *muxSession) readLoop() {
 					if !b.gotLast && now.Sub(b.lastActivity) > s.fragTimeout {
 						delete(fragBufs, cid)
 					}
+					// Keep delivered markers for maxRetransmitDelay so any
+					// remaining sender retransmits are suppressed, then GC.
+					if b.delivered && now.Sub(b.lastActivity) > maxRetransmitDelay {
+						delete(fragBufs, cid)
+					}
 				}
 			}
 			continue
 		}
-		delete(fragBufs, pkt.connID)
+		// Mark delivered so retransmits of this connID don't re-trigger upper layer.
+		// The parts slice is cleared to free memory; the struct stays in fragBufs
+		// as a delivery marker until it is GC'd by the loop above.
+		fb.delivered = true
+		fb.parts = nil
+		fb.lastActivity = time.Now()
 
 		s.mu.Lock()
 		mc := s.conns[pkt.connID]
@@ -600,8 +676,27 @@ func (s *muxSession) readLoop() {
 	}
 }
 
+// logStats emits the current mux counters at DEBUG level.
+// Called on every significant event (send, ACK, retransmit/give-up) so the log
+// reflects state changes immediately rather than on a fixed timer.
+func (s *muxSession) logStats() {
+	if s.logger == nil {
+		return
+	}
+	writing := len(s.windowSem)
+	queued := len(s.sendQ.retransmit) + len(s.sendQ.inProgress) + len(s.sendQ.newMsg)
+	s.logger.Debug(fmt.Sprintf(
+		"mux stats: writing=%d/%d queued=%d sent=%d acks_rx=%d acks_tx=%d rtt_est=%s bw_est=%d B/s",
+		writing, s.windowSize, queued,
+		s.statFragsSent.Load(),
+		s.statAcksReceived.Load(),
+		s.statAcksSent.Load(),
+		time.Duration(s.rttEst.Load()).Round(time.Millisecond),
+		s.bwEst.Load(),
+	))
+}
+
 // retransmitLoop periodically scans in-flight fragments and re-enqueues timed-out ones.
-// It also logs mux stats at every tick so operators can see window utilisation.
 func (s *muxSession) retransmitLoop() {
 	ticker := time.NewTicker(s.retryInterval / 2)
 	defer ticker.Stop()
@@ -611,18 +706,6 @@ func (s *muxSession) retransmitLoop() {
 			return
 		case <-ticker.C:
 			s.checkRetransmits()
-			if s.logger != nil {
-				writing := len(s.windowSem)
-				queued := len(s.sendQ.retransmit) + len(s.sendQ.inProgress) + len(s.sendQ.newMsg)
-				s.logger.Debug(fmt.Sprintf(
-					"mux stats: writing=%d/%d queued=%d sent=%d acks_rx=%d acks_tx=%d rtt_est=%s",
-					writing, s.windowSize, queued,
-					s.statFragsSent.Load(),
-					s.statAcksReceived.Load(),
-					s.statAcksSent.Load(),
-					time.Duration(s.rttEst.Load()).Round(time.Millisecond),
-				))
-			}
 		}
 	}
 }
@@ -661,12 +744,22 @@ func (s *muxSession) checkRetransmits() {
 			// Treat total wait (first send → give-up) as an RTT sample so the
 			// estimate reflects the real link latency even when ACKs never arrive.
 			rttSample := time.Since(entry.sentAt)
-			prev := time.Duration(s.rttEst.Load())
-			updated := (7*prev + rttSample) / 8
-			if updated < s.retryInterval {
-				updated = s.retryInterval
+			prevRtt := time.Duration(s.rttEst.Load())
+			updatedRtt := max((7*prevRtt+rttSample)/8, s.retryInterval)
+			s.rttEst.Store(int64(updatedRtt))
+			// Give-up is a strong congestion signal; reduce bwEst (if pacing is active).
+			if prevBw := s.bwEst.Load(); prevBw > 0 {
+				s.bwEst.Store(max(prevBw*7/8, 1))
 			}
-			s.rttEst.Store(int64(updated))
+			if s.logger != nil {
+				s.logger.Warn(fmt.Sprintf(
+					"mux: conn=%d part=%d LOST (gave up after %d retransmits) rtt_est=%s bw_est=%d B/s",
+					entry.key.connID, entry.key.partIndex, s.maxRetries,
+					time.Duration(s.rttEst.Load()).Round(time.Millisecond),
+					s.bwEst.Load(),
+				))
+			}
+			s.logStats()
 			// Release the window slot this fragment was holding.
 			select {
 			case <-s.windowSem:
@@ -674,18 +767,29 @@ func (s *muxSession) checkRetransmits() {
 			}
 			return true
 		}
+		// Timeout: evidence that RTT is larger than estimated — nudge rttEst up by 12.5%.
+		prevRtt := time.Duration(s.rttEst.Load())
+		nudgedRtt := max((7*prevRtt+2*prevRtt)/8, s.retryInterval) // = 9/8 × prevRtt
+		s.rttEst.Store(int64(nudgedRtt))
+		rttEst = nudgedRtt // use updated value for delay calculation below
+		// Retransmit timeout is a mild congestion signal; reduce bwEst by 12.5% (if pacing is active).
+		if prevBw := s.bwEst.Load(); prevBw > 0 {
+			s.bwEst.Store(max(prevBw*7/8, 1))
+		}
 		// Exponential backoff: each failure doubles the wait.
 		delay := fragRetransmitDelay(entry.retries, rttEst)
 		entry.retryAt = now.Add(delay)
 		if s.logger != nil {
-			s.logger.Debug(fmt.Sprintf(
-				"mux: retransmit conn=%d part=%d attempt=%d/%d rtt_est=%s next_in=%s",
+			s.logger.Warn(fmt.Sprintf(
+				"mux: conn=%d part=%d no ACK (attempt %d/%d) rtt_est=%s bw_est=%d B/s next_retry=%s",
 				entry.key.connID, entry.key.partIndex,
 				entry.retries, s.maxRetries,
 				rttEst.Round(time.Millisecond),
+				s.bwEst.Load(),
 				delay.Round(time.Millisecond),
 			))
 		}
+		s.logStats()
 		select {
 		case s.sendQ.retransmit <- &queuedFrag{
 			encoded:      entry.encoded,

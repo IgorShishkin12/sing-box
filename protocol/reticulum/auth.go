@@ -98,9 +98,23 @@ func authAttempt(rw AuthIO, password, ownID, peerID string, ownSalt []byte) erro
 	if err := rw.WriteMsg(TypeRequestAuth, ownSalt); err != nil {
 		return fmt.Errorf("send round1: %w", err)
 	}
-	typB, data, err := rw.ReadMsgDeadline(time.Now().Add(authTimeout))
-	if err != nil {
-		return fmt.Errorf("recv round1: %w", err)
+	// Round 1 read loop: skip TypeResponseAuth (0x85) that may arrive if the peer
+	// already received our challenge and responded before its own challenge reached us.
+	// This happens on lossy LoRa links where the peer's TypeRequestAuth was lost in
+	// transit.  We keep waiting; the peer will retry its TypeRequestAuth after its
+	// own Round 2 timeout, at which point we can complete Round 1.
+	var typB byte
+	var data []byte
+	for {
+		var err error
+		typB, data, err = rw.ReadMsgDeadline(time.Now().Add(authTimeout))
+		if err != nil {
+			return fmt.Errorf("recv round1: %w", err)
+		}
+		if typB == TypeResponseAuth {
+			continue // peer's Round 2 response arrived before their Round 1 — skip
+		}
+		break
 	}
 	if typB != TypeRequestAuth {
 		return fmt.Errorf("round1: expected TypeRequestAuth (0x%02x), got 0x%02x", TypeRequestAuth, typB)
@@ -119,6 +133,7 @@ func authAttempt(rw AuthIO, password, ownID, peerID string, ownSalt []byte) erro
 	var typB2 byte
 	var data2 []byte
 	for {
+		var err error
 		typB2, data2, err = rw.ReadMsg()
 		if err != nil {
 			return fmt.Errorf("recv round2: %w", err)

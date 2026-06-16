@@ -240,6 +240,8 @@ func TestFragBuffer_multiPart(t *testing.T) {
 
 // newTestMuxPair creates a client+server muxSession pair connected via net.Pipe.
 // Uses byte-stream semantics; suitable for messages up to ~25 KB (64 fragments).
+// Uses a 20ms retryInterval (not the production 500ms default) so pacing is
+// disabled and tests complete in milliseconds, not minutes.
 func newTestMuxPair(t *testing.T) (client, server *muxSession) {
 	t.Helper()
 	cc, sc := net.Pipe()
@@ -247,14 +249,15 @@ func newTestMuxPair(t *testing.T) (client, server *muxSession) {
 		cc.Close()
 		sc.Close()
 	})
-	client = newMuxSessionClient(cc, nil, MaxReticulumMessage)
-	server = newMuxSessionServer(sc, nil, MaxReticulumMessage)
+	client = newMuxSession(cc, nil, false, defaultWindowSize, 20*time.Millisecond, defaultMaxRetries, MaxReticulumMessage)
+	server = newMuxSession(sc, nil, true, defaultWindowSize, 20*time.Millisecond, defaultMaxRetries, MaxReticulumMessage)
 	return
 }
 
 // newTestMuxPairMsg creates a client+server muxSession pair backed by the
 // existing chanConn (message-boundary). Required for TypeLargeData tests
 // (payloads > 64*maxFragPayload) where net.Pipe byte-stream semantics break.
+// Uses a 20ms retryInterval so pacing is disabled and tests complete quickly.
 func newTestMuxPairMsg(t *testing.T) (client, server *muxSession) {
 	t.Helper()
 	cc, sc := newChanConnPair()
@@ -262,8 +265,8 @@ func newTestMuxPairMsg(t *testing.T) (client, server *muxSession) {
 		cc.Close()
 		sc.Close()
 	})
-	client = newMuxSessionClient(cc, nil, MaxReticulumMessage)
-	server = newMuxSessionServer(sc, nil, MaxReticulumMessage)
+	client = newMuxSession(cc, nil, false, defaultWindowSize, 20*time.Millisecond, defaultMaxRetries, MaxReticulumMessage)
+	server = newMuxSession(sc, nil, true, defaultWindowSize, 20*time.Millisecond, defaultMaxRetries, MaxReticulumMessage)
 	return
 }
 
@@ -694,10 +697,10 @@ func TestRetransmitGivesUp(t *testing.T) {
 			}
 		}
 	}()
-	// With exponential backoff the total giveup time is roughly
-	// sum_{i=0}^{maxRetries} 2^(i+1)*retryInterval.  Use 2^(maxRetries+2)*retryInterval
-	// as an upper bound with a comfortable margin.
-	waitFor := time.Duration(1<<uint(s.maxRetries+2)) * s.retryInterval
+	// rttEst grows ~12.5% per retransmit on top of exponential backoff, so total
+	// giveup time is larger than the pure-backoff sum.  Use 2^(maxRetries+4) as a
+	// generous upper bound that covers the compounded growth.
+	waitFor := time.Duration(1<<uint(s.maxRetries+4)) * s.retryInterval
 	select {
 	case <-mc.done:
 		// correct: connection closed after max retries
@@ -731,7 +734,10 @@ func TestRetransmitGivesUp_UpdatesRttEst(t *testing.T) {
 		}
 	}()
 
-	waitFor := time.Duration(1<<uint(s.maxRetries+2)) * s.retryInterval
+	// rttEst grows ~12.5% per retransmit on top of exponential backoff, so total
+	// giveup time is larger than the pure-backoff sum.  Use 2^(maxRetries+4) as a
+	// generous upper bound that covers the compounded growth.
+	waitFor := time.Duration(1<<uint(s.maxRetries+4)) * s.retryInterval
 	select {
 	case <-mc.done:
 	case <-time.After(waitFor):
@@ -741,6 +747,49 @@ func TestRetransmitGivesUp_UpdatesRttEst(t *testing.T) {
 	finalRtt := time.Duration(s.rttEst.Load())
 	if finalRtt <= initRtt {
 		t.Errorf("rttEst should have increased after give-up: init=%s final=%s", initRtt, finalRtt)
+	}
+}
+
+// TestFragBuffer_DuplicateDelivery verifies that injecting the same fragment a second
+// time (simulating a retransmit arriving after first assembly) delivers the message
+// only once to the upper layer, not twice.
+func TestFragBuffer_DuplicateDelivery(t *testing.T) {
+	inner, remote := newChanConnPair()
+	s := newMuxSession(inner, nil, true, defaultWindowSize, 20*time.Millisecond, 2, MaxReticulumMessage)
+	t.Cleanup(func() { s.Close() })
+
+	const connID = uint16(1)
+	payload := []byte("hello-once")
+
+	// Announce the connection.
+	remote.Write(encodePacket(muxPacket{typeByte: TypeNewConn, connID: connID, payload: []byte("peer:1")}))
+
+	// One-fragment message: encodeDataByte(totalParts=1, partIndex=0).
+	frag := encodePacket(muxPacket{typeByte: encodeDataByte(1, 0), connID: connID, payload: payload})
+	remote.Write(frag)
+
+	var sc *muxConn
+	select {
+	case sc = <-s.incomingCh:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("server conn not opened within timeout")
+	}
+	defer sc.Close()
+
+	got := make([]byte, len(payload))
+	_, err := io.ReadFull(sc, got)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+
+	// Inject the same fragment again — simulates a retransmit arriving late.
+	// With fb.delivered set, the readLoop must NOT push another message onto sc.readCh.
+	remote.Write(frag)
+
+	select {
+	case extra := <-sc.readCh:
+		t.Fatalf("duplicate delivery: %q", extra)
+	case <-time.After(100 * time.Millisecond):
+		// good: no duplicate
 	}
 }
 
