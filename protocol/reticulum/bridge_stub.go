@@ -36,6 +36,7 @@ func BridgeShutdown()                                            {}
 func BridgeResolveName(name string) (string, error)              { return "", ErrBridgeNotAvailable }
 func BridgeConnIdentifiedPeer(connHandle uint64) (string, error) { return "", ErrBridgeNotAvailable }
 func BridgeConnPeerHash(connHandle uint64) (string, error)       { return "", ErrBridgeNotAvailable }
+func BridgeConnMaxPayload(_ uint64) int                          { return MaxReticulumMessage }
 func BridgeTransportHash() (string, error)                       { return "", ErrBridgeNotAvailable }
 
 var ErrBridgeNotAvailable = errors.New("reticulum bridge not available: build with -tags with_reticulum")

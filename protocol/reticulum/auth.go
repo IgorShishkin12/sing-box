@@ -27,11 +27,17 @@ import (
 	"time"
 )
 
-// authTimeout is the maximum idle time ReadMsg waits for the peer's next auth
-// message after our own send completes. 30 s accommodates LoRa channel
-// congestion (CSMA backoff, competing transmissions) without being so long that
-// a genuinely lost peer hangs the connection noticeably.
+// authTimeout is the overall deadline for each round within authAttempt.
+// 30 s accommodates LoRa channel congestion (CSMA backoff, competing
+// transmissions) without being so long that a genuinely lost peer hangs
+// the connection noticeably.
 const authTimeout = 30 * time.Second
+
+// retransmitRound1Interval is how often Round 1 (TypeRequestAuth) is resent
+// while waiting for the peer's challenge. LoRa packets can be lost to CSMA
+// collisions; retransmitting every 5 s gives ~6 chances within authTimeout
+// without flooding the channel (a 33-byte auth packet at SF7 ≈ 0.1 s).
+const retransmitRound1Interval = 5 * time.Second
 
 // RetryPolicy controls how auth failures are retried on the same connection.
 type RetryPolicy string
@@ -76,39 +82,63 @@ func macBound(password, ownID string, peerSalt []byte) []byte {
 // Separating salt generation from the exchange allows callers to reuse the same
 // salt across retry attempts on the same connection.
 //
-// Each round is send-then-receive: WriteMsg blocks until the local packet is
-// queued for transmission, then ReadMsg waits for the peer's reply.
-// This ordering is critical for high-latency links (e.g. LoRa) where WriteMsg
-// can block for many seconds — starting the read timer before WriteMsg returns
-// would cause false auth timeouts during normal operation.
+// Round 1 retransmits TypeRequestAuth every retransmitRound1Interval until the
+// peer responds or authTimeout expires. This handles LoRa packet loss: if the
+// initial challenge is dropped (e.g. during a competing identify exchange), a
+// later retransmit will arrive after the channel clears and be buffered in the
+// peer's ctrlCh for immediate delivery when the peer starts auth.
+//
+// Round 2 skips any stale TypeRequestAuth messages that may have arrived between
+// our retransmits and the peer's Round 2 response.
 func authAttempt(rw AuthIO, password, ownID, peerID string, ownSalt []byte) error {
-	// Round 1: send challenge, then wait for peer's challenge.
-	// Both sides do this concurrently (different connections/goroutines), so each
-	// side's packet is transmitted while the other side also transmits; the peer's
-	// packet is buffered in ctrlCh and ReadMsg returns quickly.
-	if err := rw.WriteMsg(TypeRequestAuth, ownSalt); err != nil {
-		return fmt.Errorf("send round1: %w", err)
-	}
-	typB, data, err := rw.ReadMsg()
-	if err != nil {
-		return fmt.Errorf("recv round1: %w", err)
-	}
-	if typB != TypeRequestAuth {
-		return fmt.Errorf("round1: expected TypeRequestAuth (0x%02x), got 0x%02x", TypeRequestAuth, typB)
-	}
-	if len(data) != 32 {
-		return fmt.Errorf("round1: bad length %d (want 32)", len(data))
-	}
-	peerSalt := data
+	globalDeadline := time.Now().Add(authTimeout)
 
-	// Round 2: send proof, then wait for peer's proof.
+	// Round 1: retransmit challenge until peer responds or global deadline.
+	var peerSalt []byte
+	for {
+		if err := rw.WriteMsg(TypeRequestAuth, ownSalt); err != nil {
+			return fmt.Errorf("send round1: %w", err)
+		}
+		attemptDeadline := time.Now().Add(retransmitRound1Interval)
+		if attemptDeadline.After(globalDeadline) {
+			attemptDeadline = globalDeadline
+		}
+		typB, data, err := rw.ReadMsgDeadline(attemptDeadline)
+		if err != nil {
+			if attemptDeadline.Before(globalDeadline) {
+				continue // per-attempt timeout, global not exhausted → retransmit
+			}
+			return fmt.Errorf("recv round1: %w", err)
+		}
+		if typB != TypeRequestAuth {
+			return fmt.Errorf("round1: expected TypeRequestAuth (0x%02x), got 0x%02x", TypeRequestAuth, typB)
+		}
+		if len(data) != 32 {
+			return fmt.Errorf("round1: bad length %d (want 32)", len(data))
+		}
+		peerSalt = data
+		break
+	}
+
+	// Round 2: send proof, then wait for peer's proof. Skip stale TypeRequestAuth
+	// messages that may have been buffered from our own retransmits arriving after
+	// the peer already moved to Round 2.
 	ownMAC := macBound(password, ownID, peerSalt)
 	if err := rw.WriteMsg(TypeResponseAuth, ownMAC); err != nil {
 		return fmt.Errorf("send round2: %w", err)
 	}
-	typB, data, err = rw.ReadMsg()
-	if err != nil {
-		return fmt.Errorf("recv round2: %w", err)
+	var typB byte
+	var data []byte
+	for {
+		var err error
+		typB, data, err = rw.ReadMsg()
+		if err != nil {
+			return fmt.Errorf("recv round2: %w", err)
+		}
+		if typB == TypeRequestAuth {
+			continue // stale Round 1 retransmit — skip
+		}
+		break
 	}
 	if typB != TypeResponseAuth {
 		return fmt.Errorf("round2: expected TypeResponseAuth (0x%02x), got 0x%02x", TypeResponseAuth, typB)

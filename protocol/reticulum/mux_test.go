@@ -16,8 +16,8 @@ func newTestMuxPairWithWindow(t *testing.T, windowSize int) (client, server *mux
 	t.Helper()
 	cc, sc := net.Pipe()
 	t.Cleanup(func() { cc.Close(); sc.Close() })
-	client = newMuxSession(cc, nil, false, windowSize, 20*time.Millisecond, 2)
-	server = newMuxSession(sc, nil, true, windowSize, 20*time.Millisecond, 2)
+	client = newMuxSession(cc, nil, false, windowSize, 20*time.Millisecond, 2, MaxReticulumMessage)
+	server = newMuxSession(sc, nil, true, windowSize, 20*time.Millisecond, 2, MaxReticulumMessage)
 	return
 }
 
@@ -26,7 +26,7 @@ func newTestMuxPairWithWindow(t *testing.T, windowSize int) (client, server *mux
 func newManualSession(t *testing.T, windowSize int) (s *muxSession, remote *chanConn) {
 	t.Helper()
 	inner, remote := newChanConnPair()
-	s = newMuxSession(inner, nil, false, windowSize, 20*time.Millisecond, 2)
+	s = newMuxSession(inner, nil, false, windowSize, 20*time.Millisecond, 2, MaxReticulumMessage)
 	t.Cleanup(func() { s.Close() })
 	return
 }
@@ -144,6 +144,32 @@ func TestDecodePacket_tooShort(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestMaxReticulumMessage_LoRaMTU asserts that MaxReticulumMessage is small enough
+// that a Fernet-encrypted mux packet fits within the LoRa/RNode serial link MTU of 220 bytes.
+//
+// On-wire size of a Reticulum data_packet carrying a MaxReticulumMessage-byte plaintext:
+//   HEADER_MAXSIZE(35) + IFAC_MIN_SIZE(1) + IV(16) + ceil(plain/16)*16 + HMAC(32)
+// Using the same overhead constants as rns-core (LXMF_MAX_PAYLOAD = 464 − 35 − 1 − 16 − 32 − 16 = 364... wait)
+// The formula per mux.go: 220 − 35 − 1 − 16 − 32 − 16 = 120.
+// Any increase to MaxReticulumMessage causes silent packet loss on LoRa links.
+func TestMaxReticulumMessage_LoRaMTU(t *testing.T) {
+	const (
+		loraMTU         = 220
+		headerMaxSize   = 35
+		ifacMinSize     = 1
+		fernetIV        = 16
+		fernetHMAC      = 32
+		fernetMaxPad    = 16
+		reticOverhead   = headerMaxSize + ifacMinSize + fernetIV + fernetHMAC + fernetMaxPad
+		maxSafePayload  = loraMTU - reticOverhead
+	)
+	if MaxReticulumMessage > maxSafePayload {
+		t.Errorf("MaxReticulumMessage=%d exceeds LoRa-safe limit=%d (MTU=%d overhead=%d); "+
+			"mux fragments will be silently dropped by the KISS interface",
+			MaxReticulumMessage, maxSafePayload, loraMTU, reticOverhead)
+	}
+}
+
 // --- fragment ---
 
 func TestFragment_small(t *testing.T) {
@@ -221,8 +247,8 @@ func newTestMuxPair(t *testing.T) (client, server *muxSession) {
 		cc.Close()
 		sc.Close()
 	})
-	client = newMuxSessionClient(cc, nil)
-	server = newMuxSessionServer(sc, nil)
+	client = newMuxSessionClient(cc, nil, MaxReticulumMessage)
+	server = newMuxSessionServer(sc, nil, MaxReticulumMessage)
 	return
 }
 
@@ -236,8 +262,8 @@ func newTestMuxPairMsg(t *testing.T) (client, server *muxSession) {
 		cc.Close()
 		sc.Close()
 	})
-	client = newMuxSessionClient(cc, nil)
-	server = newMuxSessionServer(sc, nil)
+	client = newMuxSessionClient(cc, nil, MaxReticulumMessage)
+	server = newMuxSessionServer(sc, nil, MaxReticulumMessage)
 	return
 }
 
@@ -415,8 +441,8 @@ func TestMuxSession_idExhaustion(t *testing.T) {
 	defer cc.Close()
 	defer sc.Close()
 
-	client := newMuxSessionClient(cc, nil)
-	server := newMuxSessionServer(sc, nil)
+	client := newMuxSessionClient(cc, nil, MaxReticulumMessage)
+	server := newMuxSessionServer(sc, nil, MaxReticulumMessage)
 
 	// Drain server incoming conns so readLoop doesn't block.
 	go func() {
@@ -544,7 +570,7 @@ func TestConcurrentWriteNoDeadlock(t *testing.T) {
 func TestWindowBound(t *testing.T) {
 	const wSize = 2
 	inner, remote := newChanConnPair()
-	s := newMuxSession(inner, nil, false, wSize, 10*time.Second, 0)
+	s := newMuxSession(inner, nil, false, wSize, 10*time.Second, 0, MaxReticulumMessage)
 	t.Cleanup(func() { s.Close() })
 
 	mc := newMuxConn(1, s, "test")
@@ -655,4 +681,48 @@ func TestRetransmitGivesUp(t *testing.T) {
 	case <-time.After(waitFor):
 		// correct: connection still open
 	}
+}
+
+// TestMuxSession_DynamicMaxMsg verifies that a session created with a larger maxMsg
+// fragments data at the correct (larger) boundary, not the LoRa default.
+func TestMuxSession_DynamicMaxMsg(t *testing.T) {
+	const bigMaxMsg = 500 // TCP-style MTU
+	const bigMFP = bigMaxMsg - muxHeaderSize
+
+	// Use chanConn (packetReader path) so the receiver handles arbitrary packet sizes.
+	inner, remote := newChanConnPair()
+	s := newMuxSession(inner, nil, false, defaultWindowSize, 20*time.Millisecond, 2, bigMaxMsg)
+	t.Cleanup(func() { s.Close() })
+
+	mc := newMuxConn(1, s, "test")
+	s.mu.Lock()
+	s.conns[1] = mc
+	s.mu.Unlock()
+
+	// Write exactly bigMFP bytes — must arrive as a single fragment, not two.
+	data := make([]byte, bigMFP)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	go func() { mc.Write(data) }()
+
+	select {
+	case pkt := <-remote.readCh:
+		decoded, err := decodePacket(pkt)
+		require.NoError(t, err)
+		require.Equal(t, bigMFP, len(decoded.payload), "expected single fragment of bigMFP bytes")
+		isLast, partIdx := decodeDataByte(decoded.typeByte)
+		require.True(t, isLast, "single fragment must be the last part")
+		require.Equal(t, 0, partIdx)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("no fragment received")
+	}
+}
+
+// TestMuxSession_MaxMsgDefault verifies that the default (LoRa) maxMsg is preserved
+// when sessions are created via the public constructors.
+func TestMuxSession_MaxMsgDefault(t *testing.T) {
+	client, _ := newTestMuxPair(t)
+	require.Equal(t, MaxReticulumMessage, client.maxMsg)
+	require.Equal(t, maxFragPayload, client.maxFragPayload)
 }

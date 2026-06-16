@@ -13,12 +13,21 @@ import (
 )
 
 const (
-	// MaxReticulumMessage is the maximum plaintext bytes for a single data_packet call.
-	// Derived from PACKET_MDU (464) minus Fernet overhead (IV 16 + HMAC 32 + AES padding 16).
-	// Matches rns-core LXMF_MAX_PAYLOAD. Larger payloads use the Resource protocol instead.
-	MaxReticulumMessage = 400
+	// MaxReticulumMessage is the maximum total mux-packet size (header + payload) that
+	// is transmitted as a single Reticulum data_packet.  It must fit after Fernet
+	// encryption within the narrowest interface MTU in the path.
+	//
+	// The LoRa/RNode serial link MTU is 220 bytes.  A data_packet's on-wire size is:
+	//   HEADER_MAXSIZE(35) + IFAC_MIN_SIZE(1) + IV(16) + ciphertext + HMAC(32)
+	// where ciphertext = ceil(plaintext/16)*16.  Solving for the largest plaintext
+	// that still fits in 220 bytes (using worst-case AES padding of 16):
+	//   220 − 35 − 1 − 16 − 32 − 16 = 120 bytes.
+	//
+	// This is the same formula as rns-core LXMF_MAX_PAYLOAD = 400 for MTU=500 (TCP).
+	// Larger mux packets are sent via the Reticulum Resource protocol instead.
+	MaxReticulumMessage = 120
 	muxHeaderSize       = 3
-	maxFragPayload      = MaxReticulumMessage - muxHeaderSize // 397
+	maxFragPayload      = MaxReticulumMessage - muxHeaderSize // 117
 
 	// Control packet type bytes (high bit set).
 	TypeAuthCtrl     byte = 0x80 // auth exchange message
@@ -96,14 +105,14 @@ func decodePacket(b []byte) (muxPacket, error) {
 	return p, nil
 }
 
-// fragment slices data into chunks of at most maxFragPayload bytes.
-func fragment(data []byte) [][]byte {
+// fragmentWith slices data into chunks of at most mfp bytes.
+func fragmentWith(data []byte, mfp int) [][]byte {
 	if len(data) == 0 {
 		return [][]byte{{}}
 	}
 	var parts [][]byte
 	for len(data) > 0 {
-		size := maxFragPayload
+		size := mfp
 		if size > len(data) {
 			size = len(data)
 		}
@@ -111,6 +120,14 @@ func fragment(data []byte) [][]byte {
 		data = data[size:]
 	}
 	return parts
+}
+
+// fragment slices data using the package-level LoRa default maxFragPayload.
+func fragment(data []byte) [][]byte { return fragmentWith(data, maxFragPayload) }
+
+// fragmentData slices data using this session's maxFragPayload.
+func (s *muxSession) fragmentData(data []byte) [][]byte {
+	return fragmentWith(data, s.maxFragPayload)
 }
 
 // fragBuffer accumulates fragments for one logical message.
@@ -244,6 +261,11 @@ type muxSession struct {
 	logger       log.ContextLogger
 	incomingCh   chan *muxConn // non-nil on server side
 
+	// maxMsg is the max total mux-packet size (header + payload) for this session.
+	// Derived from the link's packet_mdu minus Fernet overhead; varies per interface type.
+	maxMsg        int
+	maxFragPayload int // maxMsg - muxHeaderSize
+
 	windowSize    int
 	windowSem     chan struct{} // semaphore: len = concurrent-writes-in-progress; cap = windowSize
 	inFlight      sync.Map      // fragKey → *inFlightEntry (used for retransmit on RF links)
@@ -259,6 +281,8 @@ type muxSession struct {
 }
 
 // newMuxSession is the internal constructor used by both public constructors and tests.
+// maxMsg is the maximum total mux-packet size (header + payload) for this session;
+// pass MaxReticulumMessage for the LoRa default.
 func newMuxSession(
 	inner net.Conn,
 	logger log.ContextLogger,
@@ -266,18 +290,24 @@ func newMuxSession(
 	windowSize int,
 	retryInterval time.Duration,
 	maxRetries int,
+	maxMsg int,
 ) *muxSession {
+	if maxMsg <= muxHeaderSize {
+		maxMsg = MaxReticulumMessage
+	}
 	s := &muxSession{
-		inner:         inner,
-		conns:         make(map[uint16]*muxConn),
-		logger:        logger,
-		done:          make(chan struct{}),
-		windowSize:    windowSize,
-		windowSem:     make(chan struct{}, windowSize),
-		sendQ:         newSendQueue(4096),
-		retryInterval: retryInterval,
-		maxRetries:    maxRetries,
-		fragTimeout:   defaultFragTimeout,
+		inner:          inner,
+		conns:          make(map[uint16]*muxConn),
+		logger:         logger,
+		done:           make(chan struct{}),
+		maxMsg:         maxMsg,
+		maxFragPayload: maxMsg - muxHeaderSize,
+		windowSize:     windowSize,
+		windowSem:      make(chan struct{}, windowSize),
+		sendQ:          newSendQueue(4096),
+		retryInterval:  retryInterval,
+		maxRetries:     maxRetries,
+		fragTimeout:    defaultFragTimeout,
 	}
 	if isServer {
 		s.incomingCh = make(chan *muxConn, 1024)
@@ -288,12 +318,12 @@ func newMuxSession(
 	return s
 }
 
-func newMuxSessionClient(inner net.Conn, logger log.ContextLogger) *muxSession {
-	return newMuxSession(inner, logger, false, defaultWindowSize, defaultRetryInterval, defaultMaxRetries)
+func newMuxSessionClient(inner net.Conn, logger log.ContextLogger, maxMsg int) *muxSession {
+	return newMuxSession(inner, logger, false, defaultWindowSize, defaultRetryInterval, defaultMaxRetries, maxMsg)
 }
 
-func newMuxSessionServer(inner net.Conn, logger log.ContextLogger) *muxSession {
-	return newMuxSession(inner, logger, true, defaultWindowSize, defaultRetryInterval, defaultMaxRetries)
+func newMuxSessionServer(inner net.Conn, logger log.ContextLogger, maxMsg int) *muxSession {
+	return newMuxSession(inner, logger, true, defaultWindowSize, defaultRetryInterval, defaultMaxRetries, maxMsg)
 }
 
 // isClosed reports whether this session has been shut down.
@@ -341,10 +371,10 @@ func (s *muxSession) writeCtrl(typ byte, id uint16, payload []byte) error {
 // so that a concurrent Close() cannot send TypeCloseConn before all fragments
 // have been transmitted.
 func (s *muxSession) writeData(id uint16, data []byte) error {
-	if len(data) > maxFragPayload*64 {
+	if len(data) > s.maxFragPayload*64 {
 		return s.writeCtrl(TypeLargeData, id, data)
 	}
-	parts := fragment(data)
+	parts := s.fragmentData(data)
 	n := len(parts)
 	s.innerWriteMu.Lock()
 	defer s.innerWriteMu.Unlock()

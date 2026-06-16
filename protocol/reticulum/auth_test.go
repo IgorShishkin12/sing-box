@@ -1,12 +1,15 @@
 package reticulum
 
 import (
+	"errors"
 	"io"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
 )
+
+var errAuthTimeout = errors.New("auth timeout")
 
 // chanAuthIO implements AuthIO using a channel pair; no network needed.
 type chanAuthIO struct {
@@ -23,6 +26,18 @@ func (c *chanAuthIO) ReadMsg() (byte, []byte, error) {
 		return 0, nil, io.EOF
 	}
 	return msg[0], msg[1:], nil
+}
+
+func (c *chanAuthIO) ReadMsgDeadline(deadline time.Time) (byte, []byte, error) {
+	select {
+	case msg, ok := <-c.in:
+		if !ok || len(msg) == 0 {
+			return 0, nil, io.EOF
+		}
+		return msg[0], msg[1:], nil
+	case <-time.After(time.Until(deadline)):
+		return 0, nil, errAuthTimeout
+	}
 }
 
 func (c *chanAuthIO) WriteMsg(typeByte byte, payload []byte) error {
@@ -213,6 +228,11 @@ func (s *selfServingAuthIO) ReadMsg() (byte, []byte, error) {
 	return TypeResponseAuth, macBound(s.password, s.peerID, s.capturedSalt), nil
 }
 
+func (s *selfServingAuthIO) ReadMsgDeadline(_ time.Time) (byte, []byte, error) {
+	// selfServingAuthIO always answers immediately; ignore the deadline.
+	return s.ReadMsg()
+}
+
 func TestAuthWithRetry_NoneFailsFast(t *testing.T) {
 	// RetryNone with a peer that returns wrong MAC — error returned, sleep never called.
 	mock := &selfServingAuthIO{password: "pw", peerID: "id-b", failFor: 1}
@@ -287,6 +307,16 @@ func (o *orderRecordingIO) ReadMsg() (byte, []byte, error) {
 	return typB, data, err
 }
 
+func (o *orderRecordingIO) ReadMsgDeadline(deadline time.Time) (byte, []byte, error) {
+	typB, data, err := o.chanAuthIO.ReadMsgDeadline(deadline)
+	o.mu.Lock()
+	if err == nil && typB == TypeRequestAuth {
+		o.ops = append(o.ops, "R1")
+	}
+	o.mu.Unlock()
+	return typB, data, err
+}
+
 // TestAuth_WriteBeforeRead verifies that WriteMsg is always called before ReadMsg
 // in each round. This is the key invariant that prevents false auth timeouts on
 // high-latency links: the idle timer in ReadMsg starts only after our own
@@ -326,6 +356,10 @@ func (s *slowWriteIO) WriteMsg(typeByte byte, payload []byte) error {
 	return s.chanAuthIO.WriteMsg(typeByte, payload)
 }
 
+func (s *slowWriteIO) ReadMsgDeadline(deadline time.Time) (byte, []byte, error) {
+	return s.chanAuthIO.ReadMsgDeadline(deadline)
+}
+
 // TestAuth_SlowWriteNoTimeout verifies that a slow WriteMsg does not cause a
 // false auth timeout. Previously, the ReadMsg timer started before WriteMsg
 // completed, causing timeouts on LoRa links where TX takes several seconds.
@@ -341,5 +375,108 @@ func TestAuth_SlowWriteNoTimeout(t *testing.T) {
 		if err := <-errs; err != nil {
 			t.Errorf("auth failed with slow write (delay=%v): %v", writeDelay, err)
 		}
+	}
+}
+
+// retransmitMockIO simulates a peer that doesn't respond to Round 1 for the
+// first N ReadMsgDeadline calls (returns errAuthTimeout), then succeeds.
+// Round 2 ReadMsg always returns the correct MAC immediately.
+type retransmitMockIO struct {
+	mu           sync.Mutex
+	writeCalls   int        // how many times WriteMsg(TypeRequestAuth) was called
+	deadlineCalls int       // how many times ReadMsgDeadline was called
+	failFor      int        // number of ReadMsgDeadline calls that return timeout
+	capturedSalt []byte
+	password     string
+	peerID       string
+}
+
+func (r *retransmitMockIO) WriteMsg(typeByte byte, payload []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if typeByte == TypeRequestAuth {
+		r.writeCalls++
+		r.capturedSalt = append([]byte{}, payload...)
+	}
+	return nil
+}
+
+func (r *retransmitMockIO) ReadMsgDeadline(_ time.Time) (byte, []byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deadlineCalls++
+	if r.deadlineCalls <= r.failFor {
+		return 0, nil, errAuthTimeout
+	}
+	return TypeRequestAuth, make([]byte, 32), nil
+}
+
+func (r *retransmitMockIO) ReadMsg() (byte, []byte, error) {
+	r.mu.Lock()
+	salt := append([]byte{}, r.capturedSalt...)
+	r.mu.Unlock()
+	return TypeResponseAuth, macBound(r.password, r.peerID, salt), nil
+}
+
+// TestAuth_Round1Retransmit verifies that authAttempt retransmits TypeRequestAuth
+// when ReadMsgDeadline returns timeout, and succeeds once the peer responds.
+func TestAuth_Round1Retransmit(t *testing.T) {
+	mock := &retransmitMockIO{password: "pw", peerID: "id-peer", failFor: 2}
+	if err := authAttempt(mock, "pw", "id-self", "id-peer", make([]byte, 32)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mock.mu.Lock()
+	writes := mock.writeCalls
+	deadlines := mock.deadlineCalls
+	mock.mu.Unlock()
+	// 2 timeouts + 1 success = 3 ReadMsgDeadline calls, 3 WriteMsg(Round1) calls.
+	if writes != 3 {
+		t.Errorf("WriteMsg(TypeRequestAuth) called %d times, want 3", writes)
+	}
+	if deadlines != 3 {
+		t.Errorf("ReadMsgDeadline called %d times, want 3", deadlines)
+	}
+}
+
+// staleRound1MockIO simulates a peer whose Round 2 ReadMsg returns a stale
+// TypeRequestAuth before the real TypeResponseAuth.
+type staleRound1MockIO struct {
+	readCount    int
+	capturedSalt []byte
+	password     string
+	peerID       string
+}
+
+func (s *staleRound1MockIO) WriteMsg(typeByte byte, payload []byte) error {
+	if typeByte == TypeRequestAuth {
+		s.capturedSalt = append([]byte{}, payload...)
+	}
+	return nil
+}
+
+func (s *staleRound1MockIO) ReadMsgDeadline(_ time.Time) (byte, []byte, error) {
+	// Round 1 always succeeds immediately.
+	return TypeRequestAuth, make([]byte, 32), nil
+}
+
+func (s *staleRound1MockIO) ReadMsg() (byte, []byte, error) {
+	s.readCount++
+	if s.readCount == 1 {
+		// First Round 2 read: return a stale TypeRequestAuth retransmit.
+		return TypeRequestAuth, make([]byte, 32), nil
+	}
+	// Second call: real Round 2 response.
+	return TypeResponseAuth, macBound(s.password, s.peerID, s.capturedSalt), nil
+}
+
+// TestAuth_Round2_IgnoresStaleRound1 verifies that a stale TypeRequestAuth
+// received during Round 2 is skipped and auth still succeeds.
+func TestAuth_Round2_IgnoresStaleRound1(t *testing.T) {
+	mock := &staleRound1MockIO{password: "pw", peerID: "id-peer"}
+	if err := authAttempt(mock, "pw", "id-self", "id-peer", make([]byte, 32)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.readCount != 2 {
+		t.Errorf("ReadMsg called %d times, want 2 (1 stale + 1 real)", mock.readCount)
 	}
 }

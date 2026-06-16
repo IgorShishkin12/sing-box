@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,8 +22,21 @@ type packetReader interface {
 // so either side can detect and reject messages that arrive out of sequence.
 type AuthIO interface {
 	ReadMsg() (typeByte byte, payload []byte, err error)
+	// ReadMsgDeadline is like ReadMsg but times out at the given absolute deadline
+	// instead of using authTimeout/authInactivityTimeout. Used by authAttempt for
+	// per-retransmit Round 1 windows; Round 2 still uses ReadMsg.
+	ReadMsgDeadline(deadline time.Time) (typeByte byte, payload []byte, err error)
 	WriteMsg(typeByte byte, payload []byte) error
 }
+
+// authInactivityTimeout is the max idle time ReadMsg waits for the peer's NEXT auth
+// message after we have already received at least one correct response on this
+// connection. Once the peer has proved it is alive, a shorter window catches
+// silent failures faster — e.g. a half-open TCP connection or a peer that died
+// between auth rounds. On congested LoRa channels each packet can take ~5–10 s to
+// deliver; 20 s leaves a comfortable margin while still being much shorter than
+// the 30 s global authTimeout used when the peer has never responded.
+const authInactivityTimeout = 20 * time.Second
 
 // framedConn wraps a message-boundary net.Conn and demultiplexes by type byte.
 //
@@ -42,6 +56,14 @@ type framedConn struct {
 	done     chan struct{} // closed by Close
 	doneOnce sync.Once
 	readBuf  []byte // leftover bytes from last dataCh receive
+
+	// lastCtrlAt records when the readLoop last routed an auth message to ctrlCh
+	// (unix nanoseconds; 0 = never). Used by ReadMsg to apply a tighter inactivity
+	// deadline once the peer has demonstrated it is alive.
+	lastCtrlAt atomic.Int64
+
+	// inactivityTimeout overrides authInactivityTimeout when non-zero. Set in tests.
+	inactivityTimeout time.Duration
 
 	localAddr  net.Addr
 	remoteAddr net.Addr
@@ -74,6 +96,7 @@ func (fc *framedConn) readLoop() {
 
 	route := func(msg []byte) bool {
 		if msg[0] == TypeRequestAuth || msg[0] == TypeResponseAuth {
+			fc.lastCtrlAt.Store(time.Now().UnixNano())
 			select {
 			case fc.ctrlCh <- msg:
 			case <-fc.done:
@@ -193,8 +216,26 @@ func (fc *framedConn) Write(b []byte) (int, error) {
 }
 
 // ReadMsg reads one auth control message. Returns the type byte (TypeRequestAuth or
-// TypeResponseAuth) and payload. Blocks with authTimeout.
+// TypeResponseAuth) and payload.
+//
+// Two deadlines apply:
+//   - Global: authTimeout from now (used whenever the peer has never yet responded).
+//   - Inactivity: authInactivityTimeout from when the peer last sent a correct auth
+//     message. Once the peer has proved it is alive, a tighter window catches silent
+//     failures faster without impacting the first-contact case.
+//
+// The effective deadline is whichever is sooner.
 func (fc *framedConn) ReadMsg() (byte, []byte, error) {
+	inactTimeout := fc.inactivityTimeout
+	if inactTimeout == 0 {
+		inactTimeout = authInactivityTimeout
+	}
+	deadline := time.Now().Add(authTimeout)
+	if lastNano := fc.lastCtrlAt.Load(); lastNano != 0 {
+		if inact := time.Unix(0, lastNano).Add(inactTimeout); inact.Before(deadline) {
+			deadline = inact
+		}
+	}
 	select {
 	case msg, ok := <-fc.ctrlCh:
 		if !ok {
@@ -203,7 +244,24 @@ func (fc *framedConn) ReadMsg() (byte, []byte, error) {
 		return msg[0], msg[1:], nil
 	case <-fc.done:
 		return 0, nil, io.ErrClosedPipe
-	case <-time.After(authTimeout):
+	case <-time.After(time.Until(deadline)):
+		return 0, nil, fmt.Errorf("auth timeout")
+	}
+}
+
+// ReadMsgDeadline is like ReadMsg but uses an absolute deadline instead of
+// authTimeout/authInactivityTimeout. Intended for Round 1 retransmit windows
+// where the caller supplies a short per-attempt deadline.
+func (fc *framedConn) ReadMsgDeadline(deadline time.Time) (byte, []byte, error) {
+	select {
+	case msg, ok := <-fc.ctrlCh:
+		if !ok {
+			return 0, nil, io.EOF
+		}
+		return msg[0], msg[1:], nil
+	case <-fc.done:
+		return 0, nil, io.ErrClosedPipe
+	case <-time.After(time.Until(deadline)):
 		return 0, nil, fmt.Errorf("auth timeout")
 	}
 }

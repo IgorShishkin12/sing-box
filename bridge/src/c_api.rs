@@ -459,6 +459,29 @@ pub extern "C" fn reticulum_get_conn_identified_peer(conn_handle: u64) -> *mut c
     alloc_c_string(result)
 }
 
+/// Get the max plaintext bytes per data_packet for this connection's link.
+/// Computed as link.packet_mdu() - FERNET_OVERHEAD_SIZE - FERNET_MAX_PADDING_SIZE.
+/// Returns -1 if the connection is not a link or not found.
+#[no_mangle]
+pub extern "C" fn reticulum_get_conn_max_payload(conn_handle: u64) -> i32 {
+    use reticulum_rs::transport::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
+    let store = global_store();
+    runtime::block_on(async move {
+        let conn = match store.get_connection(conn_handle).await {
+            Some(c) => c,
+            None => return -1,
+        };
+        let link = match conn.link() {
+            Some(l) => l,
+            None => return -1,
+        };
+        let guard = link.lock().await;
+        guard
+            .packet_mdu()
+            .saturating_sub(FERNET_OVERHEAD_SIZE + FERNET_MAX_PADDING_SIZE) as i32
+    })
+}
+
 /// Get the local transport identity hash. Caller must free with reticulum_free.
 #[no_mangle]
 pub extern "C" fn reticulum_get_transport_hash() -> *mut c_char {

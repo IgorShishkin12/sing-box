@@ -284,6 +284,60 @@ func TestFramedConn_ReadPacketPreservesLargeMessage(t *testing.T) {
 	require.Equal(t, large, got, "ReadPacket must return the full message untruncated")
 }
 
+// TestReadMsg_InactivityTimeout verifies that after one successful ReadMsg, subsequent
+// ReadMsg calls fail fast (within authInactivityTimeout) when the peer goes silent,
+// rather than waiting the full authTimeout.
+func TestReadMsg_InactivityTimeout(t *testing.T) {
+	const fastInact = 50 * time.Millisecond
+
+	peerConn, myConn := newChanConnPair()
+	fc := newFramedConn(myConn)
+	fc.inactivityTimeout = fastInact
+	defer fc.Close()
+
+	// Send one valid auth message so lastCtrlAt is set.
+	go func() {
+		peerConn.Write(append([]byte{TypeRequestAuth}, make([]byte, 32)...))
+	}()
+	_, _, err := fc.ReadMsg()
+	require.NoError(t, err, "first ReadMsg should succeed")
+
+	// Now call ReadMsg again with no peer activity. It should time out within
+	// the injected fastInact window, not the 30 s global authTimeout.
+	start := time.Now()
+	_, _, err = fc.ReadMsg()
+	elapsed := time.Since(start)
+	require.Error(t, err, "second ReadMsg should time out")
+	require.Less(t, elapsed, 5*fastInact,
+		"inactivity timeout should fire well before global authTimeout")
+}
+
+// TestReadMsg_FirstCallUsesGlobal verifies that the first ReadMsg (no prior peer
+// activity) uses the global authTimeout rather than the inactivity timeout.
+// We can't easily wait 30 s in a test; instead we verify that closing the
+// framedConn unblocks ReadMsg — i.e. it's not stuck in a short timer loop.
+func TestReadMsg_FirstCallUsesGlobal(t *testing.T) {
+	_, myConn := newChanConnPair()
+	fc := newFramedConn(myConn)
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := fc.ReadMsg()
+		done <- err
+	}()
+
+	// Peer sends nothing; close after a short pause — ReadMsg must unblock on close.
+	time.Sleep(10 * time.Millisecond)
+	fc.Close()
+
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("ReadMsg did not unblock after Close")
+	}
+}
+
 // TestFramedConn_ReadPacketBlocksUntilGate verifies ReadPacket respects the gate.
 func TestFramedConn_ReadPacketBlocksUntilGate(t *testing.T) {
 	peerConn, myConn := newChanConnPair()
@@ -312,5 +366,26 @@ func TestFramedConn_ReadPacketBlocksUntilGate(t *testing.T) {
 		require.Equal(t, msg, got)
 	case <-time.After(time.Second):
 		t.Fatal("ReadPacket did not return after OpenGate")
+	}
+}
+
+// TestReadMsgDeadline_Timeout verifies that ReadMsgDeadline returns an error
+// when no auth message arrives before the deadline.
+func TestReadMsgDeadline_Timeout(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	fc := newFramedConn(a)
+	defer fc.Close()
+
+	start := time.Now()
+	_, _, err := fc.ReadMsgDeadline(time.Now().Add(60 * time.Millisecond))
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error from ReadMsgDeadline, got nil")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("ReadMsgDeadline took too long: %v", elapsed)
 	}
 }

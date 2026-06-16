@@ -330,6 +330,20 @@ func BridgeConnPeerHash(connHandle uint64) (string, error) {
 	return C.GoString(hashStr), nil
 }
 
+// BridgeConnMaxPayload returns the max plaintext bytes per data_packet for the link
+// backing connHandle. Falls back to MaxReticulumMessage if the link is unavailable.
+func BridgeConnMaxPayload(connHandle uint64) int {
+	v := int(C.reticulum_get_conn_max_payload(C.uint64_t(connHandle)))
+	if v <= 0 {
+		if bridgeLoggerVal != nil {
+			bridgeLoggerVal.Warn("reticulum_get_conn_max_payload: handle=", connHandle,
+				" returned ", v, ", falling back to MaxReticulumMessage=", MaxReticulumMessage)
+		}
+		return MaxReticulumMessage
+	}
+	return v
+}
+
 // BridgeTransportHash returns the local transport identity address hash.
 func BridgeTransportHash() (string, error) {
 	hashStr := C.reticulum_get_transport_hash()

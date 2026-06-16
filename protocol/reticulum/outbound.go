@@ -170,7 +170,7 @@ func (h *Outbound) getOrCreateSession(ctx context.Context, destHash string) (*mu
 	}
 	fc.OpenGate()
 
-	h.session = newMuxSessionClient(fc, h.logger)
+	h.session = newMuxSessionClient(fc, h.logger, BridgeConnMaxPayload(handle))
 	h.logger.InfoContext(ctx, "mux session established to ", destHash)
 	return h.session, nil
 }
