@@ -642,6 +642,7 @@ func TestFragAckReleasesWindow(t *testing.T) {
 // TestRetransmitOnTimeout verifies that a fragment with no TypeFragAck is retransmitted
 // after retryInterval, proving the inFlight entry stays until ACKed.
 func TestRetransmitOnTimeout(t *testing.T) {
+	t.Skip("checkRetransmits is commented out; Reticulum link layer handles retransmits via LinkProof")
 	s, remote := newManualSession(t, 8)
 
 	mc := newMuxConn(1, s, "test")
@@ -670,6 +671,7 @@ func TestRetransmitOnTimeout(t *testing.T) {
 // TestRetransmitGivesUp verifies that a connection is closed after maxRetries failed
 // retransmits with no TypeFragAck.
 func TestRetransmitGivesUp(t *testing.T) {
+	t.Skip("checkRetransmits is commented out; Reticulum link layer handles retransmits via LinkProof")
 	s, remote := newManualSession(t, 8)
 
 	mc := newMuxConn(1, s, "test")
@@ -713,6 +715,7 @@ func TestRetransmitGivesUp(t *testing.T) {
 // exhausts maxRetries (no ACKs), so the estimate reflects the actual link latency
 // even when the peer is completely silent.
 func TestRetransmitGivesUp_UpdatesRttEst(t *testing.T) {
+	t.Skip("checkRetransmits is commented out; Reticulum link layer handles retransmits via LinkProof")
 	s, remote := newManualSession(t, 8)
 	initRtt := time.Duration(s.rttEst.Value())
 
@@ -835,4 +838,49 @@ func TestMuxSession_MaxMsgDefault(t *testing.T) {
 	client, _ := newTestMuxPair(t)
 	require.Equal(t, MaxReticulumMessage, client.maxMsg)
 	require.Equal(t, maxFragPayload, client.maxFragPayload)
+}
+
+// TestWriteData_MultiFragNoPacingOnContinuation verifies that continuation
+// fragments (part index > 0) of a multi-part message are never held back by
+// bandwidth pacing. Without the fix a very low bwEst would stall the second
+// fragment for minutes even though the first part was ACKed immediately.
+func TestWriteData_MultiFragNoPacingOnContinuation(t *testing.T) {
+	client, server := newTestMuxPair(t)
+
+	// Force an absurdly low bandwidth estimate (1 B/s) so that pacing would
+	// delay a ~117-byte continuation fragment by ~117 seconds — far beyond the
+	// test timeout — if continuation fragments were incorrectly paced.
+	client.bwEst.Store(newEWMA(0.125, 1, 1))
+
+	mc, err := client.OpenConn("test:1")
+	require.NoError(t, err)
+	defer mc.Close()
+
+	sc := <-server.incomingCh
+	defer sc.Close()
+
+	// Exactly maxFragPayload+1 bytes forces two fragments.
+	data := make([]byte, maxFragPayload+1)
+	for i := range data {
+		data[i] = byte(i)
+	}
+
+	go func() {
+		_, _ = mc.Write(data)
+	}()
+
+	got := make([]byte, len(data))
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := io.ReadFull(sc, got)
+		readDone <- err
+	}()
+
+	select {
+	case err := <-readDone:
+		require.NoError(t, err)
+		require.Equal(t, data, got)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out: continuation fragment was stalled by bandwidth pacing")
+	}
 }

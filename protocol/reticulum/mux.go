@@ -445,7 +445,14 @@ func (s *muxSession) writeData(id uint16, data []byte) error {
 	for i, part := range parts {
 		pkt := muxPacket{typeByte: encodeDataByte(n, i), connID: id, payload: part}
 		key := fragKey{connID: id, partIndex: uint8(i)}
-		f := &queuedFrag{encoded: encodePacket(pkt), key: key}
+		// Continuation fragments (i > 0) are marked prioInProgress so that doWrite
+		// skips bandwidth pacing for them. All parts still go into newMsg to preserve
+		// send order; prio is only used for the pacing decision in doWrite.
+		prio := prioNew
+		if i > 0 {
+			prio = prioInProgress
+		}
+		f := &queuedFrag{encoded: encodePacket(pkt), key: key, prio: prio}
 		select {
 		case s.sendQ.newMsg <- f:
 		case <-s.done:
@@ -486,7 +493,10 @@ func (s *muxSession) doWrite(f *queuedFrag) {
 
 	// Pace sends to the estimated link throughput so the LoRa channel is not
 	// saturated with our traffic, leaving airtime for ACKs and the return path.
-	if bw := s.bwEst.Load(); bw != nil {
+	// Continuation fragments (prioInProgress) are never paced: all parts of a
+	// multi-fragment message must arrive for reassembly, so we cannot afford to
+	// hold them back longer than the window/ACK cycle already does.
+	if bw := s.bwEst.Load(); bw != nil && f.prio != prioInProgress {
 		bwVal := bw.Value()
 		if bwVal > 0 {
 			fragBytes := int64(len(f.encoded))
@@ -509,14 +519,18 @@ func (s *muxSession) doWrite(f *queuedFrag) {
 	_, err := s.inner.Write(f.encoded)
 	s.innerWriteMu.Unlock()
 	if err != nil {
-		// Write failure means the underlying link is dead — Reticulum already
-		// timed out on its side.  Retrying via the retransmit loop is pointless;
-		// close the session now so callers fail fast instead of waiting maxRetries
-		// × rttEst for each in-flight fragment to give up individually.
+		// Reticulum returned an error: it definitively failed to deliver this
+		// fragment (timed out on its side, or link error).  Free the window slot
+		// and inFlight entry immediately — no ACK will ever arrive.
 		if s.logger != nil {
-			s.logger.Warn("mux: write failed, closing session: ", err)
+			s.logger.Warn("mux: conn=", f.key.connID, " part=", f.key.partIndex, " write failed (fragment lost): ", err)
 		}
-		s.closeAll()
+		s.inFlight.Delete(f.key)
+		select {
+		case <-s.windowSem:
+		default:
+		}
+		s.logStats("fragment lost (write error)")
 		return
 	}
 	if !f.isRetransmit {
@@ -766,61 +780,65 @@ func fragRetransmitDelay(retries int, rttEst time.Duration) time.Duration {
 
 // checkRetransmits re-enqueues fragments whose retryAt has elapsed.
 // Fragments exceeding maxRetries cause their connection to be closed.
+//
+// NOTE: commented out — Reticulum sends a LinkProof for every data_packet,
+// so the link layer already handles delivery confirmation and retransmit.
+// Re-enable if we switch away from data_packet or need app-layer guarantees.
 func (s *muxSession) checkRetransmits() {
-	now := time.Now()
-	var toClose []uint16
-	s.inFlight.Range(func(k, v any) bool {
-		entry := v.(*inFlightEntry)
-		if now.Before(entry.retryAt) {
-			return true
-		}
-		entry.retries++
-		if entry.retries > s.maxRetries {
-			toClose = append(toClose, entry.key.connID)
-			s.inFlight.Delete(k)
-			// Treat total wait (first send → give-up) as an RTT sample.
-			s.rttEst.Update(int64(time.Since(entry.sentAt)))
-			// Give-up is a strong congestion signal; EWMA toward 0.
-			if bw := s.bwEst.Load(); bw != nil {
-				bw.Update(0)
-			}
-			s.logStats("packet lost (all retries exhausted)")
-			// Release the window slot this fragment was holding.
-			select {
-			case <-s.windowSem:
-			default:
-			}
-			return true
-		}
-		// Timeout: nudge rttEst up.
-		s.rttEst.Update(2 * s.rttEst.Value())
-		// Retransmit timeout is a mild congestion signal; EWMA toward 0
-		if bw := s.bwEst.Load(); bw != nil {
-			bw.Update(0)
-		}
-		// Exponential backoff: each failure doubles the wait.
-		rttEst := time.Duration(s.rttEst.Value())
-		delay := fragRetransmitDelay(entry.retries, rttEst)
-		entry.retryAt = now.Add(delay)
-		s.logStats("retransmit queued (no ACK)")
-		select {
-		case s.sendQ.retransmit <- &queuedFrag{
-			encoded:      entry.encoded,
-			key:          entry.key,
-			isRetransmit: true,
-			prio:         prioRetransmit,
-		}:
-		default:
-			// Retransmit channel full; will retry on next tick.
-		}
-		return true
-	})
-	for _, id := range toClose {
-		if s.logger != nil {
-			s.logger.Warn("mux: conn ", id, " closed after ", s.maxRetries, " retransmit failures")
-		}
-		s.closeConnRemote(id)
-	}
+	// now := time.Now()
+	// var toClose []uint16
+	// s.inFlight.Range(func(k, v any) bool {
+	// 	entry := v.(*inFlightEntry)
+	// 	if now.Before(entry.retryAt) {
+	// 		return true
+	// 	}
+	// 	entry.retries++
+	// 	if entry.retries > s.maxRetries {
+	// 		toClose = append(toClose, entry.key.connID)
+	// 		s.inFlight.Delete(k)
+	// 		// Treat total wait (first send → give-up) as an RTT sample.
+	// 		s.rttEst.Update(int64(time.Since(entry.sentAt)))
+	// 		// Give-up is a strong congestion signal; EWMA toward 0.
+	// 		if bw := s.bwEst.Load(); bw != nil {
+	// 			bw.Update(0)
+	// 		}
+	// 		s.logStats("packet lost (all retries exhausted)")
+	// 		// Release the window slot this fragment was holding.
+	// 		select {
+	// 		case <-s.windowSem:
+	// 		default:
+	// 		}
+	// 		return true
+	// 	}
+	// 	// Timeout: nudge rttEst up.
+	// 	s.rttEst.Update(2 * s.rttEst.Value())
+	// 	// Retransmit timeout is a mild congestion signal; EWMA toward 0.
+	// 	if bw := s.bwEst.Load(); bw != nil {
+	// 		bw.Update(0)
+	// 	}
+	// 	// Exponential backoff: each failure doubles the wait.
+	// 	rttEst := time.Duration(s.rttEst.Value())
+	// 	delay := fragRetransmitDelay(entry.retries, rttEst)
+	// 	entry.retryAt = now.Add(delay)
+	// 	s.logStats("retransmit queued (no ACK)")
+	// 	select {
+	// 	case s.sendQ.retransmit <- &queuedFrag{
+	// 		encoded:      entry.encoded,
+	// 		key:          entry.key,
+	// 		isRetransmit: true,
+	// 		prio:         prioRetransmit,
+	// 	}:
+	// 	default:
+	// 		// Retransmit channel full; will retry on next tick.
+	// 	}
+	// 	return true
+	// })
+	// for _, id := range toClose {
+	// 	if s.logger != nil {
+	// 		s.logger.Warn("mux: conn ", id, " closed after ", s.maxRetries, " retransmit failures")
+	// 	}
+	// 	s.closeConnRemote(id)
+	// }
 }
 
 // closeConnRemote closes a virtual conn in response to a TypeCloseConn or retransmit failure.

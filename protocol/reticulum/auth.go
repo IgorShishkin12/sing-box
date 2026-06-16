@@ -103,11 +103,14 @@ func authAttempt(rw AuthIO, password, ownID, peerID string, ownSalt []byte) erro
 	// This happens on lossy LoRa links where the peer's TypeRequestAuth was lost in
 	// transit.  We keep waiting; the peer will retry its TypeRequestAuth after its
 	// own Round 2 timeout, at which point we can complete Round 1.
+	// NOTE: timeout commented out — Reticulum handles link-level timeouts and
+	// will close the connection if the peer is unreachable; no Go-side deadline needed.
 	var typB byte
 	var data []byte
 	for {
 		var err error
-		typB, data, err = rw.ReadMsgDeadline(time.Now().Add(authTimeout))
+		// typB, data, err = rw.ReadMsgDeadline(time.Now().Add(authTimeout))
+		typB, data, err = rw.ReadMsg()
 		if err != nil {
 			return fmt.Errorf("recv round1: %w", err)
 		}

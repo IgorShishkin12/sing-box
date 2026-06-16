@@ -13,8 +13,9 @@ var errAuthTimeout = errors.New("auth timeout")
 
 // chanAuthIO implements AuthIO using a channel pair; no network needed.
 type chanAuthIO struct {
-	in  <-chan []byte
-	out chan<- []byte
+	in     <-chan []byte
+	out    chan<- []byte
+	peerIn chan []byte // raw channel that is the peer's in; close() signals EOF to peer
 }
 
 func (c *chanAuthIO) ReadMsg() (byte, []byte, error) {
@@ -48,11 +49,16 @@ func (c *chanAuthIO) WriteMsg(typeByte byte, payload []byte) error {
 	return nil
 }
 
+// Close signals EOF to the reader on the other end of this pair.
+// Simulates the peer closing the connection.
+func (c *chanAuthIO) Close() { close(c.peerIn) }
+
 // newChanAuthPair returns two paired AuthIO endpoints (a, b).
 func newChanAuthPair() (*chanAuthIO, *chanAuthIO) {
 	ch1 := make(chan []byte, 8)
 	ch2 := make(chan []byte, 8)
-	return &chanAuthIO{in: ch1, out: ch2}, &chanAuthIO{in: ch2, out: ch1}
+	// a.Close() signals EOF to b (closes b's input ch2); b.Close() signals EOF to a (closes a's input ch1).
+	return &chanAuthIO{in: ch1, out: ch2, peerIn: ch2}, &chanAuthIO{in: ch2, out: ch1, peerIn: ch1}
 }
 
 func TestAuth_Success(t *testing.T) {
@@ -123,13 +129,16 @@ func TestAuth_ShortSalt(t *testing.T) {
 }
 
 func TestAuth_WrongTypeByte(t *testing.T) {
-	// One side sends the wrong type byte in round 1.
+	// One side sends the wrong type byte in round 1 then closes, simulating
+	// Reticulum closing the connection after an unexpected message.
 	a, b := newChanAuthPair()
 	errs := make(chan error, 2)
 	go func() { errs <- Auth(a, "password", "id-a", "id-b") }()
 	go func() {
-		// Send TypeResponseAuth (0x85) instead of TypeRequestAuth (0x84).
+		// Send TypeResponseAuth (0x85) instead of TypeRequestAuth (0x84),
+		// then close so A's next ReadMsg returns EOF instead of hanging.
 		b.WriteMsg(TypeResponseAuth, make([]byte, 32)) //nolint:errcheck
+		b.Close()
 		errs <- nil
 	}()
 	var authErr error
@@ -378,66 +387,6 @@ func TestAuth_SlowWriteNoTimeout(t *testing.T) {
 	}
 }
 
-// retransmitMockIO simulates a peer that doesn't respond to Round 1 for the
-// first N ReadMsgDeadline calls (returns errAuthTimeout), then succeeds.
-// Round 2 ReadMsg always returns the correct MAC immediately.
-type retransmitMockIO struct {
-	mu           sync.Mutex
-	writeCalls   int        // how many times WriteMsg(TypeRequestAuth) was called
-	deadlineCalls int       // how many times ReadMsgDeadline was called
-	failFor      int        // number of ReadMsgDeadline calls that return timeout
-	capturedSalt []byte
-	password     string
-	peerID       string
-}
-
-func (r *retransmitMockIO) WriteMsg(typeByte byte, payload []byte) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if typeByte == TypeRequestAuth {
-		r.writeCalls++
-		r.capturedSalt = append([]byte{}, payload...)
-	}
-	return nil
-}
-
-func (r *retransmitMockIO) ReadMsgDeadline(_ time.Time) (byte, []byte, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.deadlineCalls++
-	if r.deadlineCalls <= r.failFor {
-		return 0, nil, errAuthTimeout
-	}
-	return TypeRequestAuth, make([]byte, 32), nil
-}
-
-func (r *retransmitMockIO) ReadMsg() (byte, []byte, error) {
-	r.mu.Lock()
-	salt := append([]byte{}, r.capturedSalt...)
-	r.mu.Unlock()
-	return TypeResponseAuth, macBound(r.password, r.peerID, salt), nil
-}
-
-// TestAuth_Round1Retransmit verifies that authWithRetry retransmits TypeRequestAuth
-// (by retrying authAttempt) when ReadMsgDeadline returns timeout, and succeeds once
-// the peer responds. Round 1 retransmit logic lives in authWithRetry, not authAttempt.
-func TestAuth_Round1Retransmit(t *testing.T) {
-	mock := &retransmitMockIO{password: "pw", peerID: "id-peer", failFor: 2}
-	if err := authWithRetry(mock, "pw", "id-self", "id-peer", RetryLinear, noSleep); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	mock.mu.Lock()
-	writes := mock.writeCalls
-	deadlines := mock.deadlineCalls
-	mock.mu.Unlock()
-	// 2 timeouts + 1 success = 3 ReadMsgDeadline calls, 3 WriteMsg(Round1) calls.
-	if writes != 3 {
-		t.Errorf("WriteMsg(TypeRequestAuth) called %d times, want 3", writes)
-	}
-	if deadlines != 3 {
-		t.Errorf("ReadMsgDeadline called %d times, want 3", deadlines)
-	}
-}
 
 // staleRound1MockIO simulates a peer whose Round 2 ReadMsg returns a stale
 // TypeRequestAuth before the real TypeResponseAuth.
