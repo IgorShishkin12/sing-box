@@ -418,11 +418,12 @@ func (r *retransmitMockIO) ReadMsg() (byte, []byte, error) {
 	return TypeResponseAuth, macBound(r.password, r.peerID, salt), nil
 }
 
-// TestAuth_Round1Retransmit verifies that authAttempt retransmits TypeRequestAuth
-// when ReadMsgDeadline returns timeout, and succeeds once the peer responds.
+// TestAuth_Round1Retransmit verifies that authWithRetry retransmits TypeRequestAuth
+// (by retrying authAttempt) when ReadMsgDeadline returns timeout, and succeeds once
+// the peer responds. Round 1 retransmit logic lives in authWithRetry, not authAttempt.
 func TestAuth_Round1Retransmit(t *testing.T) {
 	mock := &retransmitMockIO{password: "pw", peerID: "id-peer", failFor: 2}
-	if err := authAttempt(mock, "pw", "id-self", "id-peer", make([]byte, 32)); err != nil {
+	if err := authWithRetry(mock, "pw", "id-self", "id-peer", RetryLinear, noSleep); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	mock.mu.Lock()

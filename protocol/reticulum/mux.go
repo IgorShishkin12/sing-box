@@ -190,6 +190,7 @@ type inFlightEntry struct {
 	key     fragKey
 	retries int
 	retryAt time.Time
+	sentAt  time.Time // when first sent; used to measure RTT on ACK
 }
 
 // queuedFrag is one item in the send queue.
@@ -278,6 +279,11 @@ type muxSession struct {
 	statFragsSent    atomic.Uint64 // total fragments written to inner
 	statAcksReceived atomic.Uint64 // total TypeFragAck packets received from peer
 	statAcksSent     atomic.Uint64 // total TypeFragAck packets sent to peer
+
+	// rttEst is the EWMA round-trip-time estimate in nanoseconds (alpha=0.125).
+	// Initialised from retryInterval; updated on every TypeFragAck.
+	// Retransmit timeout = 2 × rttEst, floored at retryInterval.
+	rttEst atomic.Int64
 }
 
 // newMuxSession is the internal constructor used by both public constructors and tests.
@@ -309,6 +315,7 @@ func newMuxSession(
 		maxRetries:     maxRetries,
 		fragTimeout:    defaultFragTimeout,
 	}
+	s.rttEst.Store(int64(retryInterval))
 	if isServer {
 		s.incomingCh = make(chan *muxConn, 1024)
 	}
@@ -365,45 +372,50 @@ func (s *muxSession) writeCtrl(typ byte, id uint16, payload []byte) error {
 }
 
 // writeData sends data for virtual connection id.
-// Payloads exceeding the 64-fragment limit (~25 KB) are sent as a single
-// TypeLargeData control packet via the Reticulum Resource protocol.
-// Smaller payloads are fragmented and written synchronously under innerWriteMu
-// so that a concurrent Close() cannot send TypeCloseConn before all fragments
-// have been transmitted.
+// Payloads exceeding the 64-fragment limit are sent as TypeLargeData via the
+// Reticulum Resource protocol. Smaller payloads are fragmented and enqueued to
+// the send queue so that doWrite handles windowing and inFlight registration;
+// this enables TypeFragAck-driven flow control and retransmission on lossy links.
 func (s *muxSession) writeData(id uint16, data []byte) error {
 	if len(data) > s.maxFragPayload*64 {
 		return s.writeCtrl(TypeLargeData, id, data)
 	}
 	parts := s.fragmentData(data)
 	n := len(parts)
-	s.innerWriteMu.Lock()
-	defer s.innerWriteMu.Unlock()
 	for i, part := range parts {
 		pkt := muxPacket{typeByte: encodeDataByte(n, i), connID: id, payload: part}
-		if _, err := s.inner.Write(encodePacket(pkt)); err != nil {
-			return err
+		key := fragKey{connID: id, partIndex: uint8(i)}
+		f := &queuedFrag{encoded: encodePacket(pkt), key: key}
+		select {
+		case s.sendQ.newMsg <- f:
+		case <-s.done:
+			return io.ErrClosedPipe
 		}
 	}
 	return nil
 }
 
 // doWrite sends one queued fragment. For new (non-retransmit) fragments it acquires
-// a window slot first, blocking until one is available or the session closes.
-// The slot is released immediately after inner.Write() returns: on TCP the write
-// succeeding is sufficient; on RF the TypeFragAck path handles it instead.
+// a window slot first, blocking until one is available or the session closes, then
+// registers the fragment in inFlight. The window slot is held until the peer sends a
+// TypeFragAck (released by readLoop) or checkRetransmits gives up after maxRetries.
+// On reliable connections (TCP, net.Pipe) ACKs arrive quickly so the window is never
+// exhausted; on lossy RF links the window provides backpressure and inFlight enables
+// retransmission of lost fragments.
 func (s *muxSession) doWrite(f *queuedFrag) {
 	if !f.isRetransmit {
-		// Acquire a window slot; block until one is free or session closes.
+		// Acquire a window slot; blocks until one is free or the session closes.
 		select {
 		case s.windowSem <- struct{}{}:
 		case <-s.done:
 			return
 		}
-		// Register in in-flight map so the retransmit timer and TypeFragAck can find it.
+		now := time.Now()
 		s.inFlight.Store(f.key, &inFlightEntry{
 			encoded: f.encoded,
 			key:     f.key,
-			retryAt: time.Now().Add(s.retryInterval),
+			sentAt:  now,
+			retryAt: now.Add(2 * time.Duration(s.rttEst.Load())),
 		})
 	} else {
 		// Retransmit: skip if already ACKed (entry removed) since we enqueued it.
@@ -418,15 +430,12 @@ func (s *muxSession) doWrite(f *queuedFrag) {
 	if err != nil && s.logger != nil {
 		s.logger.Debug("mux: doWrite error: ", err)
 	}
-
-	// Release the window slot once the write is queued. TypeFragAck-based release
-	// is a no-op when the inFlight entry is already gone (returns false).
 	if !f.isRetransmit {
-		if _, ok := s.inFlight.LoadAndDelete(f.key); ok {
-			s.statFragsSent.Add(1)
-			<-s.windowSem
-		}
+		s.statFragsSent.Add(1)
 	}
+	// inFlight entry and window slot are held until the TypeFragAck handler
+	// (readLoop) calls LoadAndDelete + releases windowSem, or checkRetransmits
+	// gives up and releases both after maxRetries.
 }
 
 // removeConn removes a virtual connection from the session map.
@@ -504,11 +513,20 @@ func (s *muxSession) readLoop() {
 				delete(fragBufs, pkt.connID)
 				s.closeConnRemote(pkt.connID)
 			case TypeFragAck:
-				// Peer acknowledged one of our fragments; release that window slot.
+				// Peer acknowledged one of our fragments; measure RTT, update EWMA, release slot.
 				if len(pkt.payload) == 1 {
 					s.statAcksReceived.Add(1)
 					key := fragKey{connID: pkt.connID, partIndex: pkt.payload[0]}
-					if _, ok := s.inFlight.LoadAndDelete(key); ok {
+					if v, ok := s.inFlight.LoadAndDelete(key); ok {
+						entry := v.(*inFlightEntry)
+						rtt := time.Since(entry.sentAt)
+						prev := time.Duration(s.rttEst.Load())
+						// EWMA: α=0.125 → new = 7/8·prev + 1/8·sample
+						updated := (7*prev + rtt) / 8
+						if updated < s.retryInterval {
+							updated = s.retryInterval
+						}
+						s.rttEst.Store(int64(updated))
 						<-s.windowSem
 					}
 				}
@@ -595,11 +613,12 @@ func (s *muxSession) retransmitLoop() {
 				writing := len(s.windowSem)
 				queued := len(s.sendQ.retransmit) + len(s.sendQ.inProgress) + len(s.sendQ.newMsg)
 				s.logger.Debug(fmt.Sprintf(
-					"mux stats: writing=%d/%d queued=%d sent=%d acks_rx=%d acks_tx=%d",
+					"mux stats: writing=%d/%d queued=%d sent=%d acks_rx=%d acks_tx=%d rtt_est=%s",
 					writing, s.windowSize, queued,
 					s.statFragsSent.Load(),
 					s.statAcksReceived.Load(),
 					s.statAcksSent.Load(),
+					time.Duration(s.rttEst.Load()).Round(time.Millisecond),
 				))
 			}
 		}
@@ -628,7 +647,7 @@ func (s *muxSession) checkRetransmits() {
 			return true
 		}
 		// Update deadline before enqueuing to prevent double-enqueue on next tick.
-		entry.retryAt = now.Add(s.retryInterval)
+		entry.retryAt = now.Add(2 * time.Duration(s.rttEst.Load()))
 		select {
 		case s.sendQ.retransmit <- &queuedFrag{
 			encoded:      entry.encoded,
