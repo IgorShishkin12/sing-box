@@ -366,10 +366,14 @@ async fn spawn_interfaces(
                     RnodeBleKissConfig::default(),
                 )
                 .with_rnode_validation(lora, Duration::from_millis(1_500));
+                let iface_mgr_clone = iface_mgr.clone();
                 let addr = iface_mgr
                     .lock()
                     .await
-                    .spawn(ble, NativeRnodeBleKissInterface::spawn);
+                    .spawn(ble, |context| async move {
+                        NativeRnodeBleKissInterface::spawn(context, iface_mgr_clone).await
+                    });
+
                 log::info!(
                     "spawned RNodeBLE '{}' peripheral_id={} freq_hz={} addr={}",
                     label,
