@@ -442,7 +442,14 @@ func (s *muxSession) writeCtrl(typ byte, id uint16, payload []byte) error {
 // this enables TypeFragAck-driven flow control and retransmission on lossy links.
 func (s *muxSession) writeData(id uint16, data []byte) error {
 	if len(data) > s.maxFragPayload*64 {
-		return s.writeCtrl(TypeLargeData, id, data)
+		if s.logger != nil {
+			s.logger.Trace("mux: conn=", id, " TypeLargeData data_len=", len(data))
+		}
+		err := s.writeCtrl(TypeLargeData, id, data)
+		if err != nil && s.logger != nil {
+			s.logger.Warn("mux: conn=", id, " TypeLargeData failed data_len=", len(data), " err=", err)
+		}
+		return err
 	}
 	parts := s.fragmentData(data)
 	n := len(parts)

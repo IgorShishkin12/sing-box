@@ -924,7 +924,7 @@ dependencies = [
 [[package]]
 name = "reticulum-rs"
 version = "0.2.0"
-source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=feat%2Flink-data-delivered-event#d68a829a7b13e9a5850bbdd85cf00d5eb9efee0d"
+source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=feat%2Flink-data-delivered-event#5bd64bb16dd3962480ea965571731256b0aa562d"
 dependencies = [
  "reticulum-rs-core",
  "reticulum-rs-transport",
@@ -933,7 +933,7 @@ dependencies = [
 [[package]]
 name = "reticulum-rs-core"
 version = "0.2.0"
-source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=feat%2Flink-data-delivered-event#d68a829a7b13e9a5850bbdd85cf00d5eb9efee0d"
+source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=feat%2Flink-data-delivered-event#5bd64bb16dd3962480ea965571731256b0aa562d"
 dependencies = [
  "aes",
  "cbc",
@@ -953,7 +953,7 @@ dependencies = [
 [[package]]
 name = "reticulum-rs-transport"
 version = "0.2.0"
-source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=feat%2Flink-data-delivered-event#d68a829a7b13e9a5850bbdd85cf00d5eb9efee0d"
+source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=feat%2Flink-data-delivered-event#5bd64bb16dd3962480ea965571731256b0aa562d"
 dependencies = [
  "aes",
  "btleplug",

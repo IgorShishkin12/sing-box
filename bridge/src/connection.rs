@@ -1,13 +1,122 @@
 use reticulum_rs::transport::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
 use reticulum_rs::resource::{ResourceEvent, ResourceEventKind};
 use reticulum_rs::transport::destination::link::Link;
-use reticulum_rs::transport::hash::AddressHash;
+use reticulum_rs::transport::hash::{AddressHash, Hash};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast;
 use tokio::sync::Mutex;
 
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Wait on `resource_rx` until the outbound resource transfer `resource_hash` succeeds,
+/// fails, is cancelled, or the inactivity deadline expires.
+///
+/// Extracted from `Connection::write` so it can be unit-tested without a full transport.
+pub(crate) async fn wait_for_outbound_resource(
+    conn_id: u64,
+    resource_hash: Hash,
+    data_len: usize,
+    mut resource_rx: broadcast::Receiver<ResourceEvent>,
+) -> Result<usize, String> {
+    const INACTIVITY_SECS: u64 = 60;
+    let mut last_progress_bytes: u64 = 0;
+    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(INACTIVITY_SECS);
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                log::warn!(
+                    "resource send timed out ({}s inactivity): conn={} hash={} data_len={}",
+                    INACTIVITY_SECS, conn_id, resource_hash, data_len
+                );
+                return Err(format!(
+                    "resource inactivity timeout: conn={} hash={} data_len={}",
+                    conn_id, resource_hash, data_len
+                ));
+            }
+            result = resource_rx.recv() => {
+                match result {
+                    Ok(ResourceEvent {
+                        hash,
+                        kind: ResourceEventKind::OutboundComplete,
+                        ..
+                    }) if hash == resource_hash => {
+                        log::debug!(
+                            "resource outbound complete: conn={} hash={}",
+                            conn_id, resource_hash
+                        );
+                        return Ok(data_len);
+                    }
+                    Ok(ResourceEvent {
+                        hash,
+                        kind: ResourceEventKind::OutboundFailed,
+                        ..
+                    }) if hash == resource_hash => {
+                        log::warn!(
+                            "resource transfer failed (OutboundFailed): conn={} hash={} data_len={}",
+                            conn_id, resource_hash, data_len
+                        );
+                        return Err(format!(
+                            "resource OutboundFailed: conn={} hash={}",
+                            conn_id, resource_hash
+                        ));
+                    }
+                    Ok(ResourceEvent {
+                        hash,
+                        kind: ResourceEventKind::OutboundCancelled,
+                        ..
+                    }) if hash == resource_hash => {
+                        log::warn!(
+                            "resource transfer cancelled (OutboundCancelled): conn={} hash={} data_len={}",
+                            conn_id, resource_hash, data_len
+                        );
+                        return Err(format!(
+                            "resource OutboundCancelled: conn={} hash={}",
+                            conn_id, resource_hash
+                        ));
+                    }
+                    Ok(ResourceEvent {
+                        kind: ResourceEventKind::Progress(ref p),
+                        ..
+                    }) => {
+                        log::trace!(
+                            "resource event progress: conn={} received={} total={}",
+                            conn_id, p.received_bytes, p.total_bytes
+                        );
+                        if p.received_bytes > last_progress_bytes {
+                            last_progress_bytes = p.received_bytes;
+                            deadline = tokio::time::Instant::now()
+                                + Duration::from_secs(INACTIVITY_SECS);
+                            log::trace!(
+                                "resource inactivity deadline reset: conn={} bytes={}",
+                                conn_id, p.received_bytes
+                            );
+                        }
+                        continue;
+                    }
+                    Ok(ev) => {
+                        log::debug!(
+                            "resource event unhandled: conn={} waiting_for={} event={:?}",
+                            conn_id, resource_hash, ev
+                        );
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err("resource event channel closed".to_string());
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        log::warn!(
+                            "resource event channel lagged {} events: conn={} hash={}",
+                            n, conn_id, resource_hash
+                        );
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Connection {
@@ -124,7 +233,7 @@ impl Connection {
                 } else {
                     // Subscribe before sending so we never miss OutboundComplete
                     // even if the peer acknowledges very quickly.
-                    let mut resource_rx = {
+                    let resource_rx = {
                         let tp = crate::transport::get_transport()
                             .ok_or_else(|| "transport not initialized".to_string())?;
                         let guard = tp.lock().await;
@@ -146,78 +255,13 @@ impl Connection {
                         resource_hash,
                         data.len()
                     );
-                    // Block until the peer confirms receipt. The inactivity deadline
-                    // is reset whenever a Progress event reports more bytes received
-                    // than last time — i.e. the transport is visibly making progress.
-                    // Note: Progress fires only for inbound resources on this node,
-                    // so for a purely outbound transfer this still degrades to a
-                    // wall-clock timeout; a proper fix requires an OutboundProgress
-                    // event from the library (see open issue).
-                    const INACTIVITY_SECS: u64 = 60;
-                    let mut last_progress_bytes: u64 = 0;
-                    let mut deadline =
-                        tokio::time::Instant::now() + Duration::from_secs(INACTIVITY_SECS);
-                    loop {
-                        tokio::select! {
-                            _ = tokio::time::sleep_until(deadline) => {
-                                return Err(format!(
-                                    "resource inactivity timeout: conn={} hash={} data_len={}",
-                                    self.id, resource_hash, data.len()
-                                ));
-                            }
-                            result = resource_rx.recv() => {
-                                match result {
-                                    Ok(ResourceEvent {
-                                        hash,
-                                        kind: ResourceEventKind::OutboundComplete,
-                                        ..
-                                    }) if hash == resource_hash => {
-                                        log::debug!(
-                                            "resource outbound complete: conn={} hash={}",
-                                            self.id, resource_hash
-                                        );
-                                        return Ok(data.len());
-                                    }
-                                    Ok(ResourceEvent {
-                                        kind: ResourceEventKind::Progress(ref p),
-                                        ..
-                                    }) => {
-                                        log::trace!(
-                                            "resource event progress: conn={} received={} total={}",
-                                            self.id, p.received_bytes, p.total_bytes
-                                        );
-                                        if p.received_bytes > last_progress_bytes {
-                                            last_progress_bytes = p.received_bytes;
-                                            deadline = tokio::time::Instant::now()
-                                                + Duration::from_secs(INACTIVITY_SECS);
-                                            log::trace!(
-                                                "resource inactivity deadline reset: conn={} bytes={}",
-                                                self.id, p.received_bytes
-                                            );
-                                        }
-                                        continue;
-                                    }
-                                    Ok(_) => {
-                                        log::trace!(
-                                            "resource event other (ignored): conn={} waiting_for={}",
-                                            self.id, resource_hash
-                                        );
-                                        continue;
-                                    }
-                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                        return Err("resource event channel closed".to_string());
-                                    }
-                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                        log::warn!(
-                                            "resource event channel lagged {} events: conn={} hash={}",
-                                            n, self.id, resource_hash
-                                        );
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    return wait_for_outbound_resource(
+                        self.id,
+                        resource_hash,
+                        data.len(),
+                        resource_rx,
+                    )
+                    .await;
                 }
             }
             #[cfg(test)]
@@ -298,9 +342,12 @@ mod tests {
     #[tokio::test]
     async fn test_data_packet_threshold_lora_default() {
         use reticulum_rs::transport::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
+        const LORA_MTU: usize = 220;
         let (link, _) = make_test_link();
-        let link_guard = link.lock().await;
-        // Default test link has no MTU → packet_mdu() returns 184 (220 - 36 LoRa default)
+        let mut link_guard = link.lock().await;
+        // Simulate link activation on a LoRa interface (transport calls set_iface_mtu on activation).
+        link_guard.set_iface_mtu(LORA_MTU);
+        // packet_mdu() = MTU(220) - OVERHEAD(36) = 184
         assert_eq!(link_guard.packet_mdu(), 184);
         let threshold = link_guard
             .packet_mdu()
@@ -354,5 +401,105 @@ mod tests {
         let conn = Connection::new_from_link(link, link_id, Some(peer_hash), Some(peer_hash));
         assert_eq!(conn.peer_hash(), Some(peer_hash));
         assert_eq!(conn.identified_peer(), Some(peer_hash));
+    }
+
+    // ── wait_for_outbound_resource tests ──────────────────────────────────────
+
+    fn make_resource_hash(b: u8) -> reticulum_rs::transport::hash::Hash {
+        reticulum_rs::transport::hash::Hash::new_from_slice(&[b; 32])
+    }
+
+    fn make_link_id(b: u8) -> reticulum_rs::transport::hash::AddressHash {
+        reticulum_rs::transport::hash::AddressHash::new_from_slice(&[b; 16])
+    }
+
+    #[tokio::test]
+    async fn test_wait_outbound_resource_complete_returns_ok() {
+        use reticulum_rs::resource::{ResourceEvent, ResourceEventKind};
+
+        let (tx, rx) = broadcast::channel::<ResourceEvent>(4);
+        let hash = make_resource_hash(0x01);
+        tx.send(ResourceEvent {
+            hash,
+            link_id: make_link_id(0x02),
+            kind: ResourceEventKind::OutboundComplete,
+        })
+        .unwrap();
+
+        let result = wait_for_outbound_resource(1, hash, 500, rx).await;
+        assert_eq!(result, Ok(500));
+    }
+
+    #[tokio::test]
+    async fn test_wait_outbound_resource_failed_returns_err_immediately() {
+        use reticulum_rs::resource::{ResourceEvent, ResourceEventKind};
+
+        let (tx, rx) = broadcast::channel::<ResourceEvent>(4);
+        let hash = make_resource_hash(0x01);
+        tx.send(ResourceEvent {
+            hash,
+            link_id: make_link_id(0x02),
+            kind: ResourceEventKind::OutboundFailed,
+        })
+        .unwrap();
+
+        let result = wait_for_outbound_resource(1, hash, 500, rx).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("OutboundFailed"));
+    }
+
+    #[tokio::test]
+    async fn test_wait_outbound_resource_cancelled_returns_err_immediately() {
+        use reticulum_rs::resource::{ResourceEvent, ResourceEventKind};
+
+        let (tx, rx) = broadcast::channel::<ResourceEvent>(4);
+        let hash = make_resource_hash(0x01);
+        tx.send(ResourceEvent {
+            hash,
+            link_id: make_link_id(0x02),
+            kind: ResourceEventKind::OutboundCancelled,
+        })
+        .unwrap();
+
+        let result = wait_for_outbound_resource(1, hash, 500, rx).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("OutboundCancelled"));
+    }
+
+    #[tokio::test]
+    async fn test_wait_outbound_resource_ignores_other_hash() {
+        use reticulum_rs::resource::{ResourceEvent, ResourceEventKind};
+
+        let (tx, rx) = broadcast::channel::<ResourceEvent>(4);
+        let our_hash = make_resource_hash(0x01);
+        let other_hash = make_resource_hash(0xFF);
+
+        // OutboundFailed for a different hash — should NOT cause early return.
+        tx.send(ResourceEvent {
+            hash: other_hash,
+            link_id: make_link_id(0x02),
+            kind: ResourceEventKind::OutboundFailed,
+        })
+        .unwrap();
+        // Then OutboundComplete for our hash — should succeed.
+        tx.send(ResourceEvent {
+            hash: our_hash,
+            link_id: make_link_id(0x02),
+            kind: ResourceEventKind::OutboundComplete,
+        })
+        .unwrap();
+
+        let result = wait_for_outbound_resource(1, our_hash, 500, rx).await;
+        assert_eq!(result, Ok(500));
+    }
+
+    #[tokio::test]
+    async fn test_wait_outbound_resource_channel_closed_returns_err() {
+        let (tx, rx) = broadcast::channel::<reticulum_rs::resource::ResourceEvent>(4);
+        let hash = make_resource_hash(0x01);
+        drop(tx);
+
+        let result = wait_for_outbound_resource(1, hash, 500, rx).await;
+        assert!(result.is_err());
     }
 }
