@@ -199,12 +199,25 @@ type inFlightEntry struct {
 	sentAt  time.Time // when first sent; used to measure RTT on ACK
 }
 
+// msgSend tracks the in-order send completion of one logical message's fragments.
+// writeData blocks on `done` so the *next* message on the connection is only sent
+// after this one has finished going out — guaranteeing the receiver never sees a
+// later message (fast fragment path) overtake an earlier one (e.g. a direct
+// TypeLargeData/resource write). This is why no per-message sequence number is
+// needed: ordering is enforced at the source by serialising messages per conn.
+type msgSend struct {
+	done   chan struct{} // closed once the last fragment has been written to inner
+	failed atomic.Bool   // set if any fragment's inner write returned an error
+}
+
 // queuedFrag is one item in the send queue.
 type queuedFrag struct {
 	encoded      []byte
 	key          fragKey
 	isRetransmit bool // true → already holds a window slot; skip window acquire
 	prio         fragPriority
+	msg          *msgSend // shared by all fragments of one message (nil for retransmits)
+	lastInMsg    bool     // true for the final fragment; closes msg.done when sent
 }
 
 // sendQueue is a 3-level priority queue backed by buffered channels.
@@ -305,7 +318,7 @@ type muxSession struct {
 
 	// maxMsg is the max total mux-packet size (header + payload) for this session.
 	// Derived from the link's packet_mdu minus Fernet overhead; varies per interface type.
-	maxMsg        int
+	maxMsg         int
 	maxFragPayload int // maxMsg - muxHeaderSize
 
 	windowSize    int
@@ -453,6 +466,7 @@ func (s *muxSession) writeData(id uint16, data []byte) error {
 	}
 	parts := s.fragmentData(data)
 	n := len(parts)
+	tracker := &msgSend{done: make(chan struct{})}
 	for i, part := range parts {
 		pkt := muxPacket{typeByte: encodeDataByte(n, i), connID: id, payload: part}
 		key := fragKey{connID: id, partIndex: uint8(i)}
@@ -463,14 +477,32 @@ func (s *muxSession) writeData(id uint16, data []byte) error {
 		if i > 0 {
 			prio = prioInProgress
 		}
-		f := &queuedFrag{encoded: encodePacket(pkt), key: key, prio: prio}
+		f := &queuedFrag{
+			encoded:   encodePacket(pkt),
+			key:       key,
+			prio:      prio,
+			msg:       tracker,
+			lastInMsg: i == n-1,
+		}
 		select {
 		case s.sendQ.newMsg <- f:
 		case <-s.done:
 			return io.ErrClosedPipe
 		}
 	}
-	return nil
+	// Block until every fragment of THIS message has been written to the inner
+	// conn. Only then may muxConn.Write return and the next message be sent, so
+	// messages never interleave on the wire and the receiver reassembles the byte
+	// stream in order without needing a sequence number.
+	select {
+	case <-tracker.done:
+		if tracker.failed.Load() {
+			return fmt.Errorf("mux: conn=%d message send failed", id)
+		}
+		return nil
+	case <-s.done:
+		return io.ErrClosedPipe
+	}
 }
 
 // doWrite sends one queued fragment. For new (non-retransmit) fragments it acquires
@@ -481,6 +513,12 @@ func (s *muxSession) writeData(id uint16, data []byte) error {
 // exhausted; on lossy RF links the window provides backpressure and inFlight enables
 // retransmission of lost fragments.
 func (s *muxSession) doWrite(f *queuedFrag) {
+	// Unblock the writing muxConn.Write once the final fragment of the message has
+	// been pushed to the inner conn (or this attempt ended). writeData waits on
+	// this so the next message is only sent after this one finishes going out.
+	if f.lastInMsg && f.msg != nil {
+		defer close(f.msg.done)
+	}
 	if !f.isRetransmit {
 		// Acquire a window slot; blocks until one is free or the session closes.
 		select {
@@ -535,6 +573,9 @@ func (s *muxSession) doWrite(f *queuedFrag) {
 		// and inFlight entry immediately — no ACK will ever arrive.
 		if s.logger != nil {
 			s.logger.Warn("mux: conn=", f.key.connID, " part=", f.key.partIndex, " write failed (fragment lost): ", err)
+		}
+		if f.msg != nil {
+			f.msg.failed.Store(true)
 		}
 		s.inFlight.Delete(f.key)
 		select {
@@ -646,9 +687,9 @@ func (s *muxSession) readLoop() {
 							}
 						}
 						<-s.windowSem
-							s.logStats("ack received")
-						}
+						s.logStats("ack received")
 					}
+				}
 			case TypeLargeData:
 				// Full payload delivered atomically via Resource protocol.
 				s.mu.Lock()

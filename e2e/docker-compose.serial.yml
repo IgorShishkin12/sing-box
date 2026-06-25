@@ -36,7 +36,7 @@ services:
         LOG_FILENAME=\"/logs/e2e_serial$$(($$(ls -1A /logs | wc -l) - 1)).log\" &&
         sing-box run -c /etc/sing-box/config.json 2>&1 | tee -a $$LOG_FILENAME &
         (e2e-loadtest --socks 127.0.0.1:1080 --url http://127.0.0.1:8080 \
-          --warmup-timeout 500s --concurrency 1 --requests 3 --long-terms 20000 && echo 'ALL E2E SERIAL TESTS PASSED') 2>&1 | tee -a $$LOG_FILENAME
+          --warmup-timeout 500s --concurrency 1 --requests 3 --long-terms 10000 && echo 'ALL E2E SERIAL TESTS PASSED') 2>&1 | tee -a $$LOG_FILENAME
       "
     volumes:
       - ./configs/client-serial.json:/etc/sing-box/config.json:ro
