@@ -23,10 +23,17 @@ extern void goOnWrite  (uint64_t task_id,     int32_t    bytes);
 import "C"
 import (
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/sagernet/sing-box/log"
 )
+
+// goOnDataBackpressureTimeout bounds how long an inbound packet delivery will
+// block when the per-connection receive buffer is full. Blocking applies
+// backpressure to the (slow) sender instead of silently dropping; the timeout
+// prevents a permanently-stuck consumer from deadlocking a Rust callback thread.
+const goOnDataBackpressureTimeout = 5 * time.Second
 
 var (
 	bridgeStateMu     sync.Mutex
@@ -105,12 +112,19 @@ func goOnData(connID C.uint64_t, data *C.uint8_t, length C.size_t) {
 	entry := actual.(*connEntry)
 	buf := make([]byte, int(length))
 	copy(buf, unsafe.Slice((*byte)(unsafe.Pointer(data)), int(length)))
-	select {
-	case entry.ch <- buf:
-	case <-entry.done:
-		// connection already closed
-	default:
-		// channel buffer full — drop packet
+	// Deliver with bounded backpressure rather than a silent drop: losing a
+	// resource part/fragment is unrecoverable and corrupts the stream.
+	switch entry.deliver(buf, goOnDataBackpressureTimeout) {
+	case deliverBackpressured:
+		if logger := bridgeLoggerVal; logger != nil {
+			logger.Warn("goOnData: conn=", id, " receive buffer full (cap=", cap(entry.ch),
+				"), applied backpressure len=", len(buf))
+		}
+	case deliverDropped:
+		if logger := bridgeLoggerVal; logger != nil {
+			logger.Error("goOnData: conn=", id, " receive buffer still full after ", goOnDataBackpressureTimeout,
+				"; dropped packet len=", len(buf), " — stream may be corrupted")
+		}
 	}
 }
 

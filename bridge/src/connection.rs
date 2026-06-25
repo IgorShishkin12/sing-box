@@ -20,15 +20,43 @@ pub(crate) async fn wait_for_outbound_resource(
     data_len: usize,
     mut resource_rx: broadcast::Receiver<ResourceEvent>,
 ) -> Result<usize, String> {
-    const INACTIVITY_SECS: u64 = 60;
+    // Inactivity timeout for the outbound resource transfer. The *total* transfer
+    // time is unbounded (a large body over a slow link can legitimately take many
+    // minutes), so this must never cap total duration — it is reset on every
+    // progress event reporting more bytes acknowledged by the peer. Only genuine
+    // silence (peer stopped acking for this long) aborts the send. Kept generous
+    // so it defers to the lib's own progress-aware retry handling.
+    const INACTIVITY_SECS: u64 = 180;
+    const HEARTBEAT_SECS: u64 = 15;
     let mut last_progress_bytes: u64 = 0;
-    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(INACTIVITY_SECS);
+    let started = tokio::time::Instant::now();
+    let mut deadline = started + Duration::from_secs(INACTIVITY_SECS);
+    let mut last_activity = started;
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_SECS));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    heartbeat.tick().await; // consume the immediate first tick
+    log::debug!(
+        "[res-bridge] awaiting outbound resource conn={} hash={} data_len={} inactivity_timeout={}s",
+        conn_id, resource_hash, data_len, INACTIVITY_SECS
+    );
     loop {
         tokio::select! {
+            // Periodic heartbeat so the client is never silent during a long/slow
+            // transfer: prints elapsed time, bytes the peer has acked, and how long
+            // since the last progress (so a stall is visible well before it aborts).
+            _ = heartbeat.tick() => {
+                log::info!(
+                    "[res-bridge] outbound resource in progress conn={} hash={} acked={}/{} elapsed={:.0}s since_progress={:.0}s (aborts after {}s silence)",
+                    conn_id, resource_hash, last_progress_bytes, data_len,
+                    started.elapsed().as_secs_f32(),
+                    last_activity.elapsed().as_secs_f32(), INACTIVITY_SECS,
+                );
+                continue;
+            }
             _ = tokio::time::sleep_until(deadline) => {
                 log::warn!(
-                    "resource send timed out ({}s inactivity): conn={} hash={} data_len={}",
-                    INACTIVITY_SECS, conn_id, resource_hash, data_len
+                    "resource send timed out ({}s inactivity): conn={} hash={} data_len={} acked={}",
+                    INACTIVITY_SECS, conn_id, resource_hash, data_len, last_progress_bytes
                 );
                 return Err(format!(
                     "resource inactivity timeout: conn={} hash={} data_len={}",
@@ -80,16 +108,16 @@ pub(crate) async fn wait_for_outbound_resource(
                         kind: ResourceEventKind::Progress(ref p),
                         ..
                     }) => {
-                        log::trace!(
-                            "resource event progress: conn={} received={} total={}",
-                            conn_id, p.received_bytes, p.total_bytes
+                        log::debug!(
+                            "[res-bridge] outbound progress conn={} received={}/{} parts={}/{}",
+                            conn_id, p.received_bytes, p.total_bytes, p.received_parts, p.total_parts
                         );
                         if p.received_bytes > last_progress_bytes {
                             last_progress_bytes = p.received_bytes;
-                            deadline = tokio::time::Instant::now()
-                                + Duration::from_secs(INACTIVITY_SECS);
-                            log::trace!(
-                                "resource inactivity deadline reset: conn={} bytes={}",
+                            last_activity = tokio::time::Instant::now();
+                            deadline = last_activity + Duration::from_secs(INACTIVITY_SECS);
+                            log::debug!(
+                                "[res-bridge] outbound inactivity deadline reset conn={} acked_bytes={}",
                                 conn_id, p.received_bytes
                             );
                         }

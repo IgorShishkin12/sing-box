@@ -768,7 +768,13 @@ pub async fn exchange_identify_on_link(
             };
             if let Some(tp) = get_transport() {
                 let tp = tp.lock().await;
-                tp.send_broadcast(packet, None).await;
+                // Route the identify as a link-directed packet (Direct on the
+                // link's iface) rather than a broadcast. The transport drops
+                // Broadcast TX messages when an interface queue is full, which
+                // silently loses identify packets on congested/slow links (e.g.
+                // LoRa) and breaks the auth handshake. send_packet uses the
+                // backpressure (timeout-enqueue) path and won't be dropped.
+                tp.send_packet(packet).await;
             }
         }
     };
@@ -869,46 +875,114 @@ pub fn spawn_resource_event_reader(
     link_id: AddressHash,
     mut resource_rx: broadcast::Receiver<ResourceEvent>,
 ) {
+    // Inactivity guard for an *in-progress* inbound transfer. The reader is
+    // long-lived (it serves every resource over `link_id` for this connection's
+    // lifetime), so the deadline must only be armed while a transfer is actually
+    // running — otherwise a healthy idle connection would be closed. It is armed
+    // on the first Progress event and *reset on every subsequent Progress*, so a
+    // slow-but-advancing transfer is never killed (the total transfer time is
+    // unbounded and must not be capped — only true silence is). It is disarmed on
+    // Complete/InboundFailed. This is purely defense-in-depth: the lib emits
+    // `InboundFailed` on its own progress-aware retry exhaustion; this only covers
+    // the case where the peer vanishes mid-transfer and no terminal event is ever
+    // produced. Kept generous so it never pre-empts the lib's own recovery.
+    const INBOUND_INACTIVITY_SECS: u64 = 180;
+
+    log::debug!(
+        "[res-bridge] resource event reader spawned conn={} link={}",
+        conn_id,
+        link_id
+    );
     let handle = tokio::spawn(async move {
+        // When no transfer is in flight the deadline is parked far in the future
+        // so `sleep_until` effectively never fires.
+        let parked = || tokio::time::Instant::now() + Duration::from_secs(3600 * 24 * 365);
+        let mut deadline = parked();
+        let mut transfer_active = false;
+        let mut last_progress_bytes: u64 = 0;
+
         loop {
-            match resource_rx.recv().await {
-                Ok(event) if event.link_id == link_id => match event.kind {
-                    ResourceEventKind::Complete(complete) => {
-                        log::trace!(
-                            "resource complete: conn={} link={} len={}",
-                            conn_id,
-                            link_id,
-                            complete.data.len()
-                        );
-                        crate::c_api::call_on_data(conn_id, &complete.data);
-                    }
-                    ResourceEventKind::Progress(ref p) => {
-                        log::trace!(
-                            "resource inbound progress: conn={} link={} received={} total={}",
-                            conn_id,
-                            link_id,
-                            p.received_bytes,
-                            p.total_bytes
-                        );
-                    }
-                    _ => {}
-                },
-                Ok(event) => {
-                    log::trace!(
-                        "resource event for other link (ignored): our={} event_link={}",
-                        link_id,
-                        event.link_id
-                    );
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-                Err(broadcast::error::RecvError::Lagged(n)) => {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline), if transfer_active => {
                     log::warn!(
-                        "resource inbound event channel lagged {} events: conn={} link={}",
-                        n,
-                        conn_id,
-                        link_id
+                        "resource inbound stalled ({}s inactivity), closing conn={} link={} received={}",
+                        INBOUND_INACTIVITY_SECS, conn_id, link_id, last_progress_bytes
                     );
-                    continue;
+                    crate::c_api::call_on_close(conn_id);
+                    break;
+                }
+                result = resource_rx.recv() => {
+                    match result {
+                        Ok(event) if event.link_id == link_id => match event.kind {
+                            ResourceEventKind::Complete(complete) => {
+                                log::info!(
+                                    "[res-bridge] resource COMPLETE conn={} link={} len={} -> delivering to app",
+                                    conn_id,
+                                    link_id,
+                                    complete.data.len()
+                                );
+                                transfer_active = false;
+                                last_progress_bytes = 0;
+                                deadline = parked();
+                                crate::c_api::call_on_data(conn_id, &complete.data);
+                            }
+                            ResourceEventKind::Progress(ref p) => {
+                                log::debug!(
+                                    "[res-bridge] inbound progress conn={} link={} received={}/{} parts={}/{}",
+                                    conn_id,
+                                    link_id,
+                                    p.received_bytes,
+                                    p.total_bytes,
+                                    p.received_parts,
+                                    p.total_parts,
+                                );
+                                // Arm / extend the inactivity deadline while bytes keep arriving.
+                                if !transfer_active || p.received_bytes > last_progress_bytes {
+                                    transfer_active = true;
+                                    last_progress_bytes = p.received_bytes;
+                                    deadline = tokio::time::Instant::now()
+                                        + Duration::from_secs(INBOUND_INACTIVITY_SECS);
+                                }
+                            }
+                            ResourceEventKind::InboundFailed(ref f) => {
+                                log::warn!(
+                                    "resource inbound failed: conn={} link={} reason={} received={}/{}",
+                                    conn_id,
+                                    link_id,
+                                    f.reason,
+                                    f.progress.received_bytes,
+                                    f.progress.total_bytes
+                                );
+                                crate::c_api::call_on_close(conn_id);
+                                break;
+                            }
+                            // Outbound terminal variants are handled per-transfer by
+                            // `wait_for_outbound_resource`; log so nothing is silent here.
+                            other => {
+                                log::debug!(
+                                    "resource event unhandled in inbound reader: conn={} link={} kind={:?}",
+                                    conn_id, link_id, other
+                                );
+                            }
+                        },
+                        Ok(event) => {
+                            log::trace!(
+                                "resource event for other link (ignored): our={} event_link={}",
+                                link_id,
+                                event.link_id
+                            );
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            log::warn!(
+                                "resource inbound event channel lagged {} events: conn={} link={}",
+                                n,
+                                conn_id,
+                                link_id
+                            );
+                            continue;
+                        }
+                    }
                 }
             }
         }
@@ -1198,5 +1272,71 @@ mod tests {
         assert_eq!(ev2.link_id, target_link);
 
         drop(tx);
+    }
+
+    /// An inbound `InboundFailed` event must fire the on_close callback (the conn
+    /// is torn down) instead of being silently swallowed. Regression test for the
+    /// silent large-request hang (e2e_serial62).
+    #[tokio::test]
+    async fn test_resource_event_reader_closes_on_inbound_failed() {
+        use reticulum_rs::resource::{
+            ResourceEvent, ResourceEventKind, ResourceFailure, ResourceProgress,
+        };
+        use reticulum_rs::transport::hash::{AddressHash, Hash};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use tokio::sync::broadcast;
+
+        // Records the conn_id passed to the most recent on_close call.
+        static CLOSED_CONN: AtomicU64 = AtomicU64::new(0);
+        extern "C" fn record_close(conn_id: u64) {
+            CLOSED_CONN.store(conn_id, Ordering::SeqCst);
+        }
+
+        const SENTINEL_CONN: u64 = 0xABCD_1234;
+        CLOSED_CONN.store(0, Ordering::SeqCst);
+
+        // Save & install our close callback; restore afterwards so we don't leak
+        // state into other tests sharing the global callback slot.
+        let prev = crate::c_api::ON_CLOSE.swap(
+            record_close as extern "C" fn(u64) as usize,
+            Ordering::SeqCst,
+        );
+
+        let (tx, rx) = broadcast::channel::<ResourceEvent>(16);
+        let target_link =
+            AddressHash::new_from_hex_string("aabbccdd00112233445566778899aabb").unwrap();
+        spawn_resource_event_reader(SENTINEL_CONN, target_link, rx);
+
+        tx.send(ResourceEvent {
+            hash: Hash::new_from_slice(&[0u8; 32]),
+            link_id: target_link,
+            kind: ResourceEventKind::InboundFailed(ResourceFailure {
+                reason: "retry_limit_exhausted".to_string(),
+                progress: ResourceProgress {
+                    received_bytes: 0,
+                    total_bytes: 108_905,
+                    received_parts: 0,
+                    total_parts: 179,
+                },
+            }),
+        })
+        .unwrap();
+
+        // Give the reader task time to process and invoke the callback.
+        for _ in 0..50 {
+            if CLOSED_CONN.load(Ordering::SeqCst) == SENTINEL_CONN {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        crate::c_api::ON_CLOSE.store(prev, Ordering::SeqCst);
+        drop(tx);
+
+        assert_eq!(
+            CLOSED_CONN.load(Ordering::SeqCst),
+            SENTINEL_CONN,
+            "InboundFailed must trigger on_close for the affected connection"
+        );
     }
 }
