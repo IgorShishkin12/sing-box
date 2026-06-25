@@ -104,12 +104,17 @@ pub(crate) async fn wait_for_outbound_resource(
                             conn_id, resource_hash
                         ));
                     }
+                    // `OutboundProgress` is the sender-side liveness signal (parts
+                    // sent); `Progress` is the receiver-side one. Either counts as
+                    // forward progress and resets the inactivity deadline — the
+                    // total transfer time stays unbounded, only true silence aborts.
                     Ok(ResourceEvent {
-                        kind: ResourceEventKind::Progress(ref p),
+                        kind: ResourceEventKind::Progress(ref p)
+                            | ResourceEventKind::OutboundProgress(ref p),
                         ..
                     }) => {
                         log::debug!(
-                            "[res-bridge] outbound progress conn={} received={}/{} parts={}/{}",
+                            "[res-bridge] outbound progress conn={} sent/acked={}/{} parts={}/{}",
                             conn_id, p.received_bytes, p.total_bytes, p.received_parts, p.total_parts
                         );
                         if p.received_bytes > last_progress_bytes {
@@ -117,7 +122,7 @@ pub(crate) async fn wait_for_outbound_resource(
                             last_activity = tokio::time::Instant::now();
                             deadline = last_activity + Duration::from_secs(INACTIVITY_SECS);
                             log::debug!(
-                                "[res-bridge] outbound inactivity deadline reset conn={} acked_bytes={}",
+                                "[res-bridge] outbound inactivity deadline reset conn={} progress_bytes={}",
                                 conn_id, p.received_bytes
                             );
                         }
