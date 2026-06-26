@@ -10,6 +10,12 @@ use tokio::sync::Mutex;
 
 static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Max time `write_channel` waits for the channel send-window to open before
+/// failing the write (so a dead link surfaces an error instead of hanging).
+const CHANNEL_READY_TIMEOUT_SECS: u64 = 60;
+/// Poll interval while waiting for channel send-window room.
+const CHANNEL_READY_POLL_MS: u64 = 20;
+
 /// Wait on `resource_rx` until the outbound resource transfer `resource_hash` succeeds,
 /// fails, is cancelled, or the inactivity deadline expires.
 ///
@@ -231,71 +237,53 @@ impl Connection {
 
     /// Write data to the connection via the Reticulum link.
     ///
-    /// Small payloads (≤ `link.packet_mdu() - FERNET_OVERHEAD - FERNET_PADDING`) are sent as a
-    /// single `data_packet` for low latency. Larger payloads are sent via the Resource protocol,
-    /// which handles splitting and retransmission internally and supports up to 64 MB.
+    /// Small payloads (those that fit one link packet) are sent over the
+    /// Reticulum **Channel**, which provides sequenced, in-order, acknowledged
+    /// delivery with adaptive flow control and retransmission — this is what
+    /// replaced the mux's hand-rolled fragment-ACK/window/retransmit. Larger
+    /// payloads still use the Resource protocol (splitting up to 64 MB).
     pub async fn write(&self, data: &[u8]) -> Result<usize, String> {
         match &self.inner {
             ConnectionInner::Link { link, link_id, .. } => {
-                let maybe_packet_and_iface = {
+                let max_plain = {
                     let link_guard = link.lock().await;
-                    let max_plain = link_guard
+                    link_guard
                         .packet_mdu()
-                        .saturating_sub(FERNET_OVERHEAD_SIZE + FERNET_MAX_PADDING_SIZE);
-                    if data.len() <= max_plain {
-                        let packet = match link_guard.data_packet(data) {
-                            Ok(p) => p,
-                            Err(e) => return Err(format!("{:?}", e)),
-                        };
-                        let iface = link_guard.ingress_iface();
-                        Some((packet, iface))
-                    } else {
-                        None
-                    }
+                        .saturating_sub(FERNET_OVERHEAD_SIZE + FERNET_MAX_PADDING_SIZE)
                 };
-                if let Some((packet, iface)) = maybe_packet_and_iface {
-                    if let Some(transport) = crate::transport::get_transport() {
-                        let tp = transport.lock().await;
-                        if let Some(iface) = iface {
-                            tp.send_direct(iface, packet).await;
-                        } else {
-                            tp.send_broadcast(packet, None).await;
-                        }
-                    }
-                    Ok(data.len())
-                } else {
-                    // Subscribe before sending so we never miss OutboundComplete
-                    // even if the peer acknowledges very quickly.
-                    let resource_rx = {
-                        let tp = crate::transport::get_transport()
-                            .ok_or_else(|| "transport not initialized".to_string())?;
-                        let guard = tp.lock().await;
-                        guard.resource_events()
-                    };
-                    let resource_hash = {
-                        let tp = crate::transport::get_transport()
-                            .ok_or_else(|| "transport not initialized".to_string())?;
-                        let guard = tp.lock().await;
-                        guard
-                            .send_resource(link_id, data.to_vec(), None)
-                            .await
-                            .map_err(|e| format!("send_resource: {:?}", e))?
-                    };
-                    log::debug!(
-                        "resource outbound start: conn={} link={} hash={} data_len={}",
-                        self.id,
-                        link_id,
-                        resource_hash,
-                        data.len()
-                    );
-                    return wait_for_outbound_resource(
-                        self.id,
-                        resource_hash,
-                        data.len(),
-                        resource_rx,
-                    )
-                    .await;
+                // The Channel envelope (msg_type+seq+len = 6 bytes) rides inside
+                // the encrypted link packet, so the app payload must leave room.
+                const CHANNEL_ENVELOPE_OVERHEAD: usize = 6;
+                let fits_channel = data.len() + CHANNEL_ENVELOPE_OVERHEAD <= max_plain;
+                if fits_channel {
+                    return self.write_channel(*link_id, data).await;
                 }
+                // Larger-than-one-packet payloads go via the Resource protocol.
+                // Subscribe before sending so we never miss OutboundComplete even
+                // if the peer acknowledges very quickly.
+                let resource_rx = {
+                    let tp = crate::transport::get_transport()
+                        .ok_or_else(|| "transport not initialized".to_string())?;
+                    let guard = tp.lock().await;
+                    guard.resource_events()
+                };
+                let resource_hash = {
+                    let tp = crate::transport::get_transport()
+                        .ok_or_else(|| "transport not initialized".to_string())?;
+                    let guard = tp.lock().await;
+                    guard
+                        .send_resource(link_id, data.to_vec(), None)
+                        .await
+                        .map_err(|e| format!("send_resource: {:?}", e))?
+                };
+                log::debug!(
+                    "resource outbound start: conn={} link={} hash={} data_len={}",
+                    self.id,
+                    link_id,
+                    resource_hash,
+                    data.len()
+                );
+                wait_for_outbound_resource(self.id, resource_hash, data.len(), resource_rx).await
             }
             #[cfg(test)]
             ConnectionInner::Memory { write_buf } => {
@@ -304,6 +292,47 @@ impl Connection {
                 Ok(data.len())
             }
         }
+    }
+
+    /// Send one message over the link's reliable Reticulum channel.
+    ///
+    /// Applies channel send-window backpressure first (bounded so a dead link
+    /// can't block forever), then hands the message to the channel, which owns
+    /// sequencing, in-order delivery, acknowledgement and retransmission. We do
+    /// not block on per-message delivery here: the channel's window provides the
+    /// flow control the mux used to do with its own ACK window.
+    async fn write_channel(&self, link_id: AddressHash, data: &[u8]) -> Result<usize, String> {
+        let transport = crate::transport::get_transport()
+            .ok_or_else(|| "transport not initialized".to_string())?;
+        let ch = {
+            let guard = transport.lock().await;
+            guard.channel(link_id)
+        };
+
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(CHANNEL_READY_TIMEOUT_SECS);
+        loop {
+            match ch.is_ready_to_send().await {
+                Ok(true) => break,
+                Ok(false) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(format!(
+                            "channel backpressure timeout: conn={} link={}",
+                            self.id, link_id
+                        ));
+                    }
+                    tokio::time::sleep(Duration::from_millis(CHANNEL_READY_POLL_MS)).await;
+                }
+                Err(e) => return Err(format!("channel ready check: {:?}", e)),
+            }
+        }
+
+        ch.send(crate::transport::MUX_CHANNEL_MSG_TYPE, data.to_vec())
+            .await
+            .map_err(|e| {
+                format!("channel send: conn={} link={} err={:?}", self.id, link_id, e)
+            })?;
+        Ok(data.len())
     }
 
     pub fn link_id(&self) -> Option<AddressHash> {

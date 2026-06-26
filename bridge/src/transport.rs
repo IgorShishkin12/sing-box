@@ -594,6 +594,7 @@ pub async fn register_listener_destination(
                                 let conn_id = store.insert_connection(conn).await;
                                 spawn_link_data_reader(conn_id, link_id, data_rx);
                                 spawn_resource_event_reader(conn_id, link_id, resource_rx);
+                                open_channel_and_forward(conn_id, link_id).await;
                                 crate::c_api::call_on_accept(
                                     listener_handle,
                                     conn_id,
@@ -829,6 +830,50 @@ pub async fn exchange_identify_on_link(
                 }
             }
         }
+    }
+}
+
+/// msg_type used for all mux stream data carried over the Reticulum channel.
+/// (Conn-multiplexing lives inside the payload — the mux's own framing — so a
+/// single channel msg_type suffices for the whole stream.)
+pub const MUX_CHANNEL_MSG_TYPE: u16 = 0x0001;
+
+/// Open the link's reliable Reticulum channel and forward every received channel
+/// message to Go via `on_data`, in order. With sends now going over the channel
+/// (`Connection::write_channel`), this replaces the raw data-packet receive path
+/// for mux traffic; the channel guarantees ordered, de-duplicated delivery.
+///
+/// Both peers must open the channel before data flows (the receiver drops channel
+/// frames on a not-yet-open channel), so this runs at link activation on both the
+/// dial and accept paths.
+pub async fn open_channel_and_forward(conn_id: u64, link_id: AddressHash) {
+    let Some(transport) = get_transport() else {
+        log::warn!("[channel] open: transport not initialized conn={}", conn_id);
+        return;
+    };
+    let ch = {
+        let guard = transport.lock().await;
+        guard.channel(link_id)
+    };
+    if let Err(e) = ch.open().await {
+        log::warn!("[channel] open failed conn={} link={} err={:?}", conn_id, link_id, e);
+        return;
+    }
+    match ch
+        .register_handler(MUX_CHANNEL_MSG_TYPE, move |envelope| {
+            crate::c_api::call_on_data(conn_id, &envelope.payload);
+            true
+        })
+        .await
+    {
+        Ok(_) => log::debug!(
+            "[channel] opened + handler registered conn={} link={}",
+            conn_id, link_id
+        ),
+        Err(e) => log::warn!(
+            "[channel] register handler failed conn={} link={} err={:?}",
+            conn_id, link_id, e
+        ),
     }
 }
 

@@ -398,7 +398,8 @@ func newMuxSession(
 	}
 	go s.readLoop()
 	go s.sendQ.run(s)
-	go s.retransmitLoop()
+	// No retransmit loop: the Reticulum channel (under the bridge) handles
+	// acknowledgement and retransmission now.
 	return s
 }
 
@@ -516,84 +517,31 @@ func (s *muxSession) doWrite(f *queuedFrag) {
 	// Unblock the writing muxConn.Write once the final fragment of the message has
 	// been pushed to the inner conn (or this attempt ended). writeData waits on
 	// this so the next message is only sent after this one finishes going out.
+	// Unblock the writing muxConn.Write once the final fragment of the message has
+	// been pushed to the inner conn. writeData waits on this so a connection's
+	// messages are handed to the link in order. Reliability, acknowledgement,
+	// flow control and retransmission are now the Reticulum channel's job (the
+	// bridge sends each fragment over the link's reliable channel), so the mux no
+	// longer keeps a window, in-flight table, fragment ACKs, or retransmit loop.
 	if f.lastInMsg && f.msg != nil {
 		defer close(f.msg.done)
 	}
-	if !f.isRetransmit {
-		// Acquire a window slot; blocks until one is free or the session closes.
-		select {
-		case s.windowSem <- struct{}{}:
-		case <-s.done:
-			return
-		}
-		now := time.Now()
-		s.inFlight.Store(f.key, &inFlightEntry{
-			encoded: f.encoded,
-			key:     f.key,
-			sentAt:  now,
-			retryAt: now.Add(fragRetransmitDelay(0, time.Duration(s.rttEst.Value()))),
-		})
-	} else {
-		// Retransmit: skip if already ACKed (entry removed) since we enqueued it.
-		if _, ok := s.inFlight.Load(f.key); !ok {
-			return
-		}
-	}
-
-	// Pace sends to the estimated link throughput so the LoRa channel is not
-	// saturated with our traffic, leaving airtime for ACKs and the return path.
-	// Continuation fragments (prioInProgress) are never paced: all parts of a
-	// multi-fragment message must arrive for reassembly, so we cannot afford to
-	// hold them back longer than the window/ACK cycle already does.
-	if bw := s.bwEst.Load(); bw != nil && f.prio != prioInProgress {
-		bwVal := bw.Value()
-		if bwVal > 0 {
-			fragBytes := int64(len(f.encoded))
-			pacingInterval := time.Duration(fragBytes * int64(time.Second) / bwVal)
-			if lastNano := s.lastSendAt.Load(); lastNano > 0 {
-				elapsed := time.Duration(time.Now().UnixNano() - lastNano)
-				if elapsed < pacingInterval {
-					select {
-					case <-time.After(pacingInterval - elapsed):
-					case <-s.done:
-						return
-					}
-				}
-			}
-		}
-	}
-	s.lastSendAt.Store(time.Now().UnixNano())
 
 	s.innerWriteMu.Lock()
 	_, err := s.inner.Write(f.encoded)
 	s.innerWriteMu.Unlock()
 	if err != nil {
-		// Reticulum returned an error: it definitively failed to deliver this
-		// fragment (timed out on its side, or link error).  Free the window slot
-		// and inFlight entry immediately — no ACK will ever arrive.
 		if s.logger != nil {
-			s.logger.Warn("mux: conn=", f.key.connID, " part=", f.key.partIndex, " write failed (fragment lost): ", err)
+			s.logger.Warn("mux: conn=", f.key.connID, " part=", f.key.partIndex, " write failed: ", err)
 		}
 		if f.msg != nil {
 			f.msg.failed.Store(true)
 		}
-		s.inFlight.Delete(f.key)
-		select {
-		case <-s.windowSem:
-		default:
-		}
-		s.logStats("fragment lost (write error)")
+		s.logStats("fragment write error")
 		return
 	}
-	if !f.isRetransmit {
-		s.statFragsSent.Add(1)
-		s.logStats("fragment sent")
-	} else {
-		s.logStats("retransmit sent")
-	}
-	// inFlight entry and window slot are held until the TypeFragAck handler
-	// (readLoop) calls LoadAndDelete + releases windowSem, or checkRetransmits
-	// gives up and releases both after maxRetries.
+	s.statFragsSent.Add(1)
+	s.logStats("fragment sent")
 }
 
 // removeConn removes a virtual connection from the session map.
@@ -670,26 +618,6 @@ func (s *muxSession) readLoop() {
 			case TypeCloseConn:
 				delete(fragBufs, pkt.connID)
 				s.closeConnRemote(pkt.connID)
-			case TypeFragAck:
-				// Peer acknowledged one of our fragments; measure RTT, update EWMA, release slot.
-				if len(pkt.payload) == 1 {
-					s.statAcksReceived.Add(1)
-					key := fragKey{connID: pkt.connID, partIndex: pkt.payload[0]}
-					if v, ok := s.inFlight.LoadAndDelete(key); ok {
-						entry := v.(*inFlightEntry)
-						rtt := time.Since(entry.sentAt)
-						s.rttEst.Update(int64(rtt))
-						// Update bandwidth EWMA on ACK (if pacing is active).
-						if rtt > time.Millisecond {
-							if bw := s.bwEst.Load(); bw != nil {
-								sample := int64(len(entry.encoded)) * int64(time.Second) / int64(rtt)
-								bw.Update(sample)
-							}
-						}
-						<-s.windowSem
-						s.logStats("ack received")
-					}
-				}
 			case TypeLargeData:
 				// Full payload delivered atomically via Resource protocol.
 				s.mu.Lock()
@@ -710,19 +638,8 @@ func (s *muxSession) readLoop() {
 			continue
 		}
 
-		// Data packet: send ACK to peer non-blocking so readLoop never stalls.
-		// On TCP the sender already released its window slot after the write, so
-		// a dropped ACK here is harmless. On RF a dropped ACK triggers a retransmit.
-		if s.innerWriteMu.TryLock() {
-			_, _ = s.inner.Write(encodePacket(muxPacket{
-				typeByte: TypeFragAck,
-				connID:   pkt.connID,
-				payload:  []byte{byte(pkt.partIndex)},
-			}))
-			s.innerWriteMu.Unlock()
-			s.statAcksSent.Add(1)
-		}
-
+		// Data packet: reassemble. No ACK is sent — the Reticulum channel under
+		// the bridge already acknowledges and orders delivery.
 		fb := fragBufs[pkt.connID]
 		if fb == nil {
 			fb = &fragBuffer{}
