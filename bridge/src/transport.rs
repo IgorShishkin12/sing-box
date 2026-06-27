@@ -936,7 +936,7 @@ pub fn spawn_resource_event_reader(
     // `InboundFailed` on its own progress-aware retry exhaustion; this only covers
     // the case where the peer vanishes mid-transfer and no terminal event is ever
     // produced. Kept generous so it never pre-empts the lib's own recovery.
-    const INBOUND_INACTIVITY_SECS: u64 = 180;
+    const INBOUND_INACTIVITY_SECS: u64 = crate::RESOURCE_INACTIVITY_SECS;
 
     log::debug!(
         "[res-bridge] resource event reader spawned conn={} link={}",
@@ -946,7 +946,8 @@ pub fn spawn_resource_event_reader(
     let handle = tokio::spawn(async move {
         // When no transfer is in flight the deadline is parked far in the future
         // so `sleep_until` effectively never fires.
-        let parked = || tokio::time::Instant::now() + Duration::from_secs(3600 * 24 * 365);
+        const PARKED_SECS: u64 = 365 * 24 * 60 * 60; // ~1 year
+        let parked = || tokio::time::Instant::now() + Duration::from_secs(PARKED_SECS);
         let mut deadline = parked();
         let mut transfer_active = false;
         let mut last_progress_bytes: u64 = 0;

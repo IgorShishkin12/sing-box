@@ -368,24 +368,3 @@ func TestFramedConn_ReadPacketBlocksUntilGate(t *testing.T) {
 		t.Fatal("ReadPacket did not return after OpenGate")
 	}
 }
-
-// TestReadMsgDeadline_Timeout verifies that ReadMsgDeadline returns an error
-// when no auth message arrives before the deadline.
-func TestReadMsgDeadline_Timeout(t *testing.T) {
-	a, b := net.Pipe()
-	defer a.Close()
-	defer b.Close()
-	fc := newFramedConn(a)
-	defer fc.Close()
-
-	start := time.Now()
-	_, _, err := fc.ReadMsgDeadline(time.Now().Add(60 * time.Millisecond))
-	elapsed := time.Since(start)
-
-	if err == nil {
-		t.Fatal("expected error from ReadMsgDeadline, got nil")
-	}
-	if elapsed > 500*time.Millisecond {
-		t.Errorf("ReadMsgDeadline took too long: %v", elapsed)
-	}
-}

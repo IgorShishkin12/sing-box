@@ -10,44 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newTestMuxPairWithWindow creates a client+server mux pair with a custom windowSize and
-// fast retry settings so tests run quickly.
-func newTestMuxPairWithWindow(t *testing.T, windowSize int) (client, server *muxSession) {
-	t.Helper()
-	cc, sc := net.Pipe()
-	t.Cleanup(func() { cc.Close(); sc.Close() })
-	client = newMuxSession(cc, nil, false, windowSize, 20*time.Millisecond, 2, MaxReticulumMessage, false)
-	server = newMuxSession(sc, nil, true, windowSize, 20*time.Millisecond, 2, MaxReticulumMessage, false)
-	return
-}
-
-// newManualSession creates a session whose inner conn is a chanConn pair, giving the
-// test direct control over what the session receives and what it sends.
-func newManualSession(t *testing.T, windowSize int) (s *muxSession, remote *chanConn) {
-	t.Helper()
-	inner, remote := newChanConnPair()
-	s = newMuxSession(inner, nil, false, windowSize, 20*time.Millisecond, 2, MaxReticulumMessage, false)
-	t.Cleanup(func() { s.Close() })
-	return
-}
-
-// drainNFromSession reads exactly n packets that were sent BY the session (i.e. from
-// remote.readCh, which is the channel that inner.Write feeds into).
-func drainNFromSession(t *testing.T, remote *chanConn, n int, timeout time.Duration) [][]byte {
-	t.Helper()
-	out := make([][]byte, 0, n)
-	deadline := time.After(timeout)
-	for len(out) < n {
-		select {
-		case pkt := <-remote.readCh:
-			out = append(out, pkt)
-		case <-deadline:
-			t.Fatalf("drainNFromSession: only got %d/%d packets", len(out), n)
-		}
-	}
-	return out
-}
-
 // --- encodeDataByte / decodeDataByte ---
 
 func TestEncodeDataByte_single(t *testing.T) {
@@ -152,7 +114,7 @@ func TestDecodePacket_tooShort(t *testing.T) {
 func TestWriteData_BlocksUntilFragmentsSent(t *testing.T) {
 	cc, sc := net.Pipe() // unbuffered: inner Write blocks until the peer reads
 	t.Cleanup(func() { cc.Close(); sc.Close() })
-	s := newMuxSession(cc, nil, false, 16, 20*time.Millisecond, 2, MaxReticulumMessage, false)
+	s := newMuxSession(cc, nil, false, MaxReticulumMessage)
 	t.Cleanup(func() { s.Close() })
 
 	mc := newMuxConn(1, s, "host:80")
@@ -289,8 +251,6 @@ func TestFragBuffer_multiPart(t *testing.T) {
 
 // newTestMuxPair creates a client+server muxSession pair connected via net.Pipe.
 // Uses byte-stream semantics; suitable for messages up to ~25 KB (64 fragments).
-// Uses a 20ms retryInterval (not the production 500ms default) so pacing is
-// disabled and tests complete in milliseconds, not minutes.
 func newTestMuxPair(t *testing.T) (client, server *muxSession) {
 	t.Helper()
 	cc, sc := net.Pipe()
@@ -298,15 +258,14 @@ func newTestMuxPair(t *testing.T) (client, server *muxSession) {
 		cc.Close()
 		sc.Close()
 	})
-	client = newMuxSession(cc, nil, false, defaultWindowSize, 20*time.Millisecond, defaultMaxRetries, MaxReticulumMessage, false)
-	server = newMuxSession(sc, nil, true, defaultWindowSize, 20*time.Millisecond, defaultMaxRetries, MaxReticulumMessage, false)
+	client = newMuxSession(cc, nil, false, MaxReticulumMessage)
+	server = newMuxSession(sc, nil, true, MaxReticulumMessage)
 	return
 }
 
 // newTestMuxPairMsg creates a client+server muxSession pair backed by the
 // existing chanConn (message-boundary). Required for TypeLargeData tests
 // (payloads > 64*maxFragPayload) where net.Pipe byte-stream semantics break.
-// Uses a 20ms retryInterval so pacing is disabled and tests complete quickly.
 func newTestMuxPairMsg(t *testing.T) (client, server *muxSession) {
 	t.Helper()
 	cc, sc := newChanConnPair()
@@ -314,8 +273,8 @@ func newTestMuxPairMsg(t *testing.T) (client, server *muxSession) {
 		cc.Close()
 		sc.Close()
 	})
-	client = newMuxSession(cc, nil, false, defaultWindowSize, 20*time.Millisecond, defaultMaxRetries, MaxReticulumMessage, false)
-	server = newMuxSession(sc, nil, true, defaultWindowSize, 20*time.Millisecond, defaultMaxRetries, MaxReticulumMessage, false)
+	client = newMuxSession(cc, nil, false, MaxReticulumMessage)
+	server = newMuxSession(sc, nil, true, MaxReticulumMessage)
 	return
 }
 
@@ -511,54 +470,12 @@ func TestMuxSession_idExhaustion(t *testing.T) {
 	require.Contains(t, err.Error(), "exhausted")
 }
 
-// ── New tests for window / ACK / retransmit / priority ──────────────────────
-
-// TestSendQueuePriority verifies that retransmit items are always dequeued before
-// new-message items even when both are ready simultaneously.
-func TestSendQueuePriority(t *testing.T) {
-	q := newSendQueue(32)
-
-	retransmitFrag := &queuedFrag{encoded: []byte("retransmit"), prio: prioRetransmit, isRetransmit: true}
-	newFrag := &queuedFrag{encoded: []byte("new"), prio: prioNew}
-
-	// Enqueue new first, then retransmit — retransmit must win.
-	q.newMsg <- newFrag
-	q.retransmit <- retransmitFrag
-
-	// The worker drains retransmit before newMsg.
-	// We simulate by calling the priority-select logic directly.
-	var got []*queuedFrag
-	for i := 0; i < 2; i++ {
-		select {
-		case f := <-q.retransmit:
-			got = append(got, f)
-			continue
-		default:
-		}
-		select {
-		case f := <-q.inProgress:
-			got = append(got, f)
-			continue
-		default:
-		}
-		select {
-		case f := <-q.retransmit:
-			got = append(got, f)
-		case f := <-q.inProgress:
-			got = append(got, f)
-		case f := <-q.newMsg:
-			got = append(got, f)
-		}
-	}
-	require.Len(t, got, 2)
-	require.Equal(t, prioRetransmit, got[0].prio, "retransmit must come first")
-	require.Equal(t, prioNew, got[1].prio)
-}
+// ── Concurrency / delivery tests ────────────────────────────────────────────
 
 // TestConcurrentWriteNoDeadlock verifies that 20 goroutines writing large messages
 // concurrently all deliver their data intact, with no deadlock.
 func TestConcurrentWriteNoDeadlock(t *testing.T) {
-	client, server := newTestMuxPairWithWindow(t, 32)
+	client, server := newTestMuxPair(t)
 
 	const goroutines = 20
 	// Each goroutine sends exactly one message that fits in a single fragment.
@@ -616,198 +533,12 @@ func TestConcurrentWriteNoDeadlock(t *testing.T) {
 	}
 }
 
-// TestWindowBound verifies that the window provides backpressure: with wSize=2 at most
-// 2 fragments are in-flight simultaneously, and the 3rd is sent only after a TypeFragAck
-// releases a slot.
-func TestWindowBound(t *testing.T) {
-	const wSize = 2
-	inner, remote := newChanConnPair()
-	s := newMuxSession(inner, nil, false, wSize, 10*time.Second, 0, MaxReticulumMessage, false)
-	t.Cleanup(func() { s.Close() })
-
-	// Three separate connections so each fragment has a unique fragKey.
-	mcs := [3]*muxConn{newMuxConn(1, s, "a"), newMuxConn(2, s, "b"), newMuxConn(3, s, "c")}
-	s.mu.Lock()
-	for _, mc := range mcs {
-		s.conns[mc.id] = mc
-	}
-	s.mu.Unlock()
-
-	for _, mc := range mcs {
-		go func(c *muxConn) { c.Write([]byte("x")) }(mc)
-	}
-
-	// Read each fragment and send back an ACK to release the window slot, allowing
-	// the next fragment to proceed.
-	for i := 0; i < 3; i++ {
-		var pkt []byte
-		select {
-		case pkt = <-remote.readCh:
-		case <-time.After(500 * time.Millisecond):
-			t.Fatalf("fragment %d not sent within timeout", i+1)
-		}
-		p, err := decodePacket(pkt)
-		if err != nil {
-			t.Fatalf("bad packet: %v", err)
-		}
-		ack := encodePacket(muxPacket{typeByte: TypeFragAck, connID: p.connID, payload: []byte{byte(p.partIndex)}})
-		remote.Write(ack)
-	}
-}
-
-// TestFragAckReleasesWindow verifies that a TypeFragAck unblocks the next write: with
-// wSize=1 the second fragment can only be sent after the first is ACKed.
-func TestFragAckReleasesWindow(t *testing.T) {
-	const wSize = 1
-	s, remote := newManualSession(t, wSize)
-
-	mc := newMuxConn(1, s, "test")
-	s.mu.Lock()
-	s.conns[1] = mc
-	s.mu.Unlock()
-
-	go func() { mc.Write([]byte("first")) }()
-	go func() { mc.Write([]byte("second")) }()
-
-	// First fragment must arrive (acquires the single window slot).
-	select {
-	case pkt := <-remote.readCh:
-		p, _ := decodePacket(pkt)
-		// ACK it to release the window slot.
-		ack := encodePacket(muxPacket{typeByte: TypeFragAck, connID: p.connID, payload: []byte{byte(p.partIndex)}})
-		remote.Write(ack)
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("first fragment not sent")
-	}
-
-	// Second fragment must arrive after the ACK releases the slot.
-	select {
-	case <-remote.readCh:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("second fragment not sent after ACK")
-	}
-}
-
-// TestRetransmitOnTimeout verifies that a fragment with no TypeFragAck is retransmitted
-// after retryInterval, proving the inFlight entry stays until ACKed.
-func TestRetransmitOnTimeout(t *testing.T) {
-	t.Skip("checkRetransmits is commented out; Reticulum link layer handles retransmits via LinkProof")
-	s, remote := newManualSession(t, 8)
-
-	mc := newMuxConn(1, s, "test")
-	s.mu.Lock()
-	s.conns[1] = mc
-	s.mu.Unlock()
-
-	go mc.Write([]byte("hello"))
-
-	// Initial fragment must be sent.
-	select {
-	case <-remote.readCh:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("initial fragment not sent")
-	}
-
-	// Retransmit must fire: inFlight entry persists until TypeFragAck arrives.
-	select {
-	case <-remote.readCh:
-		// correct: retransmit fired
-	case <-time.After(s.retryInterval * 3):
-		t.Fatal("no retransmit — inFlight entry was incorrectly cleared")
-	}
-}
-
-// TestRetransmitGivesUp verifies that a connection is closed after maxRetries failed
-// retransmits with no TypeFragAck.
-func TestRetransmitGivesUp(t *testing.T) {
-	t.Skip("checkRetransmits is commented out; Reticulum link layer handles retransmits via LinkProof")
-	s, remote := newManualSession(t, 8)
-
-	mc := newMuxConn(1, s, "test")
-	s.mu.Lock()
-	s.conns[1] = mc
-	s.mu.Unlock()
-
-	go mc.Write([]byte("will-never-ack"))
-
-	// Initial send must succeed.
-	select {
-	case <-remote.readCh:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("initial fragment not sent")
-	}
-
-	// After maxRetries retransmits without ACK the connection must be closed.
-	// Drain retransmits so the sendQ doesn't stall.
-	go func() {
-		for {
-			select {
-			case <-remote.readCh:
-			case <-mc.done:
-				return
-			}
-		}
-	}()
-	// rttEst grows ~12.5% per retransmit on top of exponential backoff, so total
-	// giveup time is larger than the pure-backoff sum.  Use 2^(maxRetries+4) as a
-	// generous upper bound that covers the compounded growth.
-	waitFor := time.Duration(1<<uint(s.maxRetries+4)) * s.retryInterval
-	select {
-	case <-mc.done:
-		// correct: connection closed after max retries
-	case <-time.After(waitFor):
-		t.Fatal("connection not closed after max retries exceeded")
-	}
-}
-
-// TestRetransmitGivesUp_UpdatesRttEst verifies that rttEst increases after a fragment
-// exhausts maxRetries (no ACKs), so the estimate reflects the actual link latency
-// even when the peer is completely silent.
-func TestRetransmitGivesUp_UpdatesRttEst(t *testing.T) {
-	t.Skip("checkRetransmits is commented out; Reticulum link layer handles retransmits via LinkProof")
-	s, remote := newManualSession(t, 8)
-	initRtt := time.Duration(s.rttEst.Value())
-
-	mc := newMuxConn(1, s, "test")
-	s.mu.Lock()
-	s.conns[1] = mc
-	s.mu.Unlock()
-
-	go mc.Write([]byte("will-never-ack"))
-
-	// Drain retransmits so sendQ doesn't stall.
-	go func() {
-		for {
-			select {
-			case <-remote.readCh:
-			case <-mc.done:
-				return
-			}
-		}
-	}()
-
-	// rttEst grows ~12.5% per retransmit on top of exponential backoff, so total
-	// giveup time is larger than the pure-backoff sum.  Use 2^(maxRetries+4) as a
-	// generous upper bound that covers the compounded growth.
-	waitFor := time.Duration(1<<uint(s.maxRetries+4)) * s.retryInterval
-	select {
-	case <-mc.done:
-	case <-time.After(waitFor):
-		t.Fatal("connection not closed after max retries exceeded")
-	}
-
-	finalRtt := time.Duration(s.rttEst.Value())
-	if finalRtt <= initRtt {
-		t.Errorf("rttEst should have increased after give-up: init=%s final=%s", initRtt, finalRtt)
-	}
-}
-
 // TestFragBuffer_DuplicateDelivery verifies that injecting the same fragment a second
 // time (simulating a retransmit arriving after first assembly) delivers the message
 // only once to the upper layer, not twice.
 func TestFragBuffer_DuplicateDelivery(t *testing.T) {
 	inner, remote := newChanConnPair()
-	s := newMuxSession(inner, nil, true, defaultWindowSize, 20*time.Millisecond, 2, MaxReticulumMessage, false)
+	s := newMuxSession(inner, nil, true, MaxReticulumMessage)
 	t.Cleanup(func() { s.Close() })
 
 	const connID = uint16(1)
@@ -853,7 +584,7 @@ func TestMuxSession_DynamicMaxMsg(t *testing.T) {
 
 	// Use chanConn (packetReader path) so the receiver handles arbitrary packet sizes.
 	inner, remote := newChanConnPair()
-	s := newMuxSession(inner, nil, false, defaultWindowSize, 20*time.Millisecond, 2, bigMaxMsg, false)
+	s := newMuxSession(inner, nil, false, bigMaxMsg)
 	t.Cleanup(func() { s.Close() })
 
 	mc := newMuxConn(1, s, "test")
@@ -887,49 +618,4 @@ func TestMuxSession_MaxMsgDefault(t *testing.T) {
 	client, _ := newTestMuxPair(t)
 	require.Equal(t, MaxReticulumMessage, client.maxMsg)
 	require.Equal(t, maxFragPayload, client.maxFragPayload)
-}
-
-// TestWriteData_MultiFragNoPacingOnContinuation verifies that continuation
-// fragments (part index > 0) of a multi-part message are never held back by
-// bandwidth pacing. Without the fix a very low bwEst would stall the second
-// fragment for minutes even though the first part was ACKed immediately.
-func TestWriteData_MultiFragNoPacingOnContinuation(t *testing.T) {
-	client, server := newTestMuxPair(t)
-
-	// Force an absurdly low bandwidth estimate (1 B/s) so that pacing would
-	// delay a ~117-byte continuation fragment by ~117 seconds — far beyond the
-	// test timeout — if continuation fragments were incorrectly paced.
-	client.bwEst.Store(newEWMA(0.125, 1, 1))
-
-	mc, err := client.OpenConn("test:1")
-	require.NoError(t, err)
-	defer mc.Close()
-
-	sc := <-server.incomingCh
-	defer sc.Close()
-
-	// Exactly maxFragPayload+1 bytes forces two fragments.
-	data := make([]byte, maxFragPayload+1)
-	for i := range data {
-		data[i] = byte(i)
-	}
-
-	go func() {
-		_, _ = mc.Write(data)
-	}()
-
-	got := make([]byte, len(data))
-	readDone := make(chan error, 1)
-	go func() {
-		_, err := io.ReadFull(sc, got)
-		readDone <- err
-	}()
-
-	select {
-	case err := <-readDone:
-		require.NoError(t, err)
-		require.Equal(t, data, got)
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out: continuation fragment was stalled by bandwidth pacing")
-	}
 }

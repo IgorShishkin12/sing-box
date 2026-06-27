@@ -36,17 +36,13 @@ const (
 	TypeCloseConn    byte = 0x83 // close virtual connection; no payload
 	TypeRequestAuth  byte = 0x84 // challenge request
 	TypeResponseAuth byte = 0x85 // auth response
-	TypeFragAck      byte = 0x86 // fragment acknowledgement; payload = 1-byte partIndex
 	// TypeLargeData carries a payload that exceeds the 64-fragment limit (~25 KB).
 	// The bridge routes this to the Reticulum Resource protocol; the receiver gets
 	// the reassembled data via a single on_data callback.
 	TypeLargeData byte = 0xC0
 
-	defaultWindowSize    = 16
-	defaultMaxRetries    = 6
-	defaultRetryInterval = 500 * time.Millisecond
-	maxRetransmitDelay   = 30 * time.Second
-	defaultFragTimeout   = 2 * time.Second
+	maxRetransmitDelay = 30 * time.Second
+	defaultFragTimeout = 2 * time.Second
 )
 
 // isControl reports whether a type byte represents a control packet (high bit set).
@@ -176,27 +172,10 @@ func (fb *fragBuffer) addPart(partIndex int, isLast bool, data []byte) ([]byte, 
 
 // ── Send queue ───────────────────────────────────────────────────────────────
 
-type fragPriority int
-
-const (
-	prioRetransmit fragPriority = 0 // lost fragment being re-sent
-	prioInProgress fragPriority = 1 // fragment 2..N of an already-started message
-	prioNew        fragPriority = 2 // first fragment of a brand-new message
-)
-
 // fragKey uniquely identifies one fragment within a session.
 type fragKey struct {
 	connID    uint16
 	partIndex uint8
-}
-
-// inFlightEntry tracks a fragment that has been sent but not yet ACKed.
-type inFlightEntry struct {
-	encoded []byte
-	key     fragKey
-	retries int
-	retryAt time.Time
-	sentAt  time.Time // when first sent; used to measure RTT on ACK
 }
 
 // msgSend tracks the in-order send completion of one logical message's fragments.
@@ -212,97 +191,36 @@ type msgSend struct {
 
 // queuedFrag is one item in the send queue.
 type queuedFrag struct {
-	encoded      []byte
-	key          fragKey
-	isRetransmit bool // true → already holds a window slot; skip window acquire
-	prio         fragPriority
-	msg          *msgSend // shared by all fragments of one message (nil for retransmits)
-	lastInMsg    bool     // true for the final fragment; closes msg.done when sent
+	encoded   []byte
+	key       fragKey
+	msg       *msgSend // shared by all fragments of one message
+	lastInMsg bool     // true for the final fragment; closes msg.done when sent
 }
 
-// sendQueue is a 3-level priority queue backed by buffered channels.
+// sendQueue serialises fragment sends through a single worker goroutine so that
+// fragments reach the inner conn in the order they were enqueued.
 type sendQueue struct {
-	retransmit chan *queuedFrag
-	inProgress chan *queuedFrag
-	newMsg     chan *queuedFrag
+	ch chan *queuedFrag
 }
 
 func newSendQueue(bufSize int) *sendQueue {
-	return &sendQueue{
-		retransmit: make(chan *queuedFrag, bufSize),
-		inProgress: make(chan *queuedFrag, bufSize),
-		newMsg:     make(chan *queuedFrag, bufSize),
-	}
+	return &sendQueue{ch: make(chan *queuedFrag, bufSize)}
 }
 
-// run is the send-queue worker goroutine. It drains items in priority order and
-// calls s.doWrite for each. Exits when s.done is closed.
+// run is the send-queue worker goroutine. It drains queued fragments and calls
+// s.doWrite for each. Exits when s.done is closed.
 func (q *sendQueue) run(s *muxSession) {
 	for {
-		// Fast path: drain retransmit without blocking.
-		select {
-		case f := <-q.retransmit:
-			s.doWrite(f)
-			continue
-		default:
-		}
-		// Fast path: drain inProgress before new.
-		select {
-		case f := <-q.inProgress:
-			s.doWrite(f)
-			continue
-		default:
-		}
-		// Blocking wait; retransmit and inProgress still have priority via the loop.
 		select {
 		case <-s.done:
 			return
-		case f := <-q.retransmit:
-			s.doWrite(f)
-		case f := <-q.inProgress:
-			s.doWrite(f)
-		case f := <-q.newMsg:
+		case f := <-q.ch:
 			s.doWrite(f)
 		}
 	}
 }
 
 // ── muxSession ───────────────────────────────────────────────────────────────
-
-// ewma is a thread-safe Exponentially Weighted Moving Average.
-// alpha controls smoothing: smaller α → slower adaptation, larger α → faster.
-// A common choice is α = 0.125 (1/8): new = 7/8·old + 1/8·sample.
-type ewma struct {
-	val   atomic.Int64
-	alpha float64
-	floor int64 // lower bound enforced after every update; 0 = no floor
-}
-
-// newEWMA creates an EWMA with the given smoothing factor, initial value, and floor.
-func newEWMA(alpha float64, initial, floor int64) *ewma {
-	e := &ewma{alpha: alpha, floor: floor}
-	e.val.Store(initial)
-	return e
-}
-
-// Update incorporates sample into the moving average using a CAS retry loop.
-func (e *ewma) Update(sample int64) {
-	for {
-		old := e.val.Load()
-		n := int64(float64(old)*(1-e.alpha) + float64(sample)*e.alpha)
-		if e.floor > 0 && n < e.floor {
-			n = e.floor
-		}
-		if e.val.CompareAndSwap(old, n) {
-			return
-		}
-	}
-}
-
-// Value returns the current EWMA value.
-func (e *ewma) Value() int64 {
-	return e.val.Load()
-}
 
 // muxSession manages one Reticulum connection and multiplexes virtual connections.
 type muxSession struct {
@@ -321,49 +239,21 @@ type muxSession struct {
 	maxMsg         int
 	maxFragPayload int // maxMsg - muxHeaderSize
 
-	windowSize    int
-	windowSem     chan struct{} // semaphore: len = concurrent-writes-in-progress; cap = windowSize
-	inFlight      sync.Map      // fragKey → *inFlightEntry (used for retransmit on RF links)
-	sendQ         *sendQueue
-	retryInterval time.Duration
-	maxRetries    int
-	fragTimeout   time.Duration
+	sendQ       *sendQueue
+	fragTimeout time.Duration
 
-	// Counters for observability.
-	statFragsSent    atomic.Uint64 // total fragments written to inner
-	statAcksReceived atomic.Uint64 // total TypeFragAck packets received from peer
-	statAcksSent     atomic.Uint64 // total TypeFragAck packets sent to peer
-
-	// rttEst is the EWMA round-trip-time estimate in nanoseconds (alpha=0.125).
-	// Initialised from retryInterval; updated on every TypeFragAck and on fragment
-	// give-up (failed packets: time from first send to give-up is treated as a lower
-	// bound sample).  Retransmit timeout = 2 × rttEst, floored at retryInterval.
-	rttEst *ewma
-
-	// bwEst is the EWMA throughput estimate in bytes/second (alpha=0.125).
-	// Increases when ACKs arrive (link is delivering), decreases on retransmit
-	// timeouts (congestion / loss).  Nil when pacing is disabled (test sessions).
-	bwEst atomic.Pointer[ewma]
-
-	// lastSendAt is the unix-nano timestamp of the most recent doWrite; used for
-	// pacing so sends are spaced by at least len(frag)/bwEst seconds.
-	lastSendAt atomic.Int64
+	// statFragsSent counts fragments written to inner, for observability.
+	statFragsSent atomic.Uint64
 }
 
 // newMuxSession is the internal constructor used by both public constructors and tests.
 // maxMsg is the maximum total mux-packet size (header + payload) for this session;
 // pass MaxReticulumMessage for the LoRa default.
-// withPacing enables bandwidth-based send pacing; pass true for real LoRa/RF links,
-// false for test sessions (net.Pipe) where pacing would make tests take minutes.
 func newMuxSession(
 	inner net.Conn,
 	logger log.ContextLogger,
 	isServer bool,
-	windowSize int,
-	retryInterval time.Duration,
-	maxRetries int,
 	maxMsg int,
-	withPacing bool,
 ) *muxSession {
 	if maxMsg <= muxHeaderSize {
 		maxMsg = MaxReticulumMessage
@@ -375,40 +265,26 @@ func newMuxSession(
 		done:           make(chan struct{}),
 		maxMsg:         maxMsg,
 		maxFragPayload: maxMsg - muxHeaderSize,
-		windowSize:     windowSize,
-		windowSem:      make(chan struct{}, windowSize),
 		sendQ:          newSendQueue(4096),
-		retryInterval:  retryInterval,
-		maxRetries:     maxRetries,
 		fragTimeout:    defaultFragTimeout,
-	}
-	s.rttEst = newEWMA(0.5, int64(retryInterval), int64(retryInterval))
-	// SF8 BW62.5 (retryInterval=500ms, maxMsg=120): initial ≈ 58 B/s → ~2 s per fragment,
-	// leaving airtime for ACKs and return-path traffic.
-	if withPacing {
-		// floor = initial prevents bwEst from decaying below a LoRa-appropriate
-		// value. The EWMA measures bytes/RTT, which underestimates true channel
-		// capacity (RTT >> airtime on LoRa). Keeping bwEst ≥ initial caps the
-		// pacing interval at ~4×retryInterval per first-of-message fragment.
-		initial := max(int64(s.maxFragPayload)*int64(time.Second)/(4*int64(retryInterval)), 1)
-		s.bwEst.Store(newEWMA(0.5, initial, initial))
 	}
 	if isServer {
 		s.incomingCh = make(chan *muxConn, 1024)
 	}
 	go s.readLoop()
 	go s.sendQ.run(s)
-	// No retransmit loop: the Reticulum channel (under the bridge) handles
-	// acknowledgement and retransmission now.
+	// Reliability, ordering, acknowledgement and flow control are handled by the
+	// Reticulum channel under the bridge, so the mux keeps no window, in-flight
+	// table, fragment ACKs, or retransmit loop.
 	return s
 }
 
 func newMuxSessionClient(inner net.Conn, logger log.ContextLogger, maxMsg int) *muxSession {
-	return newMuxSession(inner, logger, false, defaultWindowSize, defaultRetryInterval, defaultMaxRetries, maxMsg, true)
+	return newMuxSession(inner, logger, false, maxMsg)
 }
 
 func newMuxSessionServer(inner net.Conn, logger log.ContextLogger, maxMsg int) *muxSession {
-	return newMuxSession(inner, logger, true, defaultWindowSize, defaultRetryInterval, defaultMaxRetries, maxMsg, true)
+	return newMuxSession(inner, logger, true, maxMsg)
 }
 
 // isClosed reports whether this session has been shut down.
@@ -452,8 +328,8 @@ func (s *muxSession) writeCtrl(typ byte, id uint16, payload []byte) error {
 // writeData sends data for virtual connection id.
 // Payloads exceeding the 64-fragment limit are sent as TypeLargeData via the
 // Reticulum Resource protocol. Smaller payloads are fragmented and enqueued to
-// the send queue so that doWrite handles windowing and inFlight registration;
-// this enables TypeFragAck-driven flow control and retransmission on lossy links.
+// the send queue; the worker hands each fragment to the inner conn, which carries
+// it over the Reticulum channel that provides reliability and flow control.
 func (s *muxSession) writeData(id uint16, data []byte) error {
 	if len(data) > s.maxFragPayload*64 {
 		if s.logger != nil {
@@ -470,23 +346,14 @@ func (s *muxSession) writeData(id uint16, data []byte) error {
 	tracker := &msgSend{done: make(chan struct{})}
 	for i, part := range parts {
 		pkt := muxPacket{typeByte: encodeDataByte(n, i), connID: id, payload: part}
-		key := fragKey{connID: id, partIndex: uint8(i)}
-		// Continuation fragments (i > 0) are marked prioInProgress so that doWrite
-		// skips bandwidth pacing for them. All parts still go into newMsg to preserve
-		// send order; prio is only used for the pacing decision in doWrite.
-		prio := prioNew
-		if i > 0 {
-			prio = prioInProgress
-		}
 		f := &queuedFrag{
 			encoded:   encodePacket(pkt),
-			key:       key,
-			prio:      prio,
+			key:       fragKey{connID: id, partIndex: uint8(i)},
 			msg:       tracker,
 			lastInMsg: i == n-1,
 		}
 		select {
-		case s.sendQ.newMsg <- f:
+		case s.sendQ.ch <- f:
 		case <-s.done:
 			return io.ErrClosedPipe
 		}
@@ -506,23 +373,14 @@ func (s *muxSession) writeData(id uint16, data []byte) error {
 	}
 }
 
-// doWrite sends one queued fragment. For new (non-retransmit) fragments it acquires
-// a window slot first, blocking until one is available or the session closes, then
-// registers the fragment in inFlight. The window slot is held until the peer sends a
-// TypeFragAck (released by readLoop) or checkRetransmits gives up after maxRetries.
-// On reliable connections (TCP, net.Pipe) ACKs arrive quickly so the window is never
-// exhausted; on lossy RF links the window provides backpressure and inFlight enables
-// retransmission of lost fragments.
+// doWrite writes one queued fragment to the inner conn. Reliability,
+// acknowledgement, flow control and retransmission are the Reticulum channel's
+// job (the bridge sends each fragment over the link's reliable channel), so the
+// mux keeps no window, in-flight table, fragment ACKs, or retransmit loop.
 func (s *muxSession) doWrite(f *queuedFrag) {
 	// Unblock the writing muxConn.Write once the final fragment of the message has
-	// been pushed to the inner conn (or this attempt ended). writeData waits on
-	// this so the next message is only sent after this one finishes going out.
-	// Unblock the writing muxConn.Write once the final fragment of the message has
 	// been pushed to the inner conn. writeData waits on this so a connection's
-	// messages are handed to the link in order. Reliability, acknowledgement,
-	// flow control and retransmission are now the Reticulum channel's job (the
-	// bridge sends each fragment over the link's reliable channel), so the mux no
-	// longer keeps a window, in-flight table, fragment ACKs, or retransmit loop.
+	// messages are handed to the link in order.
 	if f.lastInMsg && f.msg != nil {
 		defer close(f.msg.done)
 	}
@@ -645,9 +503,8 @@ func (s *muxSession) readLoop() {
 			fb = &fragBuffer{}
 			fragBufs[pkt.connID] = fb
 		} else if fb.delivered {
-			// Already fully delivered.  The ACK was already sent above so the
-			// sender will eventually stop retransmitting.  Update lastActivity
-			// so the GC doesn't expire the marker too early.
+			// Already fully delivered. Update lastActivity so the GC doesn't expire
+			// the delivery marker too early, suppressing any late retransmit.
 			fb.lastActivity = time.Now()
 			continue
 		}
@@ -692,122 +549,16 @@ func (s *muxSession) readLoop() {
 }
 
 // logStats emits the current mux counters at DEBUG level with a reason label.
-// Called on every significant event (send, ACK, retransmit/give-up) so the log
-// reflects state changes immediately rather than on a fixed timer.
+// Called on every significant send event so the log reflects state changes
+// immediately rather than on a fixed timer.
 func (s *muxSession) logStats(reason string) {
 	if s.logger == nil {
 		return
 	}
-	writing := len(s.windowSem)
-	queued := len(s.sendQ.retransmit) + len(s.sendQ.inProgress) + len(s.sendQ.newMsg)
 	s.logger.Debug(fmt.Sprintf(
-		"mux stats [%s]: writing=%d/%d queued=%d sent=%d acks_rx=%d acks_tx=%d rtt_est=%s bw_est=%d B/s",
-		reason,
-		writing, s.windowSize, queued,
-		s.statFragsSent.Load(),
-		s.statAcksReceived.Load(),
-		s.statAcksSent.Load(),
-		time.Duration(s.rttEst.Value()).Round(time.Millisecond),
-		func() int64 {
-			if bw := s.bwEst.Load(); bw != nil {
-				return bw.Value()
-			}
-			return 0
-		}(),
+		"mux stats [%s]: queued=%d sent=%d",
+		reason, len(s.sendQ.ch), s.statFragsSent.Load(),
 	))
-}
-
-// retransmitLoop periodically scans in-flight fragments and re-enqueues timed-out ones.
-func (s *muxSession) retransmitLoop() {
-	ticker := time.NewTicker(s.retryInterval / 2)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-s.done:
-			return
-		case <-ticker.C:
-			s.checkRetransmits()
-		}
-	}
-}
-
-// fragRetransmitDelay returns the backoff delay before the next retransmit.
-// Each failure doubles the wait (exponential backoff): 2^retries × rttEst,
-// capped at maxRetransmitDelay. retries is the attempt number after incrementing
-// (so 1 for the first retransmit, 2 for the second, etc.).
-func fragRetransmitDelay(retries int, rttEst time.Duration) time.Duration {
-	shift := uint(retries)
-	if shift > 5 {
-		shift = 5 // prevent overflow; 2^5=32 is already above maxRetransmitDelay/rttEst for any sane rttEst
-	}
-	d := time.Duration(2<<shift) * rttEst
-	if d > maxRetransmitDelay {
-		d = maxRetransmitDelay
-	}
-	return d
-}
-
-// checkRetransmits re-enqueues fragments whose retryAt has elapsed.
-// Fragments exceeding maxRetries cause their connection to be closed.
-//
-// NOTE: commented out — Reticulum sends a LinkProof for every data_packet,
-// so the link layer already handles delivery confirmation and retransmit.
-// Re-enable if we switch away from data_packet or need app-layer guarantees.
-func (s *muxSession) checkRetransmits() {
-	// now := time.Now()
-	// var toClose []uint16
-	// s.inFlight.Range(func(k, v any) bool {
-	// 	entry := v.(*inFlightEntry)
-	// 	if now.Before(entry.retryAt) {
-	// 		return true
-	// 	}
-	// 	entry.retries++
-	// 	if entry.retries > s.maxRetries {
-	// 		toClose = append(toClose, entry.key.connID)
-	// 		s.inFlight.Delete(k)
-	// 		// Treat total wait (first send → give-up) as an RTT sample.
-	// 		s.rttEst.Update(int64(time.Since(entry.sentAt)))
-	// 		// Give-up is a strong congestion signal; EWMA toward 0.
-	// 		if bw := s.bwEst.Load(); bw != nil {
-	// 			bw.Update(0)
-	// 		}
-	// 		s.logStats("packet lost (all retries exhausted)")
-	// 		// Release the window slot this fragment was holding.
-	// 		select {
-	// 		case <-s.windowSem:
-	// 		default:
-	// 		}
-	// 		return true
-	// 	}
-	// 	// Timeout: nudge rttEst up.
-	// 	s.rttEst.Update(2 * s.rttEst.Value())
-	// 	// Retransmit timeout is a mild congestion signal; EWMA toward 0.
-	// 	if bw := s.bwEst.Load(); bw != nil {
-	// 		bw.Update(0)
-	// 	}
-	// 	// Exponential backoff: each failure doubles the wait.
-	// 	rttEst := time.Duration(s.rttEst.Value())
-	// 	delay := fragRetransmitDelay(entry.retries, rttEst)
-	// 	entry.retryAt = now.Add(delay)
-	// 	s.logStats("retransmit queued (no ACK)")
-	// 	select {
-	// 	case s.sendQ.retransmit <- &queuedFrag{
-	// 		encoded:      entry.encoded,
-	// 		key:          entry.key,
-	// 		isRetransmit: true,
-	// 		prio:         prioRetransmit,
-	// 	}:
-	// 	default:
-	// 		// Retransmit channel full; will retry on next tick.
-	// 	}
-	// 	return true
-	// })
-	// for _, id := range toClose {
-	// 	if s.logger != nil {
-	// 		s.logger.Warn("mux: conn ", id, " closed after ", s.maxRetries, " retransmit failures")
-	// 	}
-	// 	s.closeConnRemote(id)
-	// }
 }
 
 // closeConnRemote closes a virtual conn in response to a TypeCloseConn or retransmit failure.

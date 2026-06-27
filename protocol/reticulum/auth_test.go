@@ -1,15 +1,12 @@
 package reticulum
 
 import (
-	"errors"
 	"io"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
 )
-
-var errAuthTimeout = errors.New("auth timeout")
 
 // chanAuthIO implements AuthIO using a channel pair; no network needed.
 type chanAuthIO struct {
@@ -27,18 +24,6 @@ func (c *chanAuthIO) ReadMsg() (byte, []byte, error) {
 		return 0, nil, io.EOF
 	}
 	return msg[0], msg[1:], nil
-}
-
-func (c *chanAuthIO) ReadMsgDeadline(deadline time.Time) (byte, []byte, error) {
-	select {
-	case msg, ok := <-c.in:
-		if !ok || len(msg) == 0 {
-			return 0, nil, io.EOF
-		}
-		return msg[0], msg[1:], nil
-	case <-time.After(time.Until(deadline)):
-		return 0, nil, errAuthTimeout
-	}
 }
 
 func (c *chanAuthIO) WriteMsg(typeByte byte, payload []byte) error {
@@ -237,11 +222,6 @@ func (s *selfServingAuthIO) ReadMsg() (byte, []byte, error) {
 	return TypeResponseAuth, macBound(s.password, s.peerID, s.capturedSalt), nil
 }
 
-func (s *selfServingAuthIO) ReadMsgDeadline(_ time.Time) (byte, []byte, error) {
-	// selfServingAuthIO always answers immediately; ignore the deadline.
-	return s.ReadMsg()
-}
-
 func TestAuthWithRetry_NoneFailsFast(t *testing.T) {
 	// RetryNone with a peer that returns wrong MAC — error returned, sleep never called.
 	mock := &selfServingAuthIO{password: "pw", peerID: "id-b", failFor: 1}
@@ -316,16 +296,6 @@ func (o *orderRecordingIO) ReadMsg() (byte, []byte, error) {
 	return typB, data, err
 }
 
-func (o *orderRecordingIO) ReadMsgDeadline(deadline time.Time) (byte, []byte, error) {
-	typB, data, err := o.chanAuthIO.ReadMsgDeadline(deadline)
-	o.mu.Lock()
-	if err == nil && typB == TypeRequestAuth {
-		o.ops = append(o.ops, "R1")
-	}
-	o.mu.Unlock()
-	return typB, data, err
-}
-
 // TestAuth_WriteBeforeRead verifies that WriteMsg is always called before ReadMsg
 // in each round. This is the key invariant that prevents false auth timeouts on
 // high-latency links: the idle timer in ReadMsg starts only after our own
@@ -365,10 +335,6 @@ func (s *slowWriteIO) WriteMsg(typeByte byte, payload []byte) error {
 	return s.chanAuthIO.WriteMsg(typeByte, payload)
 }
 
-func (s *slowWriteIO) ReadMsgDeadline(deadline time.Time) (byte, []byte, error) {
-	return s.chanAuthIO.ReadMsgDeadline(deadline)
-}
-
 // TestAuth_SlowWriteNoTimeout verifies that a slow WriteMsg does not cause a
 // false auth timeout. Previously, the ReadMsg timer started before WriteMsg
 // completed, causing timeouts on LoRa links where TX takes several seconds.
@@ -387,7 +353,6 @@ func TestAuth_SlowWriteNoTimeout(t *testing.T) {
 	}
 }
 
-
 // staleRound1MockIO simulates a peer whose Round 2 ReadMsg returns a stale
 // TypeRequestAuth before the real TypeResponseAuth.
 type staleRound1MockIO struct {
@@ -402,11 +367,6 @@ func (s *staleRound1MockIO) WriteMsg(typeByte byte, payload []byte) error {
 		s.capturedSalt = append([]byte{}, payload...)
 	}
 	return nil
-}
-
-func (s *staleRound1MockIO) ReadMsgDeadline(_ time.Time) (byte, []byte, error) {
-	// Round 1 always succeeds immediately.
-	return TypeRequestAuth, make([]byte, 32), nil
 }
 
 func (s *staleRound1MockIO) ReadMsg() (byte, []byte, error) {

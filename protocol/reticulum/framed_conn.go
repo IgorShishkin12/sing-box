@@ -22,10 +22,6 @@ type packetReader interface {
 // so either side can detect and reject messages that arrive out of sequence.
 type AuthIO interface {
 	ReadMsg() (typeByte byte, payload []byte, err error)
-	// ReadMsgDeadline is like ReadMsg but times out at the given absolute deadline
-	// instead of using authTimeout/authInactivityTimeout. Used by authAttempt for
-	// per-retransmit Round 1 windows; Round 2 still uses ReadMsg.
-	ReadMsgDeadline(deadline time.Time) (typeByte byte, payload []byte, err error)
 	WriteMsg(typeByte byte, payload []byte) error
 }
 
@@ -236,23 +232,6 @@ func (fc *framedConn) ReadMsg() (byte, []byte, error) {
 			deadline = inact
 		}
 	}
-	select {
-	case msg, ok := <-fc.ctrlCh:
-		if !ok {
-			return 0, nil, io.EOF
-		}
-		return msg[0], msg[1:], nil
-	case <-fc.done:
-		return 0, nil, io.ErrClosedPipe
-	case <-time.After(time.Until(deadline)):
-		return 0, nil, fmt.Errorf("auth timeout")
-	}
-}
-
-// ReadMsgDeadline is like ReadMsg but uses an absolute deadline instead of
-// authTimeout/authInactivityTimeout. Intended for Round 1 retransmit windows
-// where the caller supplies a short per-attempt deadline.
-func (fc *framedConn) ReadMsgDeadline(deadline time.Time) (byte, []byte, error) {
 	select {
 	case msg, ok := <-fc.ctrlCh:
 		if !ok {

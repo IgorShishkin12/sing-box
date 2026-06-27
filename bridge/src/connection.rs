@@ -35,13 +35,10 @@ pub(crate) async fn wait_for_outbound_resource(
     data_len: usize,
     mut resource_rx: broadcast::Receiver<ResourceEvent>,
 ) -> Result<usize, String> {
-    // Inactivity timeout for the outbound resource transfer. The *total* transfer
-    // time is unbounded (a large body over a slow link can legitimately take many
-    // minutes), so this must never cap total duration — it is reset on every
-    // progress event reporting more bytes acknowledged by the peer. Only genuine
-    // silence (peer stopped acking for this long) aborts the send. Kept generous
-    // so it defers to the lib's own progress-aware retry handling.
-    const INACTIVITY_SECS: u64 = 180;
+    // Inactivity timeout for the outbound resource transfer; see the shared
+    // crate::RESOURCE_INACTIVITY_SECS for the rationale. Reset on every progress
+    // event, so it never caps total (legitimately long) transfer duration.
+    const INACTIVITY_SECS: u64 = crate::RESOURCE_INACTIVITY_SECS;
     const HEARTBEAT_SECS: u64 = 15;
     let mut last_progress_bytes: u64 = 0;
     let started = tokio::time::Instant::now();

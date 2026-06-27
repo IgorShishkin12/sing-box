@@ -30,14 +30,9 @@ import (
 // authTimeout is the overall deadline for each round within authAttempt.
 // 30 s accommodates LoRa channel congestion (CSMA backoff, competing
 // transmissions) without being so long that a genuinely lost peer hangs
-// the connection noticeably.
+// the connection noticeably. The deadline is applied by framedConn.ReadMsg,
+// closest to the actual read where the uncertainty lives.
 const authTimeout = 30 * time.Second
-
-// retransmitRound1Interval is the suggested sleep between authWithRetry attempts
-// (used by retryDelay for RetryLinear). It is NOT the Round 1 read deadline;
-// that uses authTimeout so a full LoRa round-trip (can be 8–12 s at SF8 BW62.5)
-// fits within a single attempt.
-const retransmitRound1Interval = 5 * time.Second
 
 // RetryPolicy controls how auth failures are retried on the same connection.
 type RetryPolicy string
@@ -103,13 +98,11 @@ func authAttempt(rw AuthIO, password, ownID, peerID string, ownSalt []byte) erro
 	// This happens on lossy LoRa links where the peer's TypeRequestAuth was lost in
 	// transit.  We keep waiting; the peer will retry its TypeRequestAuth after its
 	// own Round 2 timeout, at which point we can complete Round 1.
-	// NOTE: timeout commented out — Reticulum handles link-level timeouts and
-	// will close the connection if the peer is unreachable; no Go-side deadline needed.
+	// ReadMsg applies the authTimeout/inactivity deadline internally.
 	var typB byte
 	var data []byte
 	for {
 		var err error
-		// typB, data, err = rw.ReadMsgDeadline(time.Now().Add(authTimeout))
 		typB, data, err = rw.ReadMsg()
 		if err != nil {
 			return fmt.Errorf("recv round1: %w", err)
