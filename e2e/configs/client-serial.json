@@ -1,6 +1,6 @@
 {
   "log": {
-    "level": "trace",
+    "level": "info",
     "output": "/dev/stdout",
     "timestamp": true
   },
@@ -20,17 +20,17 @@
       "password": "e2e-test-password",
       "reticulum_config": {
         "identity_name": "e2e-client",
-        "storage_path": "/var/lib/reticulum/client-serial",
+        "storage_path": "/tmp/reticulum-client",
         "interfaces": [
           {
             "name": "RNode Serial Client",
             "type": "RNodeSerial",
-            "device": "/dev/ttyUSB1",
+            "device": "/dev/ttyUSB0",
             "frequency_hz": 433000000,
-            "bandwidth_hz": 500000,
+            "bandwidth_hz": 62500,
             "tx_power_dbm": 0,
-            "spreading_factor": 5,
-            "coding_rate": 5
+            "spreading_factor": 8,
+            "coding_rate": 6
           }
         ]
       }

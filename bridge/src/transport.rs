@@ -30,7 +30,7 @@ use reticulum_rs::transport::iface::rnode_ble::{
 use reticulum_rs::transport::iface::tcp_client::TcpClient;
 use reticulum_rs::transport::iface::tcp_server::TcpServer;
 use reticulum_rs::transport::iface::udp::UdpInterface;
-use reticulum_rs::transport::iface::InterfaceManager;
+use reticulum_rs::transport::iface::{InterfaceManager, RxMessage};
 use reticulum_rs::transport::transport::{Transport, TransportConfig};
 use reticulum_rs::transport::PacketContext;
 
@@ -547,6 +547,35 @@ pub fn init_transport(cfg: &ReticulumConfig) -> Result<(), String> {
     *identity_hash_store()
         .lock()
         .unwrap_or_else(|p| p.into_inner()) = Some(identity_hash);
+
+    // Diagnostic: subscribe to raw interface packets to verify the BLE → KISS
+    // → Packet::deserialize chain without patching the library. Logged at DEBUG
+    // so it has zero cost in production unless RUST_LOG includes debug for this module.
+    if let Some(tp_arc) = get_transport() {
+        let iface_rx_handle = runtime::spawn(async move {
+            let mut rx: broadcast::Receiver<RxMessage> = {
+                let tp = tp_arc.lock().await;
+                tp.iface_rx()
+            };
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        log::debug!(
+                            "iface_rx: addr={} packet_type={:?}",
+                            msg.address,
+                            msg.packet.header.packet_type
+                        );
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        log::warn!("iface_rx lagged by {} messages", n);
+                    }
+                }
+            }
+        });
+        runtime::register_task(iface_rx_handle);
+    }
+
     Ok(())
 }
 
