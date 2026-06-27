@@ -51,12 +51,10 @@ pub fn init_runtime() -> Result<(), String> {
     // a daemon thread so btleplug can invoke BLE callbacks from worker context.
     #[cfg(all(feature = "rnode-ble", target_os = "android"))]
     if let Some(jvm_addr) = crate::transport::android_jvm_addr() {
-        builder.on_thread_start(move || {
-            unsafe {
-                let raw_jvm = jvm_addr as *mut jni::sys::JavaVM;
-                if let Ok(jvm) = jni::JavaVM::from_raw(raw_jvm) {
-                    let _ = jvm.attach_current_thread_as_daemon();
-                }
+        builder.on_thread_start(move || unsafe {
+            let raw_jvm = jvm_addr as *mut jni::sys::JavaVM;
+            if let Ok(jvm) = jni::JavaVM::from_raw(raw_jvm) {
+                let _ = jvm.attach_current_thread_as_daemon();
             }
         });
     }

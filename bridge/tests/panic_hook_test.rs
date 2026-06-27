@@ -86,7 +86,10 @@ fn test_install_panic_hook_with_callback_does_not_crash() {
     let _ = std::panic::take_hook();
 
     // The hook should have fired the callback with level=1 (error).
-    assert!(LOG_CAPTURED.load(Ordering::SeqCst), "panic hook should have called log cb");
+    assert!(
+        LOG_CAPTURED.load(Ordering::SeqCst),
+        "panic hook should have called log cb"
+    );
     let captured = LOG_CAPTURE.lock().unwrap().clone().unwrap();
     assert_eq!(captured.0, 1, "panic hook should log at error level");
     assert!(

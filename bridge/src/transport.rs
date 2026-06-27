@@ -143,13 +143,12 @@ pub fn init_btleplug_android() -> Result<(), String> {
     let addr = android_jvm_addr().ok_or("ANDROID_JVM not set")?;
     unsafe {
         let raw_jvm = addr as *mut jni::sys::JavaVM;
-        let jvm = jni::JavaVM::from_raw(raw_jvm)
-            .map_err(|e| format!("JavaVM::from_raw: {:?}", e))?;
+        let jvm =
+            jni::JavaVM::from_raw(raw_jvm).map_err(|e| format!("JavaVM::from_raw: {:?}", e))?;
         let env = jvm
             .attach_current_thread()
             .map_err(|e| format!("attach_current_thread: {:?}", e))?;
-        btleplug::platform::init(&env)
-            .map_err(|e| format!("btleplug platform init: {:?}", e))?;
+        btleplug::platform::init(&env).map_err(|e| format!("btleplug platform init: {:?}", e))?;
     }
     log::info!("btleplug Android platform initialized");
     Ok(())
