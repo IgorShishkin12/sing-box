@@ -1,5 +1,5 @@
-use reticulum_rs::transport::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
 use reticulum_rs::resource::{ResourceEvent, ResourceEventKind};
+use reticulum_rs::transport::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
 use reticulum_rs::transport::destination::link::Link;
 use reticulum_rs::transport::hash::{AddressHash, Hash};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +15,15 @@ static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
 const CHANNEL_READY_TIMEOUT_SECS: u64 = 60;
 /// Poll interval while waiting for channel send-window room.
 const CHANNEL_READY_POLL_MS: u64 = 20;
+
+/// Bytes the Reticulum Channel envelope prepends to every message payload:
+/// msg_type(2) + sequence(2) + length(2). The envelope rides *inside* the
+/// encrypted link packet, so a single-packet payload must leave this much room
+/// (see `Envelope::pack` in the lib). The mux is told to fragment to
+/// `max_plain - CHANNEL_ENVELOPE_OVERHEAD` so every fragment fits one channel
+/// packet; otherwise `write()` would reject the channel and fall back to a
+/// Resource per fragment.
+pub const CHANNEL_ENVELOPE_OVERHEAD: usize = 6;
 
 /// Wait on `resource_rx` until the outbound resource transfer `resource_hash` succeeds,
 /// fails, is cancelled, or the inactivity deadline expires.
@@ -253,7 +262,6 @@ impl Connection {
                 };
                 // The Channel envelope (msg_type+seq+len = 6 bytes) rides inside
                 // the encrypted link packet, so the app payload must leave room.
-                const CHANNEL_ENVELOPE_OVERHEAD: usize = 6;
                 let fits_channel = data.len() + CHANNEL_ENVELOPE_OVERHEAD <= max_plain;
                 if fits_channel {
                     return self.write_channel(*link_id, data).await;
@@ -330,7 +338,10 @@ impl Connection {
         ch.send(crate::transport::MUX_CHANNEL_MSG_TYPE, data.to_vec())
             .await
             .map_err(|e| {
-                format!("channel send: conn={} link={} err={:?}", self.id, link_id, e)
+                format!(
+                    "channel send: conn={} link={} err={:?}",
+                    self.id, link_id, e
+                )
             })?;
         Ok(data.len())
     }
@@ -403,7 +414,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_data_packet_threshold_lora_default() {
-        use reticulum_rs::transport::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
+        use reticulum_rs::transport::crypt::fernet::{
+            FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE,
+        };
         const LORA_MTU: usize = 220;
         let (link, _) = make_test_link();
         let mut link_guard = link.lock().await;
@@ -411,11 +424,18 @@ mod tests {
         link_guard.set_iface_mtu(LORA_MTU);
         // packet_mdu() = MTU(220) - OVERHEAD(36) = 184
         assert_eq!(link_guard.packet_mdu(), 184);
-        let threshold = link_guard
+        let max_plain = link_guard
             .packet_mdu()
             .saturating_sub(FERNET_OVERHEAD_SIZE + FERNET_MAX_PADDING_SIZE);
-        // 184 - 48 - 16 = 120; matches MaxReticulumMessage on the Go mux side
-        assert_eq!(threshold, 120);
+        // 184 - 48 - 16 = 120: the single-packet plaintext budget.
+        assert_eq!(max_plain, 120);
+
+        // The value advertised to the mux must reserve the channel envelope so a
+        // max-size fragment still fits one channel packet. 120 - 6 = 114.
+        let mux_max_payload = max_plain.saturating_sub(CHANNEL_ENVELOPE_OVERHEAD);
+        assert_eq!(mux_max_payload, 114);
+        // Invariant the bug violated: fragment + envelope must fit one packet.
+        assert!(mux_max_payload + CHANNEL_ENVELOPE_OVERHEAD <= max_plain);
     }
 
     #[tokio::test]

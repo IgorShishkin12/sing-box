@@ -460,9 +460,16 @@ pub extern "C" fn reticulum_get_conn_identified_peer(conn_handle: u64) -> *mut c
     alloc_c_string(result)
 }
 
-/// Get the max plaintext bytes per data_packet for this connection's link.
-/// Computed as link.packet_mdu() - FERNET_OVERHEAD_SIZE - FERNET_MAX_PADDING_SIZE.
-/// Returns -1 if the connection is not a link or not found.
+/// Get the max payload bytes per data_packet the mux may hand to one channel send.
+///
+/// This is the single-packet plaintext budget
+/// (`packet_mdu() - FERNET_OVERHEAD_SIZE - FERNET_MAX_PADDING_SIZE`) minus the
+/// Channel envelope (`CHANNEL_ENVELOPE_OVERHEAD`), because every small write now
+/// rides the Reticulum Channel, which prepends that envelope inside the encrypted
+/// packet. The mux fragments to this value so each fragment fits one channel
+/// packet; without the reservation, max-size fragments overflow the packet and
+/// `Connection::write` falls back to a Resource per fragment (catastrophically
+/// slow on a tight-MTU link). Returns -1 if the connection is not a link or not found.
 #[no_mangle]
 pub extern "C" fn reticulum_get_conn_max_payload(conn_handle: u64) -> i32 {
     use reticulum_rs::transport::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
@@ -479,7 +486,8 @@ pub extern "C" fn reticulum_get_conn_max_payload(conn_handle: u64) -> i32 {
         let guard = link.lock().await;
         guard
             .packet_mdu()
-            .saturating_sub(FERNET_OVERHEAD_SIZE + FERNET_MAX_PADDING_SIZE) as i32
+            .saturating_sub(FERNET_OVERHEAD_SIZE + FERNET_MAX_PADDING_SIZE)
+            .saturating_sub(crate::connection::CHANNEL_ENVELOPE_OVERHEAD) as i32
     })
 }
 

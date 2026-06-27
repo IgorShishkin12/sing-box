@@ -367,12 +367,9 @@ async fn spawn_interfaces(
                 )
                 .with_rnode_validation(lora, Duration::from_millis(1_500));
                 let iface_mgr_clone = iface_mgr.clone();
-                let addr = iface_mgr
-                    .lock()
-                    .await
-                    .spawn(ble, |context| async move {
-                        NativeRnodeBleKissInterface::spawn(context, iface_mgr_clone).await
-                    });
+                let addr = iface_mgr.lock().await.spawn(ble, |context| async move {
+                    NativeRnodeBleKissInterface::spawn(context, iface_mgr_clone).await
+                });
 
                 log::info!(
                     "spawned RNodeBLE '{}' peripheral_id={} freq_hz={} addr={}",
@@ -856,7 +853,12 @@ pub async fn open_channel_and_forward(conn_id: u64, link_id: AddressHash) {
         guard.channel(link_id)
     };
     if let Err(e) = ch.open().await {
-        log::warn!("[channel] open failed conn={} link={} err={:?}", conn_id, link_id, e);
+        log::warn!(
+            "[channel] open failed conn={} link={} err={:?}",
+            conn_id,
+            link_id,
+            e
+        );
         return;
     }
     match ch
@@ -868,11 +870,14 @@ pub async fn open_channel_and_forward(conn_id: u64, link_id: AddressHash) {
     {
         Ok(_) => log::debug!(
             "[channel] opened + handler registered conn={} link={}",
-            conn_id, link_id
+            conn_id,
+            link_id
         ),
         Err(e) => log::warn!(
             "[channel] register handler failed conn={} link={} err={:?}",
-            conn_id, link_id, e
+            conn_id,
+            link_id,
+            e
         ),
     }
 }
