@@ -270,6 +270,7 @@ pub unsafe extern "C" fn reticulum_dial(task_id: u64, destination_hash: *const c
                 let conn_id = store.insert_connection(conn).await;
                 crate::transport::spawn_link_data_reader(conn_id, link_id, data_rx);
                 crate::transport::spawn_resource_event_reader(conn_id, link_id, resource_rx);
+                crate::transport::open_channel_and_forward(conn_id, link_id).await;
                 call_on_connect(task_id, conn_id);
             }
             Err(e) => {
@@ -457,6 +458,37 @@ pub extern "C" fn reticulum_get_conn_identified_peer(conn_handle: u64) -> *mut c
             .map(|h| h.to_hex_string())
     });
     alloc_c_string(result)
+}
+
+/// Get the max payload bytes per data_packet the mux may hand to one channel send.
+///
+/// This is the single-packet plaintext budget
+/// (`packet_mdu() - FERNET_OVERHEAD_SIZE - FERNET_MAX_PADDING_SIZE`) minus the
+/// Channel envelope (`CHANNEL_ENVELOPE_OVERHEAD`), because every small write now
+/// rides the Reticulum Channel, which prepends that envelope inside the encrypted
+/// packet. The mux fragments to this value so each fragment fits one channel
+/// packet; without the reservation, max-size fragments overflow the packet and
+/// `Connection::write` falls back to a Resource per fragment (catastrophically
+/// slow on a tight-MTU link). Returns -1 if the connection is not a link or not found.
+#[no_mangle]
+pub extern "C" fn reticulum_get_conn_max_payload(conn_handle: u64) -> i32 {
+    use reticulum_rs::transport::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
+    let store = global_store();
+    runtime::block_on(async move {
+        let conn = match store.get_connection(conn_handle).await {
+            Some(c) => c,
+            None => return -1,
+        };
+        let link = match conn.link() {
+            Some(l) => l,
+            None => return -1,
+        };
+        let guard = link.lock().await;
+        guard
+            .packet_mdu()
+            .saturating_sub(FERNET_OVERHEAD_SIZE + FERNET_MAX_PADDING_SIZE)
+            .saturating_sub(crate::connection::CHANNEL_ENVELOPE_OVERHEAD) as i32
+    })
 }
 
 /// Get the local transport identity hash. Caller must free with reticulum_free.

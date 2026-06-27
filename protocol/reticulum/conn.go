@@ -34,6 +34,44 @@ type connEntry struct {
 // Populated by newReticulumConn, consumed/closed by goOnData/goOnClose.
 var connDataChans sync.Map // uint64 → *connEntry
 
+// deliverResult reports how an inbound packet was handled by connEntry.deliver.
+type deliverResult int
+
+const (
+	deliverOK            deliverResult = iota // enqueued immediately
+	deliverClosed                             // connection already torn down
+	deliverBackpressured                      // buffer was full; enqueued after waiting
+	deliverDropped                            // buffer stayed full past the timeout; packet dropped
+)
+
+// deliver enqueues buf onto the connection's inbound channel.
+//
+// Fast path: a non-blocking send. If the buffer is full the caller's producer
+// (a Rust callback thread) is blocked for up to backpressureTimeout so that
+// backpressure propagates to the slow link rather than silently dropping the
+// packet — dropping a resource part/fragment is unrecoverable and corrupts the
+// stream. The bounded timeout prevents a permanently-stuck consumer from
+// deadlocking the producer thread; only then is the packet dropped.
+func (e *connEntry) deliver(buf []byte, backpressureTimeout time.Duration) deliverResult {
+	select {
+	case e.ch <- buf:
+		return deliverOK
+	case <-e.done:
+		return deliverClosed
+	default:
+	}
+	timer := time.NewTimer(backpressureTimeout)
+	defer timer.Stop()
+	select {
+	case e.ch <- buf:
+		return deliverBackpressured
+	case <-e.done:
+		return deliverClosed
+	case <-timer.C:
+		return deliverDropped
+	}
+}
+
 // acceptEvent is delivered via globalAcceptCh when Rust fires on_accept.
 type acceptEvent struct {
 	listenerID uint64

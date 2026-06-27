@@ -114,6 +114,12 @@ impl HandleStore {
     }
 }
 
+static STORE: once_cell::sync::OnceCell<Arc<HandleStore>> = once_cell::sync::OnceCell::new();
+
+pub fn global_store() -> &'static Arc<HandleStore> {
+    STORE.get_or_init(HandleStore::new)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,10 +183,4 @@ mod tests {
         let lh2 = store.insert_listener(Listener::new()).await;
         assert_eq!(lh2, lh, "listener handle should be recycled");
     }
-}
-
-static STORE: once_cell::sync::OnceCell<Arc<HandleStore>> = once_cell::sync::OnceCell::new();
-
-pub fn global_store() -> &'static Arc<HandleStore> {
-    STORE.get_or_init(HandleStore::new)
 }

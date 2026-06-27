@@ -141,6 +141,13 @@ int get_hash(char** hash, const char* name);
 void reticulum_resolve_name(uint64_t task_id, const char* name);
 
 /*
+ * Get the maximum plaintext bytes that fit in a single data_packet for this connection.
+ * Computed as link.packet_mdu() - FERNET_OVERHEAD_SIZE - FERNET_MAX_PADDING_SIZE.
+ * Returns -1 if the connection is not a link or if the bridge is not initialized.
+ */
+int32_t reticulum_get_conn_max_payload(uint64_t conn_handle);
+
+/*
  * Free memory allocated by the bridge.
  */
 void reticulum_free(void* ptr);

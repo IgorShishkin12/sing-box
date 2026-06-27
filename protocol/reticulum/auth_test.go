@@ -2,14 +2,17 @@ package reticulum
 
 import (
 	"io"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
 
 // chanAuthIO implements AuthIO using a channel pair; no network needed.
 type chanAuthIO struct {
-	in  <-chan []byte
-	out chan<- []byte
+	in     <-chan []byte
+	out    chan<- []byte
+	peerIn chan []byte // raw channel that is the peer's in; close() signals EOF to peer
 }
 
 func (c *chanAuthIO) ReadMsg() (byte, []byte, error) {
@@ -31,11 +34,16 @@ func (c *chanAuthIO) WriteMsg(typeByte byte, payload []byte) error {
 	return nil
 }
 
+// Close signals EOF to the reader on the other end of this pair.
+// Simulates the peer closing the connection.
+func (c *chanAuthIO) Close() { close(c.peerIn) }
+
 // newChanAuthPair returns two paired AuthIO endpoints (a, b).
 func newChanAuthPair() (*chanAuthIO, *chanAuthIO) {
 	ch1 := make(chan []byte, 8)
 	ch2 := make(chan []byte, 8)
-	return &chanAuthIO{in: ch1, out: ch2}, &chanAuthIO{in: ch2, out: ch1}
+	// a.Close() signals EOF to b (closes b's input ch2); b.Close() signals EOF to a (closes a's input ch1).
+	return &chanAuthIO{in: ch1, out: ch2, peerIn: ch2}, &chanAuthIO{in: ch2, out: ch1, peerIn: ch1}
 }
 
 func TestAuth_Success(t *testing.T) {
@@ -106,13 +114,16 @@ func TestAuth_ShortSalt(t *testing.T) {
 }
 
 func TestAuth_WrongTypeByte(t *testing.T) {
-	// One side sends the wrong type byte in round 1.
+	// One side sends the wrong type byte in round 1 then closes, simulating
+	// Reticulum closing the connection after an unexpected message.
 	a, b := newChanAuthPair()
 	errs := make(chan error, 2)
 	go func() { errs <- Auth(a, "password", "id-a", "id-b") }()
 	go func() {
-		// Send TypeResponseAuth (0x85) instead of TypeRequestAuth (0x84).
+		// Send TypeResponseAuth (0x85) instead of TypeRequestAuth (0x84),
+		// then close so A's next ReadMsg returns EOF instead of hanging.
 		b.WriteMsg(TypeResponseAuth, make([]byte, 32)) //nolint:errcheck
+		b.Close()
 		errs <- nil
 	}()
 	var authErr error
@@ -179,9 +190,8 @@ func TestAuthWithRetry_NoneMatchesAuth(t *testing.T) {
 //   - ReadMsg on even calls (round 2) returns TypeResponseAuth + a wrong MAC for
 //     the first failFor attempts, then the correct MAC so auth succeeds.
 //
-// authAttempt calls ReadMsg and WriteMsg from two goroutines but never calls them
-// concurrently with each other (round-1 read finishes before round-2 starts), so
-// no mutex is needed.
+// authAttempt calls WriteMsg before ReadMsg in each round (never concurrently),
+// so no mutex is needed.
 type selfServingAuthIO struct {
 	password     string
 	peerID       string // this mock's identity (= caller's peerID argument)
@@ -252,5 +262,131 @@ func TestAuthWithRetry_ExpDelays(t *testing.T) {
 		if calls[i] != d {
 			t.Errorf("sleep[%d]: got %v, want %v", i, calls[i], d)
 		}
+	}
+}
+
+// orderRecordingIO wraps a chanAuthIO and records the sequence of WriteMsg/ReadMsg
+// calls so tests can assert write-before-read ordering within each round.
+type orderRecordingIO struct {
+	mu  sync.Mutex
+	ops []string
+	*chanAuthIO
+}
+
+func (o *orderRecordingIO) WriteMsg(typeByte byte, payload []byte) error {
+	o.mu.Lock()
+	if typeByte == TypeRequestAuth {
+		o.ops = append(o.ops, "W1")
+	} else {
+		o.ops = append(o.ops, "W2")
+	}
+	o.mu.Unlock()
+	return o.chanAuthIO.WriteMsg(typeByte, payload)
+}
+
+func (o *orderRecordingIO) ReadMsg() (byte, []byte, error) {
+	typB, data, err := o.chanAuthIO.ReadMsg()
+	o.mu.Lock()
+	if typB == TypeRequestAuth {
+		o.ops = append(o.ops, "R1")
+	} else if typB == TypeResponseAuth {
+		o.ops = append(o.ops, "R2")
+	}
+	o.mu.Unlock()
+	return typB, data, err
+}
+
+// TestAuth_WriteBeforeRead verifies that WriteMsg is always called before ReadMsg
+// in each round. This is the key invariant that prevents false auth timeouts on
+// high-latency links: the idle timer in ReadMsg starts only after our own
+// transmission completes, not while waiting for the TX queue to drain.
+func TestAuth_WriteBeforeRead(t *testing.T) {
+	a, b := newChanAuthPair()
+	rec := &orderRecordingIO{chanAuthIO: a}
+
+	errs := make(chan error, 2)
+	go func() { errs <- Auth(rec, "pw", "id-a", "id-b") }()
+	go func() { errs <- Auth(b, "pw", "id-b", "id-a") }()
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	rec.mu.Lock()
+	ops := append([]string{}, rec.ops...)
+	rec.mu.Unlock()
+
+	want := []string{"W1", "R1", "W2", "R2"}
+	if !reflect.DeepEqual(ops, want) {
+		t.Errorf("operation order: got %v, want %v (write must precede read in each round)", ops, want)
+	}
+}
+
+// slowWriteIO wraps a chanAuthIO and adds a configurable delay to WriteMsg,
+// simulating a slow TX queue (e.g. LoRa interface draining radio-config ACKs).
+type slowWriteIO struct {
+	delay time.Duration
+	*chanAuthIO
+}
+
+func (s *slowWriteIO) WriteMsg(typeByte byte, payload []byte) error {
+	time.Sleep(s.delay)
+	return s.chanAuthIO.WriteMsg(typeByte, payload)
+}
+
+// TestAuth_SlowWriteNoTimeout verifies that a slow WriteMsg does not cause a
+// false auth timeout. Previously, the ReadMsg timer started before WriteMsg
+// completed, causing timeouts on LoRa links where TX takes several seconds.
+func TestAuth_SlowWriteNoTimeout(t *testing.T) {
+	const writeDelay = 50 * time.Millisecond
+	a, b := newChanAuthPair()
+	slow := &slowWriteIO{delay: writeDelay, chanAuthIO: a}
+
+	errs := make(chan error, 2)
+	go func() { errs <- Auth(slow, "pw", "id-a", "id-b") }()
+	go func() { errs <- Auth(b, "pw", "id-b", "id-a") }()
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("auth failed with slow write (delay=%v): %v", writeDelay, err)
+		}
+	}
+}
+
+// staleRound1MockIO simulates a peer whose Round 2 ReadMsg returns a stale
+// TypeRequestAuth before the real TypeResponseAuth.
+type staleRound1MockIO struct {
+	readCount    int
+	capturedSalt []byte
+	password     string
+	peerID       string
+}
+
+func (s *staleRound1MockIO) WriteMsg(typeByte byte, payload []byte) error {
+	if typeByte == TypeRequestAuth {
+		s.capturedSalt = append([]byte{}, payload...)
+	}
+	return nil
+}
+
+func (s *staleRound1MockIO) ReadMsg() (byte, []byte, error) {
+	s.readCount++
+	if s.readCount == 1 {
+		// First Round 2 read: return a stale TypeRequestAuth retransmit.
+		return TypeRequestAuth, make([]byte, 32), nil
+	}
+	// Second call: real Round 2 response.
+	return TypeResponseAuth, macBound(s.password, s.peerID, s.capturedSalt), nil
+}
+
+// TestAuth_Round2_IgnoresStaleRound1 verifies that a stale TypeRequestAuth
+// received during Round 2 is skipped and auth still succeeds.
+func TestAuth_Round2_IgnoresStaleRound1(t *testing.T) {
+	mock := &staleRound1MockIO{password: "pw", peerID: "id-peer"}
+	if err := authAttempt(mock, "pw", "id-self", "id-peer", make([]byte, 32)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.readCount != 2 {
+		t.Errorf("ReadMsg called %d times, want 2 (1 stale + 1 real)", mock.readCount)
 	}
 }

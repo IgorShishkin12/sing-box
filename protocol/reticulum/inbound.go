@@ -155,7 +155,7 @@ func (h *Inbound) handleConn(connID uint64) {
 	}
 	fc.OpenGate()
 
-	session := newMuxSessionServer(fc, h.logger)
+	session := newMuxSessionServer(fc, h.logger, BridgeConnMaxPayload(handle))
 	for mc := range session.incomingCh {
 		mc := mc
 		go func() {

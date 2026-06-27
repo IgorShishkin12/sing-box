@@ -115,7 +115,7 @@ Identity binding (committing both peer IDs into the MAC) prevents replay across 
 
 **Salts** are 32 random bytes, generated fresh per connection but held stable across retry attempts.
 
-**Timeout:** each round-trip has a 10 s deadline (`authTimeout`).
+**Timeout:** each round has a 30 s idle deadline (timer starts after WriteMsg, not before) (`authTimeout`).
 
 **Retry policies** (`auth_retry` field):
 
@@ -287,7 +287,7 @@ Fragments are reassembled in-order within each virtual connection. A lost fragme
 | Max fragments / message | 64 | `mux.go:40–48` | 6-bit `partIndex` field |
 | Max reassembled payload | 12,608 B | derived | 64 × 197 |
 | Max virtual connections | 65,535 | `mux.go:192` | uint16 connID space |
-| `authTimeout` | 10 s | `auth.go:23` | Per-round auth read deadline |
+| `authTimeout` | 30 s | `auth.go` | Idle deadline for ReadMsg (starts after WriteMsg completes) |
 | Linear retry delay | 5 s | `auth.go:40` | Fixed inter-attempt pause |
 | Exp retry base | 4 s × 2ⁿ | `auth.go:43` | 4 s → 8 s → 16 s → 32 s … |
 | Salt / MAC size | 32 B | `auth.go:50,90` | Challenge and response lengths |
