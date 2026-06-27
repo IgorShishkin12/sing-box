@@ -8,7 +8,7 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 
 [features]
 default = ["rnode-ble"]
-rnode-ble = ["reticulum-rs-transport/rnode-ble"]
+rnode-ble = ["reticulum-rs-transport/rnode-ble", "dep:btleplug"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
@@ -30,8 +30,13 @@ hex = "0.4"
 reticulum-rs = { git = "https://github.com/IgorShishkin12/LXMF-rs", branch = "feat/link-data-delivered-event", features = ["core", "transport"] }
 reticulum-rs-transport = { package = "reticulum-rs-transport", git = "https://github.com/IgorShishkin12/LXMF-rs", branch = "feat/link-data-delivered-event" }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter"] }
 tracing-log = "0.2"
+btleplug = { version = "0.12", optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.19" }
+jni-utils = { version = "0.1.1" }
 
 [dev-dependencies]
 serial_test = "3"

@@ -108,6 +108,54 @@ pub fn clear_transport() {
 }
 
 // ---------------------------------------------------------------------------
+// Android JVM singleton
+// ---------------------------------------------------------------------------
+
+#[cfg(all(feature = "rnode-ble", target_os = "android"))]
+struct JavaVmPtr(usize);
+
+// Safety: the pointer is valid for the process lifetime and never mutated
+// after the initial set_android_jvm call.
+#[cfg(all(feature = "rnode-ble", target_os = "android"))]
+unsafe impl Send for JavaVmPtr {}
+#[cfg(all(feature = "rnode-ble", target_os = "android"))]
+unsafe impl Sync for JavaVmPtr {}
+
+#[cfg(all(feature = "rnode-ble", target_os = "android"))]
+static ANDROID_JVM: OnceCell<JavaVmPtr> = OnceCell::new();
+
+/// Store the raw JavaVM address (idempotent after the first call).
+#[cfg(all(feature = "rnode-ble", target_os = "android"))]
+pub fn set_android_jvm(addr: usize) {
+    let _ = ANDROID_JVM.set(JavaVmPtr(addr));
+}
+
+/// Return the stored JavaVM address, or None if not yet set.
+#[cfg(all(feature = "rnode-ble", target_os = "android"))]
+pub fn android_jvm_addr() -> Option<usize> {
+    ANDROID_JVM.get().map(|p| p.0)
+}
+
+/// Initialize btleplug's Android platform using the stored JavaVM.
+/// Must be called on a Java thread (e.g. from JNI_OnLoad or reticulum_set_jvm).
+#[cfg(all(feature = "rnode-ble", target_os = "android"))]
+pub fn init_btleplug_android() -> Result<(), String> {
+    let addr = android_jvm_addr().ok_or("ANDROID_JVM not set")?;
+    unsafe {
+        let raw_jvm = addr as *mut jni::sys::JavaVM;
+        let jvm = jni::JavaVM::from_raw(raw_jvm)
+            .map_err(|e| format!("JavaVM::from_raw: {:?}", e))?;
+        let env = jvm
+            .attach_current_thread()
+            .map_err(|e| format!("attach_current_thread: {:?}", e))?;
+        btleplug::platform::init(&env)
+            .map_err(|e| format!("btleplug platform init: {:?}", e))?;
+    }
+    log::info!("btleplug Android platform initialized");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Link identify helpers (mirrors Python RNS link.identify())
 // ---------------------------------------------------------------------------
 
