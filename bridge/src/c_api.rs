@@ -13,7 +13,7 @@ use tracing_subscriber::layer::SubscriberExt as _;
 // Callback slots
 // ---------------------------------------------------------------------------
 
-pub(crate) static ON_LOG: AtomicUsize = AtomicUsize::new(0);
+pub static ON_LOG: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static ON_ACCEPT: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static ON_CONNECT: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static ON_DATA: AtomicUsize = AtomicUsize::new(0);
@@ -69,6 +69,58 @@ pub(crate) fn call_on_write(task_id: u64, bytes: i32) {
         let f: extern "C" fn(u64, i32) = unsafe { std::mem::transmute(f_ptr) };
         f(task_id, bytes);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Panic hook + FFI safety helpers
+// ---------------------------------------------------------------------------
+
+/// Emit a log entry directly, bypassing the tracing subscriber layer.
+/// Safe to call from the panic hook where the subscriber may not be consistent.
+pub fn emit_log_direct(level: u8, target: &str, msg: &str) {
+    let f_ptr = ON_LOG.load(Ordering::Relaxed);
+    if f_ptr != 0 {
+        if let (Ok(t), Ok(m)) = (CString::new(target), CString::new(msg)) {
+            let f: extern "C" fn(u8, *const c_char, *const c_char) =
+                unsafe { std::mem::transmute(f_ptr) };
+            f(level, t.as_ptr(), m.as_ptr());
+            return;
+        }
+    }
+    // Fallback: stderr (before the Go log callback is registered).
+    let _ = std::io::Write::write_fmt(
+        &mut std::io::stderr(),
+        format_args!("[{}] {}\n", target, msg),
+    );
+}
+
+/// Install a panic hook that routes panics through the bridge log callback so
+/// Android logcat and the Go log layer capture them instead of crashing silently.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_string()
+        };
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_default();
+        emit_log_direct(
+            1,
+            "reticulum_bridge::panic",
+            &format!("panic at {}: {}", location, msg),
+        );
+    }));
+}
+
+/// Catch a Rust panic crossing an `unsafe extern "C"` boundary and return -1.
+#[allow(dead_code)]
+fn ffi_catch_i32(f: impl FnOnce() -> i32 + std::panic::UnwindSafe) -> i32 {
+    std::panic::catch_unwind(f).unwrap_or(-1)
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +233,47 @@ pub extern "C" fn reticulum_set_write_callback(on_write: Option<extern "C" fn(u6
     }
 }
 
+// ---------------------------------------------------------------------------
+// Android JVM bridge
+// ---------------------------------------------------------------------------
+
+/// Store the JavaVM pointer and initialize btleplug's Android platform.
+/// Call before any BLE future is polled. Safe to call multiple times (idempotent
+/// after the first successful call). May be called from Go via CGo or automatically
+/// from JNI_OnLoad when System.loadLibrary("reticulum_bridge") runs.
+///
+/// # Safety
+/// `jvm` must be a valid `JavaVM*` for the lifetime of the process, or NULL.
+#[no_mangle]
+pub unsafe extern "C" fn reticulum_set_jvm(jvm: *mut std::ffi::c_void) {
+    #[cfg(all(feature = "rnode-ble", target_os = "android"))]
+    {
+        crate::transport::set_android_jvm(jvm as usize);
+        if let Err(e) = crate::transport::init_btleplug_android() {
+            log::error!("btleplug Android init: {}", e);
+        }
+    }
+    #[cfg(not(all(feature = "rnode-ble", target_os = "android")))]
+    let _ = jvm;
+}
+
+/// Called automatically by the Android runtime on the Java thread when
+/// System.loadLibrary("reticulum_bridge") runs. Installs the panic hook and
+/// initializes the JVM bridge before any async BLE future is polled.
+///
+/// # Safety
+/// Standard JNI contract: raw_jvm is valid for the process lifetime.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "C" fn JNI_OnLoad(
+    raw_jvm: *mut std::ffi::c_void,
+    _: *mut std::ffi::c_void,
+) -> std::os::raw::c_int {
+    install_panic_hook();
+    reticulum_set_jvm(raw_jvm);
+    0x0001_0006 // JNI_VERSION_1_6
+}
+
 /// Shutdown the bridge and release resources.
 #[no_mangle]
 pub extern "C" fn reticulum_shutdown() {
@@ -274,6 +367,7 @@ pub unsafe extern "C" fn reticulum_dial(task_id: u64, destination_hash: *const c
                 let conn_id = store.insert_connection(conn).await;
                 crate::transport::spawn_link_data_reader(conn_id, link_id, data_rx);
                 crate::transport::spawn_resource_event_reader(conn_id, link_id, resource_rx);
+                crate::transport::open_channel_and_forward(conn_id, link_id).await;
                 call_on_connect(task_id, conn_id);
             }
             Err(e) => {
@@ -461,6 +555,37 @@ pub extern "C" fn reticulum_get_conn_identified_peer(conn_handle: u64) -> *mut c
             .map(|h| h.to_hex_string())
     });
     alloc_c_string(result)
+}
+
+/// Get the max payload bytes per data_packet the mux may hand to one channel send.
+///
+/// This is the single-packet plaintext budget
+/// (`packet_mdu() - FERNET_OVERHEAD_SIZE - FERNET_MAX_PADDING_SIZE`) minus the
+/// Channel envelope (`CHANNEL_ENVELOPE_OVERHEAD`), because every small write now
+/// rides the Reticulum Channel, which prepends that envelope inside the encrypted
+/// packet. The mux fragments to this value so each fragment fits one channel
+/// packet; without the reservation, max-size fragments overflow the packet and
+/// `Connection::write` falls back to a Resource per fragment (catastrophically
+/// slow on a tight-MTU link). Returns -1 if the connection is not a link or not found.
+#[no_mangle]
+pub extern "C" fn reticulum_get_conn_max_payload(conn_handle: u64) -> i32 {
+    use reticulum_rs::transport::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
+    let store = global_store();
+    runtime::block_on(async move {
+        let conn = match store.get_connection(conn_handle).await {
+            Some(c) => c,
+            None => return -1,
+        };
+        let link = match conn.link() {
+            Some(l) => l,
+            None => return -1,
+        };
+        let guard = link.lock().await;
+        guard
+            .packet_mdu()
+            .saturating_sub(FERNET_OVERHEAD_SIZE + FERNET_MAX_PADDING_SIZE)
+            .saturating_sub(crate::connection::CHANNEL_ENVELOPE_OVERHEAD) as i32
+    })
 }
 
 /// Get the local transport identity hash. Caller must free with reticulum_free.

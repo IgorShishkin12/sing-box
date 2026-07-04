@@ -88,7 +88,11 @@ func (h *Inbound) Start(stage adapter.StartStage) error {
 	}
 	h.logger.Info("reticulum inbound: starting, listening on ", listenHash)
 
-	setRustLogLevelIfUnset(h.logger)
+	rustLog := ""
+	if h.options.ReticulumConfig != nil {
+		rustLog = h.options.ReticulumConfig.RustLog
+	}
+	setRustLogLevelIfUnset(h.logger, rustLog)
 	BridgeSetLogger(h.logger)
 
 	if err := BridgeInit(configJSON); err != nil {
@@ -156,7 +160,7 @@ func (h *Inbound) handleConn(connID uint64) {
 	}
 	fc.OpenGate()
 
-	session := newMuxSessionServer(fc, h.logger)
+	session := newMuxSessionServer(fc, h.logger, BridgeConnMaxPayload(handle))
 	for mc := range session.incomingCh {
 		mc := mc
 		go func() {

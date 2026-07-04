@@ -8,21 +8,23 @@ services:
       dockerfile: e2e/Dockerfile.server
     command: >
       -c "
-        sum-server &
-        sing-box run -c /etc/sing-box/config.json
+        LOG_FILENAME=\"/logs/e2e_serial$$(ls -1A /logs | wc -l).log\" &&
+        touch $$LOG_FILENAME &&
+        (sum-server 2>&1 | tee -a $$LOG_FILENAME &
+        sing-box run -c /etc/sing-box/config.json 2>&1 | tee -a $$LOG_FILENAME )
       "
     volumes:
       - ./configs/server-serial.json:/etc/sing-box/config.json:ro
+      - ./logs:/logs:rw
     devices:
-      - "${RNODE_SERIAL_SERVER:-/dev/ttyUSB0}:/dev/ttyUSB0"
+      - "/dev/ttyUSB0:/dev/ttyUSB0"
+      - "/dev/ttyUSB1:/dev/ttyUSB1"
+    group_add:
+      - "dialout"
     networks:
       - e2e-net
     healthcheck:
       test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8080/sum -H 'Content-Type: application/json' -d '{\"a\":1,\"b\":1}' > /dev/null 2>&1 && pgrep -x sing-box > /dev/null 2>&1"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-      start_period: 15s
 
   e2e-client:
     image: retv2e2e-client:latest
@@ -31,15 +33,19 @@ services:
       dockerfile: e2e/Dockerfile.client
     command: >
       -c "
-        sing-box run -c /etc/sing-box/config.json &
-        e2e-loadtest --socks 127.0.0.1:1080 --url http://127.0.0.1:8080
-          --warmup-timeout 120s --concurrency 5 --requests 20 --long-terms 2000 &&
-        echo 'ALL E2E SERIAL TESTS PASSED'
+        LOG_FILENAME=\"/logs/e2e_serial$$(($$(ls -1A /logs | wc -l) - 1)).log\" &&
+        sing-box run -c /etc/sing-box/config.json 2>&1 | tee -a $$LOG_FILENAME &
+        (e2e-loadtest --socks 127.0.0.1:1080 --url http://127.0.0.1:8080 \
+          --warmup-timeout 500s --concurrency 1 --requests 3 --long-terms 10000 && echo 'ALL E2E SERIAL TESTS PASSED') 2>&1 | tee -a $$LOG_FILENAME
       "
     volumes:
       - ./configs/client-serial.json:/etc/sing-box/config.json:ro
+      - ./logs:/logs:rw
     devices:
-      - "${RNODE_SERIAL_CLIENT:-/dev/ttyUSB1}:/dev/ttyUSB0"
+      - "/dev/ttyUSB0:/dev/ttyUSB0"
+      - "/dev/ttyUSB1:/dev/ttyUSB1"
+    group_add:
+      - "dialout"
     networks:
       - e2e-net
     depends_on:

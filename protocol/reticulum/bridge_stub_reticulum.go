@@ -6,10 +6,10 @@ package reticulum
 #cgo CFLAGS: -I${SRCDIR}/../../bridge/include
 #cgo !android LDFLAGS: ${SRCDIR}/../../bridge/target/release/libsing_box_reticulum_bridge.a -lpthread -ldl -lm
 #cgo linux,!android LDFLAGS: -ldbus-1
-#cgo android,arm64 LDFLAGS: ${SRCDIR}/../../bridge/target/aarch64-linux-android/release/libsing_box_reticulum_bridge.a -lm
-#cgo android,arm   LDFLAGS: ${SRCDIR}/../../bridge/target/armv7-linux-androideabi/release/libsing_box_reticulum_bridge.a -lm
-#cgo android,386   LDFLAGS: ${SRCDIR}/../../bridge/target/i686-linux-android/release/libsing_box_reticulum_bridge.a -lm
-#cgo android,amd64 LDFLAGS: ${SRCDIR}/../../bridge/target/x86_64-linux-android/release/libsing_box_reticulum_bridge.a -lm
+#cgo android,arm64 LDFLAGS: ${SRCDIR}/../../bridge/target/aarch64-linux-android/release/libsing_box_reticulum_bridge.a -lm -llog
+#cgo android,arm   LDFLAGS: ${SRCDIR}/../../bridge/target/armv7-linux-androideabi/release/libsing_box_reticulum_bridge.a -lm -llog
+#cgo android,386   LDFLAGS: ${SRCDIR}/../../bridge/target/i686-linux-android/release/libsing_box_reticulum_bridge.a -lm -llog
+#cgo android,amd64 LDFLAGS: ${SRCDIR}/../../bridge/target/x86_64-linux-android/release/libsing_box_reticulum_bridge.a -lm -llog
 #include "reticulum_bridge.h"
 #include <stdlib.h>
 extern void goOnLog    (uint8_t level,        char*       target,    char*  message);
@@ -23,10 +23,17 @@ extern void goOnWrite  (uint64_t task_id,     int32_t    bytes);
 import "C"
 import (
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/sagernet/sing-box/log"
 )
+
+// goOnDataBackpressureTimeout bounds how long an inbound packet delivery will
+// block when the per-connection receive buffer is full. Blocking applies
+// backpressure to the (slow) sender instead of silently dropping; the timeout
+// prevents a permanently-stuck consumer from deadlocking a Rust callback thread.
+const goOnDataBackpressureTimeout = 5 * time.Second
 
 var (
 	bridgeStateMu     sync.Mutex
@@ -105,12 +112,19 @@ func goOnData(connID C.uint64_t, data *C.uint8_t, length C.size_t) {
 	entry := actual.(*connEntry)
 	buf := make([]byte, int(length))
 	copy(buf, unsafe.Slice((*byte)(unsafe.Pointer(data)), int(length)))
-	select {
-	case entry.ch <- buf:
-	case <-entry.done:
-		// connection already closed
-	default:
-		// channel buffer full — drop packet
+	// Deliver with bounded backpressure rather than a silent drop: losing a
+	// resource part/fragment is unrecoverable and corrupts the stream.
+	switch entry.deliver(buf, goOnDataBackpressureTimeout) {
+	case deliverBackpressured:
+		if logger := bridgeLoggerVal; logger != nil {
+			logger.Warn("goOnData: conn=", id, " receive buffer full (cap=", cap(entry.ch),
+				"), applied backpressure len=", len(buf))
+		}
+	case deliverDropped:
+		if logger := bridgeLoggerVal; logger != nil {
+			logger.Error("goOnData: conn=", id, " receive buffer still full after ", goOnDataBackpressureTimeout,
+				"; dropped packet len=", len(buf), " — stream may be corrupted")
+		}
 	}
 }
 
@@ -270,6 +284,13 @@ func BridgeRegisterName(name string, hash string) error {
 	return nil
 }
 
+// BridgeSetJVM passes the Android JavaVM pointer to the Rust bridge so btleplug
+// can initialize its Android platform. Must be called on a Java thread before
+// BridgeInit when the rnode-ble feature is active. No-op on non-Android builds.
+func BridgeSetJVM(jvm unsafe.Pointer) {
+	C.reticulum_set_jvm(jvm)
+}
+
 // BridgeShutdown shuts down the bridge. Safe to call multiple times or without a prior BridgeInit.
 func BridgeShutdown() {
 	bridgeStateMu.Lock()
@@ -328,6 +349,20 @@ func BridgeConnPeerHash(connHandle uint64) (string, error) {
 	}
 	defer C.reticulum_free(unsafe.Pointer(hashStr))
 	return C.GoString(hashStr), nil
+}
+
+// BridgeConnMaxPayload returns the max plaintext bytes per data_packet for the link
+// backing connHandle. Falls back to MaxReticulumMessage if the link is unavailable.
+func BridgeConnMaxPayload(connHandle uint64) int {
+	v := int(C.reticulum_get_conn_max_payload(C.uint64_t(connHandle)))
+	if v <= 0 {
+		if bridgeLoggerVal != nil {
+			bridgeLoggerVal.Warn("reticulum_get_conn_max_payload: handle=", connHandle,
+				" returned ", v, ", falling back to MaxReticulumMessage=", MaxReticulumMessage)
+		}
+		return MaxReticulumMessage
+	}
+	return v
 }
 
 // BridgeTransportHash returns the local transport identity address hash.

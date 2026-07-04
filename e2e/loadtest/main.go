@@ -145,7 +145,10 @@ func doRequest(socksAddr, rawURL string, a, b int) error {
 			return conn, nil
 		},
 	}
-	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	// Even small requests cross a ~15 s-RTT LoRa link (link setup + mux frames);
+	// 30 s was marginal. Give generous headroom — the warm-up phase already bounds
+	// total time.
+	client := &http.Client{Transport: transport, Timeout: 90 * time.Second}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -196,13 +199,21 @@ func doLongTermsRequest(socksAddr, rawURL string, terms []int, expected int) err
 	transport := &http.Transport{
 		Dial: func(network, addr string) (net.Conn, error) { return conn, nil },
 	}
-	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	// A large body over a slow LoRa link legitimately takes minutes (resource
+	// transfer of ~hundreds of fragments at ~15 s RTT). The previous 30 s timeout
+	// killed the whole client mid-transfer with no useful log; keep it just under
+	// the 300 s e2e container budget so we instead see the real outcome.
+	client := &http.Client{Transport: transport, Timeout: 280 * time.Second}
 
+	start := time.Now()
+	log.Printf("Phase 3: POST %s body=%d bytes (HTTP client timeout %v) ...", rawURL, len(body), client.Timeout)
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("http do: %w", err)
+		return fmt.Errorf("http do (after %v): %w", time.Since(start).Round(time.Millisecond), err)
 	}
 	defer resp.Body.Close()
+	log.Printf("Phase 3: response headers in %v (status %d), reading body ...",
+		time.Since(start).Round(time.Millisecond), resp.StatusCode)
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
@@ -212,11 +223,12 @@ func doLongTermsRequest(socksAddr, rawURL string, terms []int, expected int) err
 		Sum int `json:"sum"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("decode response: %w", err)
+		return fmt.Errorf("decode response (after %v): %w", time.Since(start).Round(time.Millisecond), err)
 	}
 	if result.Sum != expected {
 		return fmt.Errorf("wrong sum: got %d, want %d", result.Sum, expected)
 	}
+	log.Printf("Phase 3: full round-trip OK in %v", time.Since(start).Round(time.Millisecond))
 	return nil
 }
 

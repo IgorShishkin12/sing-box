@@ -44,7 +44,22 @@ pub fn init_runtime() -> Result<(), String> {
         return Ok(());
     }
     log::debug!("Building runtime (multi-thread)");
-    match Builder::new_multi_thread().enable_all().build() {
+    let mut builder = Builder::new_multi_thread();
+    builder.enable_all();
+
+    // On Android with BLE enabled, attach each Tokio worker thread to the JVM as
+    // a daemon thread so btleplug can invoke BLE callbacks from worker context.
+    #[cfg(all(feature = "rnode-ble", target_os = "android"))]
+    if let Some(jvm_addr) = crate::transport::android_jvm_addr() {
+        builder.on_thread_start(move || unsafe {
+            let raw_jvm = jvm_addr as *mut jni::sys::JavaVM;
+            if let Ok(jvm) = jni::JavaVM::from_raw(raw_jvm) {
+                let _ = jvm.attach_current_thread_as_daemon();
+            }
+        });
+    }
+
+    match builder.build() {
         Ok(rt) => {
             *guard = Some(Arc::new(rt));
             log::info!("Runtime created successfully");

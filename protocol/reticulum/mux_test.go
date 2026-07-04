@@ -10,44 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newTestMuxPairWithWindow creates a client+server mux pair with a custom windowSize and
-// fast retry settings so tests run quickly.
-func newTestMuxPairWithWindow(t *testing.T, windowSize int) (client, server *muxSession) {
-	t.Helper()
-	cc, sc := net.Pipe()
-	t.Cleanup(func() { cc.Close(); sc.Close() })
-	client = newMuxSession(cc, nil, false, windowSize, 20*time.Millisecond, 2)
-	server = newMuxSession(sc, nil, true, windowSize, 20*time.Millisecond, 2)
-	return
-}
-
-// newManualSession creates a session whose inner conn is a chanConn pair, giving the
-// test direct control over what the session receives and what it sends.
-func newManualSession(t *testing.T, windowSize int) (s *muxSession, remote *chanConn) {
-	t.Helper()
-	inner, remote := newChanConnPair()
-	s = newMuxSession(inner, nil, false, windowSize, 20*time.Millisecond, 2)
-	t.Cleanup(func() { s.Close() })
-	return
-}
-
-// drainNFromSession reads exactly n packets that were sent BY the session (i.e. from
-// remote.readCh, which is the channel that inner.Write feeds into).
-func drainNFromSession(t *testing.T, remote *chanConn, n int, timeout time.Duration) [][]byte {
-	t.Helper()
-	out := make([][]byte, 0, n)
-	deadline := time.After(timeout)
-	for len(out) < n {
-		select {
-		case pkt := <-remote.readCh:
-			out = append(out, pkt)
-		case <-deadline:
-			t.Fatalf("drainNFromSession: only got %d/%d packets", len(out), n)
-		}
-	}
-	return out
-}
-
 // --- encodeDataByte / decodeDataByte ---
 
 func TestEncodeDataByte_single(t *testing.T) {
@@ -144,6 +106,81 @@ func TestDecodePacket_tooShort(t *testing.T) {
 	require.Error(t, err)
 }
 
+// muxConn.Write must not return until all of the message's fragments have been
+// written to the inner conn. This serialises messages per connection (the next
+// message is only sent after the previous one finishes going out), which is what
+// keeps the byte stream in order without a per-message sequence number — a later
+// fast message can't overtake an earlier one still sitting in the send queue.
+func TestWriteData_BlocksUntilFragmentsSent(t *testing.T) {
+	cc, sc := net.Pipe() // unbuffered: inner Write blocks until the peer reads
+	t.Cleanup(func() { cc.Close(); sc.Close() })
+	s := newMuxSession(cc, nil, false, MaxReticulumMessage)
+	t.Cleanup(func() { s.Close() })
+
+	mc := newMuxConn(1, s, "host:80")
+
+	// A 2-fragment message.
+	data := make([]byte, s.maxFragPayload+5)
+	for i := range data {
+		data[i] = byte('a' + i%26)
+	}
+
+	done := make(chan error, 1)
+	go func() { _, err := mc.Write(data); done <- err }()
+
+	// Write must still be blocked: nothing has read the fragments off the wire.
+	select {
+	case <-done:
+		t.Fatal("Write returned before its fragments were sent on the wire")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// Drain both fragments from the wire.
+	buf := make([]byte, MaxReticulumMessage)
+	for i := 0; i < 2; i++ {
+		require.NoError(t, sc.SetReadDeadline(time.Now().Add(2*time.Second)))
+		n, err := sc.Read(buf)
+		require.NoError(t, err)
+		require.Greater(t, n, muxHeaderSize)
+	}
+
+	// Now that both fragments are on the wire, Write completes.
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Write did not return after its fragments were read from the wire")
+	}
+}
+
+// TestMaxReticulumMessage_LoRaMTU asserts that MaxReticulumMessage is small enough
+// that a Fernet-encrypted mux packet fits within the LoRa/RNode serial link MTU of 220 bytes.
+//
+// On-wire size of a Reticulum data_packet carrying a MaxReticulumMessage-byte plaintext:
+//
+//	HEADER_MAXSIZE(35) + IFAC_MIN_SIZE(1) + IV(16) + ceil(plain/16)*16 + HMAC(32)
+//
+// Using the same overhead constants as rns-core (LXMF_MAX_PAYLOAD = 464 − 35 − 1 − 16 − 32 − 16 = 364... wait)
+// The formula per mux.go: 220 − 35 − 1 − 16 − 32 − 16 = 120.
+// Any increase to MaxReticulumMessage causes silent packet loss on LoRa links.
+func TestMaxReticulumMessage_LoRaMTU(t *testing.T) {
+	const (
+		loraMTU        = 220
+		headerMaxSize  = 35
+		ifacMinSize    = 1
+		fernetIV       = 16
+		fernetHMAC     = 32
+		fernetMaxPad   = 16
+		reticOverhead  = headerMaxSize + ifacMinSize + fernetIV + fernetHMAC + fernetMaxPad
+		maxSafePayload = loraMTU - reticOverhead
+	)
+	if MaxReticulumMessage > maxSafePayload {
+		t.Errorf("MaxReticulumMessage=%d exceeds LoRa-safe limit=%d (MTU=%d overhead=%d); "+
+			"mux fragments will be silently dropped by the KISS interface",
+			MaxReticulumMessage, maxSafePayload, loraMTU, reticOverhead)
+	}
+}
+
 // --- fragment ---
 
 func TestFragment_small(t *testing.T) {
@@ -221,8 +258,8 @@ func newTestMuxPair(t *testing.T) (client, server *muxSession) {
 		cc.Close()
 		sc.Close()
 	})
-	client = newMuxSessionClient(cc, nil)
-	server = newMuxSessionServer(sc, nil)
+	client = newMuxSession(cc, nil, false, MaxReticulumMessage)
+	server = newMuxSession(sc, nil, true, MaxReticulumMessage)
 	return
 }
 
@@ -236,8 +273,8 @@ func newTestMuxPairMsg(t *testing.T) (client, server *muxSession) {
 		cc.Close()
 		sc.Close()
 	})
-	client = newMuxSessionClient(cc, nil)
-	server = newMuxSessionServer(sc, nil)
+	client = newMuxSession(cc, nil, false, MaxReticulumMessage)
+	server = newMuxSession(sc, nil, true, MaxReticulumMessage)
 	return
 }
 
@@ -415,8 +452,8 @@ func TestMuxSession_idExhaustion(t *testing.T) {
 	defer cc.Close()
 	defer sc.Close()
 
-	client := newMuxSessionClient(cc, nil)
-	server := newMuxSessionServer(sc, nil)
+	client := newMuxSessionClient(cc, nil, MaxReticulumMessage)
+	server := newMuxSessionServer(sc, nil, MaxReticulumMessage)
 
 	// Drain server incoming conns so readLoop doesn't block.
 	go func() {
@@ -433,54 +470,12 @@ func TestMuxSession_idExhaustion(t *testing.T) {
 	require.Contains(t, err.Error(), "exhausted")
 }
 
-// ── New tests for window / ACK / retransmit / priority ──────────────────────
-
-// TestSendQueuePriority verifies that retransmit items are always dequeued before
-// new-message items even when both are ready simultaneously.
-func TestSendQueuePriority(t *testing.T) {
-	q := newSendQueue(32)
-
-	retransmitFrag := &queuedFrag{encoded: []byte("retransmit"), prio: prioRetransmit, isRetransmit: true}
-	newFrag := &queuedFrag{encoded: []byte("new"), prio: prioNew}
-
-	// Enqueue new first, then retransmit — retransmit must win.
-	q.newMsg <- newFrag
-	q.retransmit <- retransmitFrag
-
-	// The worker drains retransmit before newMsg.
-	// We simulate by calling the priority-select logic directly.
-	var got []*queuedFrag
-	for i := 0; i < 2; i++ {
-		select {
-		case f := <-q.retransmit:
-			got = append(got, f)
-			continue
-		default:
-		}
-		select {
-		case f := <-q.inProgress:
-			got = append(got, f)
-			continue
-		default:
-		}
-		select {
-		case f := <-q.retransmit:
-			got = append(got, f)
-		case f := <-q.inProgress:
-			got = append(got, f)
-		case f := <-q.newMsg:
-			got = append(got, f)
-		}
-	}
-	require.Len(t, got, 2)
-	require.Equal(t, prioRetransmit, got[0].prio, "retransmit must come first")
-	require.Equal(t, prioNew, got[1].prio)
-}
+// ── Concurrency / delivery tests ────────────────────────────────────────────
 
 // TestConcurrentWriteNoDeadlock verifies that 20 goroutines writing large messages
 // concurrently all deliver their data intact, with no deadlock.
 func TestConcurrentWriteNoDeadlock(t *testing.T) {
-	client, server := newTestMuxPairWithWindow(t, 32)
+	client, server := newTestMuxPair(t)
 
 	const goroutines = 20
 	// Each goroutine sends exactly one message that fits in a single fragment.
@@ -538,13 +533,58 @@ func TestConcurrentWriteNoDeadlock(t *testing.T) {
 	}
 }
 
-// TestWindowBound verifies that the window serialises writes: with windowSize=1 only
-// one fragment write is in-progress at a time, but ALL fragments are eventually sent
-// (slot released immediately after write on TCP mode — no ACK required).
-func TestWindowBound(t *testing.T) {
-	const wSize = 2
+// TestFragBuffer_DuplicateDelivery verifies that injecting the same fragment a second
+// time (simulating a retransmit arriving after first assembly) delivers the message
+// only once to the upper layer, not twice.
+func TestFragBuffer_DuplicateDelivery(t *testing.T) {
 	inner, remote := newChanConnPair()
-	s := newMuxSession(inner, nil, false, wSize, 10*time.Second, 0)
+	s := newMuxSession(inner, nil, true, MaxReticulumMessage)
+	t.Cleanup(func() { s.Close() })
+
+	const connID = uint16(1)
+	payload := []byte("hello-once")
+
+	// Announce the connection.
+	remote.Write(encodePacket(muxPacket{typeByte: TypeNewConn, connID: connID, payload: []byte("peer:1")}))
+
+	// One-fragment message: encodeDataByte(totalParts=1, partIndex=0).
+	frag := encodePacket(muxPacket{typeByte: encodeDataByte(1, 0), connID: connID, payload: payload})
+	remote.Write(frag)
+
+	var sc *muxConn
+	select {
+	case sc = <-s.incomingCh:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("server conn not opened within timeout")
+	}
+	defer sc.Close()
+
+	got := make([]byte, len(payload))
+	_, err := io.ReadFull(sc, got)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+
+	// Inject the same fragment again — simulates a retransmit arriving late.
+	// With fb.delivered set, the readLoop must NOT push another message onto sc.readCh.
+	remote.Write(frag)
+
+	select {
+	case extra := <-sc.readCh:
+		t.Fatalf("duplicate delivery: %q", extra)
+	case <-time.After(100 * time.Millisecond):
+		// good: no duplicate
+	}
+}
+
+// TestMuxSession_DynamicMaxMsg verifies that a session created with a larger maxMsg
+// fragments data at the correct (larger) boundary, not the LoRa default.
+func TestMuxSession_DynamicMaxMsg(t *testing.T) {
+	const bigMaxMsg = 500 // TCP-style MTU
+	const bigMFP = bigMaxMsg - muxHeaderSize
+
+	// Use chanConn (packetReader path) so the receiver handles arbitrary packet sizes.
+	inner, remote := newChanConnPair()
+	s := newMuxSession(inner, nil, false, bigMaxMsg)
 	t.Cleanup(func() { s.Close() })
 
 	mc := newMuxConn(1, s, "test")
@@ -552,107 +592,30 @@ func TestWindowBound(t *testing.T) {
 	s.conns[1] = mc
 	s.mu.Unlock()
 
-	// Write 3 single-fragment messages asynchronously.
-	for i := 0; i < 3; i++ {
-		go func() { mc.Write([]byte("x")) }()
+	// Write exactly bigMFP bytes — must arrive as a single fragment, not two.
+	data := make([]byte, bigMFP)
+	for i := range data {
+		data[i] = byte(i % 251)
 	}
+	go func() { mc.Write(data) }()
 
-	// All 3 fragments must arrive because the slot is released immediately after
-	// each write (TCP mode). The window limits concurrency, not total count.
-	for i := 0; i < 3; i++ {
-		select {
-		case <-remote.readCh:
-		case <-time.After(500 * time.Millisecond):
-			t.Fatalf("fragment %d not sent within timeout", i+1)
-		}
-	}
-}
-
-// TestFragAckReleasesWindow verifies that both fragments are delivered in TCP mode
-// (slot released on write, not on ACK) and that a TypeFragAck is handled gracefully.
-func TestFragAckReleasesWindow(t *testing.T) {
-	const wSize = 1
-	s, remote := newManualSession(t, wSize)
-
-	mc := newMuxConn(1, s, "test")
-	s.mu.Lock()
-	s.conns[1] = mc
-	s.mu.Unlock()
-
-	go func() { mc.Write([]byte("first")) }()
-	go func() { mc.Write([]byte("second")) }()
-
-	// Both fragments must arrive: TCP mode releases the slot immediately after each write.
-	for i := 0; i < 2; i++ {
-		select {
-		case <-remote.readCh:
-		case <-time.After(500 * time.Millisecond):
-			t.Fatalf("fragment %d not sent", i+1)
-		}
-	}
-
-	// TypeFragAck should be handled gracefully (no panic, no incorrect state).
-	ack := encodePacket(muxPacket{typeByte: TypeFragAck, connID: 1, payload: []byte{0}})
-	remote.Write(ack)
-	time.Sleep(20 * time.Millisecond)
-}
-
-// TestRetransmitOnTimeout verifies TCP-mode behaviour: window slot is released
-// immediately after inner.Write(), so no retransmit occurs even without a TypeFragAck.
-func TestRetransmitOnTimeout(t *testing.T) {
-	s, remote := newManualSession(t, 8)
-
-	mc := newMuxConn(1, s, "test")
-	s.mu.Lock()
-	s.conns[1] = mc
-	s.mu.Unlock()
-
-	mc.Write([]byte("hello"))
-
-	// Initial fragment must be sent.
 	select {
-	case <-remote.readCh:
+	case pkt := <-remote.readCh:
+		decoded, err := decodePacket(pkt)
+		require.NoError(t, err)
+		require.Equal(t, bigMFP, len(decoded.payload), "expected single fragment of bigMFP bytes")
+		isLast, partIdx := decodeDataByte(decoded.typeByte)
+		require.True(t, isLast, "single fragment must be the last part")
+		require.Equal(t, 0, partIdx)
 	case <-time.After(500 * time.Millisecond):
-		t.Fatal("initial fragment not sent")
-	}
-
-	// No retransmit expected: inFlight is cleared immediately after write, so the
-	// retransmit timer has nothing to act on.
-	select {
-	case <-remote.readCh:
-		t.Fatal("unexpected retransmit — window slot is released immediately on TCP mode")
-	case <-time.After(s.retryInterval * 3):
-		// correct: no retransmit
+		t.Fatal("no fragment received")
 	}
 }
 
-// TestRetransmitGivesUp verifies TCP-mode behaviour: with immediate slot release,
-// inFlight is always empty, so the retransmit-give-up path never fires and the
-// connection stays open after the initial send regardless of missing TypeFragAck.
-func TestRetransmitGivesUp(t *testing.T) {
-	s, remote := newManualSession(t, 8)
-
-	mc := newMuxConn(1, s, "test")
-	s.mu.Lock()
-	s.conns[1] = mc
-	s.mu.Unlock()
-
-	mc.Write([]byte("will-never-ack"))
-
-	// Initial send must succeed.
-	select {
-	case <-remote.readCh:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("initial fragment not sent")
-	}
-
-	// Wait well past maxRetries × retryInterval; connection must remain open
-	// because inFlight is cleared immediately on write (TCP mode).
-	waitFor := time.Duration(s.maxRetries+2) * s.retryInterval * 2
-	select {
-	case <-mc.done:
-		t.Fatal("connection closed unexpectedly — TCP mode should not give up without retransmits")
-	case <-time.After(waitFor):
-		// correct: connection still open
-	}
+// TestMuxSession_MaxMsgDefault verifies that the default (LoRa) maxMsg is preserved
+// when sessions are created via the public constructors.
+func TestMuxSession_MaxMsgDefault(t *testing.T) {
+	client, _ := newTestMuxPair(t)
+	require.Equal(t, MaxReticulumMessage, client.maxMsg)
+	require.Equal(t, maxFragPayload, client.maxFragPayload)
 }
