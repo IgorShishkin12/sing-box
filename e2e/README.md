@@ -148,6 +148,22 @@ Exercises the full path
 - Override the native binaries with `SINGBOX_BIN` / `LOADTEST_BIN`. Per-run logs land in
   `logs/mixed-<timestamp>/`.
 
+**Host Bluetooth prerequisites** (native BLE goes through BlueZ over D-Bus):
+
+```sh
+sudo apt install bluez libdbus-1-dev pkg-config   # runtime + host build deps
+sudo systemctl enable --now bluetooth
+sudo rfkill unblock bluetooth
+bluetoothctl power on
+```
+
+BLE scanning needs an active login session; over SSH/headless you may need to add your
+user to the `bluetooth` group or run with `sudo`. Both `mixed` and `ble` modes run a
+`check_bluetooth` preflight first — it verifies BlueZ is installed, `org.bluez` is
+reachable, the adapter is present/powered/unblocked, and (on bluez ≥ 5.55) that an actual
+LE scan succeeds — failing fast with the exact fix command instead of dying deep inside
+btleplug.
+
 > **LoRa params must match on both ends.** `frequency_hz`, `bandwidth_hz`,
 > `spreading_factor`, and `coding_rate` must be identical or the link silently fails to
 > form. The default pair `server-serial.json` ↔ `client-ble.json` is aligned at

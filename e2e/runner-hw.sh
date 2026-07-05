@@ -64,6 +64,78 @@ run_test() {
     fi
 }
 
+# Preflight: verify the host can actually drive a BLE adapter via BlueZ before we
+# start a client that would otherwise fail deep inside btleplug with an opaque error.
+# Escalates from "is BlueZ installed" → "is a controller present and powered" →
+# "can we actually run an LE scan". Every failure prints the concrete fix command.
+check_bluetooth() {
+    echo "=== Preflight: Bluetooth (BlueZ) ==="
+
+    # 1. bluetoothctl present ⇒ BlueZ userspace installed.
+    if ! command -v bluetoothctl >/dev/null 2>&1; then
+        echo "ERROR: bluetoothctl not found — BlueZ is not installed." >&2
+        echo "  Fix: sudo apt install bluez && sudo systemctl enable --now bluetooth" >&2
+        return 1
+    fi
+
+    # 2. bluetoothd reachable on the system D-Bus (org.bluez).
+    if command -v busctl >/dev/null 2>&1 && ! busctl --system status org.bluez >/dev/null 2>&1; then
+        echo "ERROR: BlueZ service (org.bluez) is not reachable on the system D-Bus." >&2
+        echo "  Fix: sudo systemctl enable --now bluetooth" >&2
+        return 1
+    fi
+
+    # 3. Adapter not rfkill-blocked.
+    if command -v rfkill >/dev/null 2>&1 && rfkill list bluetooth 2>/dev/null | grep -qi 'blocked: yes'; then
+        echo "ERROR: Bluetooth is rfkill-blocked." >&2
+        echo "  Fix: sudo rfkill unblock bluetooth" >&2
+        return 1
+    fi
+
+    # 4. At least one controller present.
+    if ! bluetoothctl list 2>/dev/null | grep -q .; then
+        echo "ERROR: no Bluetooth controller detected (bluetoothctl list is empty)." >&2
+        echo "  Check the adapter is plugged in and its driver is loaded (dmesg | grep -i bluetooth)." >&2
+        return 1
+    fi
+
+    # 5. Controller powered — try to power it on if not.
+    if ! bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'; then
+        echo "Adapter not powered; attempting 'bluetoothctl power on'..."
+        bluetoothctl power on >/dev/null 2>&1 || true
+        if ! bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'; then
+            echo "ERROR: could not power on the Bluetooth adapter." >&2
+            echo "  Fix: bluetoothctl power on   (may require sudo / an active login session)" >&2
+            return 1
+        fi
+    fi
+
+    # 6. Actually exercise an LE scan — the closest proxy for "btleplug will work".
+    #    Guarded on --timeout support (bluez ≥ 5.55); skipped gracefully otherwise.
+    #    Capture --help first: bluetoothctl exits non-zero for it, which would poison
+    #    the pipeline status under `set -o pipefail` and skip the probe.
+    local help_out
+    help_out="$(bluetoothctl --help 2>&1 || true)"
+    if printf '%s\n' "$help_out" | grep -q -- '--timeout'; then
+        echo "Verifying an LE scan works (≈4s)..."
+        local scan_out
+        scan_out="$(bluetoothctl --timeout 4 scan on 2>&1)" || true
+        if echo "$scan_out" | grep -qiE 'not available|no default controller|org\.freedesktop\.DBus\.Error|Failed to (start|set) discovery|Access denied'; then
+            echo "ERROR: BLE scan failed — btleplug will not work either. Details:" >&2
+            echo "$scan_out" | tail -5 | sed 's/^/    /' >&2
+            echo "  Likely a D-Bus/polkit permission issue. If running over SSH/headless," >&2
+            echo "  add your user to the 'bluetooth' group, use an active login session," >&2
+            echo "  or run with sudo." >&2
+            return 1
+        fi
+        echo "LE scan OK."
+    else
+        echo "(bluetoothctl lacks --timeout; skipping active scan probe)"
+    fi
+
+    echo "Bluetooth preflight passed."
+}
+
 MODE="${1:-serial}"
 
 case "$MODE" in
@@ -83,6 +155,8 @@ case "$MODE" in
     : "${RNODE_BLE_CLIENT:?Set RNODE_BLE_CLIENT to client-side RNode BLE peripheral ID (name or MAC)}"
     export RNODE_BLE_SERVER RNODE_BLE_CLIENT
 
+    check_bluetooth || exit 1
+
     # Inject peripheral IDs into config templates, producing resolved copies
     # that docker-compose.ble.yml mounts into the containers.
     envsubst '$RNODE_BLE_SERVER' < configs/server-ble.json > configs/server-ble-resolved.json
@@ -101,6 +175,8 @@ case "$MODE" in
     : "${RNODE_SERIAL_SERVER:?Set RNODE_SERIAL_SERVER to the server-side (serial) RNode device path (e.g. /dev/ttyUSB0)}"
     : "${RNODE_BLE_CLIENT:?Set RNODE_BLE_CLIENT to the client-side RNode BLE peripheral ID (name or MAC)}"
     export RNODE_SERIAL_SERVER RNODE_BLE_CLIENT
+
+    check_bluetooth || exit 1
 
     SB_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
     LOG_DIR="$SCRIPT_DIR/logs/mixed-$(date +%Y%m%d-%H%M%S)"
