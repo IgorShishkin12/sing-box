@@ -4,8 +4,9 @@
 # Not run in CI — invoke manually with the appropriate env vars set.
 #
 # Usage:
-#   ./runner-hw.sh serial   # RNodeSerial over USB
-#   ./runner-hw.sh ble      # RNodeBLE over Bluetooth
+#   ./runner-hw.sh serial   # RNodeSerial over USB (both ends in containers)
+#   ./runner-hw.sh ble      # RNodeBLE over Bluetooth (both ends in containers)
+#   ./runner-hw.sh mixed    # container/serial server ↔ LoRa ↔ native/BLE client
 #
 # Environment variables (serial):
 #   RNODE_SERIAL_SERVER  Host device path for server-side RNode (default: /dev/ttyUSB0)
@@ -15,8 +16,22 @@
 #   RNODE_BLE_SERVER     BLE peripheral ID (name or MAC) for server-side RNode
 #   RNODE_BLE_CLIENT     BLE peripheral ID (name or MAC) for client-side RNode
 #
-# Both RNodes must be tuned to the same LoRa parameters (868 MHz / 125 kHz BW /
-# SF9 / CR 4/5 by default; edit configs to change).
+# Environment variables (mixed):
+#   RNODE_SERIAL_SERVER  Host device path for the server-side (serial) RNode A
+#   RNODE_BLE_CLIENT     BLE peripheral ID (name or MAC) for the client-side RNode B
+#   SINGBOX_BIN          Optional: native sing-box binary (else built via make)
+#   LOADTEST_BIN         Optional: native e2e-loadtest binary (else built via go)
+#
+# The "mixed" mode exercises the full path
+#   container → serial → RNode A → LoRa → RNode B → BLE → native host.
+# The serial end runs in a container (docker-compose.mixed.yml); the BLE end runs
+# NATIVELY on the host (BlueZ), since BLE-from-container is a pain. The two ends
+# talk over LoRa RF only, so no shared network is required.
+#
+# LoRa parameters MUST be identical on both ends (frequency_hz, bandwidth_hz,
+# spreading_factor, coding_rate) or the link silently fails to form. The default
+# configs pair server-serial.json ↔ client-ble.json at 433 MHz / 500 kHz / SF8 /
+# CR6. Edit the configs to change; keep both sides in lockstep.
 
 set -euo pipefail
 
@@ -81,11 +96,126 @@ case "$MODE" in
     rm -f configs/server-ble-resolved.json configs/client-ble-resolved.json
     ;;
 
+  mixed)
+    # Full path: container(serial server) ↔ LoRa ↔ native(BLE client).
+    : "${RNODE_SERIAL_SERVER:?Set RNODE_SERIAL_SERVER to the server-side (serial) RNode device path (e.g. /dev/ttyUSB0)}"
+    : "${RNODE_BLE_CLIENT:?Set RNODE_BLE_CLIENT to the client-side RNode BLE peripheral ID (name or MAC)}"
+    export RNODE_SERIAL_SERVER RNODE_BLE_CLIENT
+
+    SB_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+    LOG_DIR="$SCRIPT_DIR/logs/mixed-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$LOG_DIR"
+    echo "Logs → $LOG_DIR"
+
+    # 1. Locate or build the native host sing-box (Rust bridge + rnode-ble via BlueZ).
+    SINGBOX_BIN="${SINGBOX_BIN:-}"
+    if [ -z "$SINGBOX_BIN" ]; then
+        if [ -x "$SB_ROOT/sing-box" ]; then
+            SINGBOX_BIN="$SB_ROOT/sing-box"
+        elif command -v sing-box &>/dev/null; then
+            SINGBOX_BIN="$(command -v sing-box)"
+        else
+            echo "Building native sing-box (make build_with_bridge)..."
+            make -C "$SB_ROOT" build_with_bridge
+            SINGBOX_BIN="$SB_ROOT/sing-box"
+        fi
+    fi
+    echo "sing-box: $SINGBOX_BIN"
+
+    # 2. Locate or build the native e2e-loadtest.
+    LOADTEST_BIN="${LOADTEST_BIN:-}"
+    if [ -z "$LOADTEST_BIN" ]; then
+        if [ -x "$SCRIPT_DIR/loadtest/e2e-loadtest" ]; then
+            LOADTEST_BIN="$SCRIPT_DIR/loadtest/e2e-loadtest"
+        else
+            echo "Building native e2e-loadtest..."
+            ( cd "$SB_ROOT" && go build -o "$SCRIPT_DIR/loadtest/e2e-loadtest" ./e2e/loadtest/ )
+            LOADTEST_BIN="$SCRIPT_DIR/loadtest/e2e-loadtest"
+        fi
+    fi
+    echo "e2e-loadtest: $LOADTEST_BIN"
+
+    # 3. Render the native BLE client config: substitute the peripheral ID and
+    #    redirect storage to a writable temp dir (the template points at /var/lib).
+    CLIENT_STORAGE="$(mktemp -d)"
+    CLIENT_CONFIG="$(mktemp /tmp/sb-mixed-client-XXXXXX.json)"
+    envsubst '$RNODE_BLE_CLIENT' < configs/client-ble.json \
+        | sed "s|\"storage_path\":.*|\"storage_path\": \"$CLIENT_STORAGE\",|" \
+        > "$CLIENT_CONFIG"
+
+    SINGBOX_CLIENT_PID=""
+    cleanup_mixed() {
+        echo "=== Cleanup ==="
+        [ -n "$SINGBOX_CLIENT_PID" ] && kill "$SINGBOX_CLIENT_PID" 2>/dev/null || true
+        $COMPOSE_CMD -f docker-compose.mixed.yml down 2>/dev/null || true
+        rm -f "$CLIENT_CONFIG"
+        rm -rf "$CLIENT_STORAGE"
+        echo "Logs saved in $LOG_DIR"
+    }
+    trap cleanup_mixed EXIT
+
+    # 4. Bring up the container/serial server (RNode A) and wait until healthy.
+    echo "Building server image..."
+    $COMPOSE_CMD -f docker-compose.mixed.yml build
+    echo "Starting container/serial server (RNode A on $RNODE_SERIAL_SERVER)..."
+    $COMPOSE_CMD -f docker-compose.mixed.yml up -d e2e-server
+
+    # Poll the server's healthcheck by exec'ing it into the container. Portable
+    # across podman-compose (no `up --wait`) and docker compose. Up to ~120s.
+    echo "Waiting for the serial server to become healthy..."
+    server_ready=0
+    for _ in $(seq 1 40); do
+        if $COMPOSE_CMD -f docker-compose.mixed.yml exec -T e2e-server sh -c \
+            'curl -sf -X POST http://localhost:8080/sum -H "Content-Type: application/json" -d "{\"a\":1,\"b\":1}" >/dev/null 2>&1 && pgrep -x sing-box >/dev/null 2>&1' \
+            2>/dev/null; then
+            server_ready=1
+            break
+        fi
+        sleep 3
+    done
+    if [ "$server_ready" -ne 1 ]; then
+        echo "Serial server did not become healthy in time — see logs/" >&2
+        exit 1
+    fi
+
+    # 5. Start the native BLE client (RNode B via host BlueZ).
+    echo "Starting native BLE client (RNode B = '$RNODE_BLE_CLIENT')..."
+    "$SINGBOX_BIN" run -c "$CLIENT_CONFIG" > >(tee "$LOG_DIR/native-client.log") 2>&1 &
+    SINGBOX_CLIENT_PID=$!
+
+    # 6. Wait (up to 180s) for the client SOCKS proxy to accept connections.
+    echo "Waiting for SOCKS 127.0.0.1:1080..."
+    for _ in $(seq 1 180); do
+        if (exec 3<>/dev/tcp/127.0.0.1/1080) 2>/dev/null; then
+            exec 3>&- 3<&- 2>/dev/null || true
+            break
+        fi
+        if ! kill -0 "$SINGBOX_CLIENT_PID" 2>/dev/null; then
+            echo "Native client exited early — see $LOG_DIR/native-client.log" >&2
+            exit 1
+        fi
+        sleep 1
+    done
+
+    # 7. Run the loadtest across the LoRa link; its exit code is the verdict.
+    echo "=== Running e2e-loadtest over the LoRa link ==="
+    rc=0
+    "$LOADTEST_BIN" --socks 127.0.0.1:1080 --url http://127.0.0.1:8080 \
+        --warmup-timeout 500s --concurrency 1 --requests 3 --long-terms 10000 \
+        2>&1 | tee "$LOG_DIR/loadtest.log" || rc=$?
+    if [ $rc -ne 0 ]; then
+        echo "HW E2E mixed test FAILED (exit $rc)"
+        exit 1
+    fi
+    ;;
+
   *)
-    echo "Usage: $0 [serial|ble]"
+    echo "Usage: $0 [serial|ble|mixed]"
     echo ""
     echo "  serial  Test RNodeSerial over USB (requires RNODE_SERIAL_SERVER, RNODE_SERIAL_CLIENT)"
     echo "  ble     Test RNodeBLE over Bluetooth (requires RNODE_BLE_SERVER, RNODE_BLE_CLIENT)"
+    echo "  mixed   container/serial server ↔ LoRa ↔ native/BLE client"
+    echo "          (requires RNODE_SERIAL_SERVER, RNODE_BLE_CLIENT)"
     exit 1
     ;;
 esac

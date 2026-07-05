@@ -1,6 +1,6 @@
 {
   "log": {
-    "level": "debug",
+    "level": "trace",
     "output": "/dev/stdout",
     "timestamp": true
   },
@@ -28,7 +28,7 @@
             "type": "RNodeBLE",
             "peripheral_id": "${RNODE_BLE_CLIENT}",
             "frequency_hz": 433000000,
-            "bandwidth_hz": 62500,
+            "bandwidth_hz": 500000,
             "tx_power_dbm": 0,
             "spreading_factor": 8,
             "coding_rate": 6

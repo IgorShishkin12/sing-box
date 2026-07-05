@@ -23,6 +23,7 @@ cd sing-box/e2e
 | `docker-compose.android-tcp.yml` | Android x86_64 emulator as client, TCP interface | `Dockerfile.android-client`, `android-entrypoint.sh` |
 | `docker-compose.internet-proxy.yml` | Internet proxy isolation: client routes HTTP via SOCKS5 through Reticulum to the real internet | `configs/server.json`, `configs/client.json` |
 | `real-device-test.sh` | Real arm64 Android phone over LAN ADB, TCP interface | `android-bins/` (built on first run) |
+| `runner-hw.sh serial\|ble\|mixed` | Physical RNode LoRa modems: serial, BLE, or the mixed container-serial↔native-BLE path | `configs/{server,client}-{serial,ble}.json` |
 
 ## Pass / fail conditions
 
@@ -112,6 +113,47 @@ SERVER_IP=192.168.1.42 ./real-device-test.sh
 ```
 
 Arm64 binaries are cached in `android-bins/` after the first build.
+
+## Hardware RNode tests (`runner-hw.sh`)
+
+Real-radio E2E over physical RNode LoRa modems. Not run in CI — invoke manually with
+the device env vars set. All modes reuse the same sum-server / loadtest exchange; the
+loadtest exit code is the verdict.
+
+```bash
+cd sing-box/e2e
+
+# Both ends in containers, over USB serial (2× RNode on USB):
+RNODE_SERIAL_SERVER=/dev/ttyUSB0 RNODE_SERIAL_CLIENT=/dev/ttyUSB1 ./runner-hw.sh serial
+
+# Both ends in containers, over Bluetooth (2× RNode over BLE):
+RNODE_BLE_SERVER="RNode 9999" RNODE_BLE_CLIENT="RNode 98EF" ./runner-hw.sh ble
+
+# Mixed path: container/serial server ↔ LoRa ↔ native/BLE client:
+RNODE_SERIAL_SERVER=/dev/ttyUSB0 RNODE_BLE_CLIENT="RNode 98EF" ./runner-hw.sh mixed
+```
+
+### `mixed` mode
+
+Exercises the full path
+**container → serial → RNode A → LoRa → RNode B → BLE → native host**.
+
+- The **serial server** runs in a container ([docker-compose.mixed.yml](docker-compose.mixed.yml),
+  server-only) with the host RNode A mapped to `/dev/ttyUSB0`.
+- The **BLE client** runs **natively on the host** (BlueZ), not in a container —
+  BLE-from-container is a pain, and the two ends communicate over LoRa RF only, so no
+  shared network is needed. The runner builds/uses a native `sing-box`
+  (`make build_with_bridge`, `rnode-ble` is a default Cargo feature) and native
+  `e2e-loadtest`, then runs the client with `configs/client-ble.json`.
+- Override the native binaries with `SINGBOX_BIN` / `LOADTEST_BIN`. Per-run logs land in
+  `logs/mixed-<timestamp>/`.
+
+> **LoRa params must match on both ends.** `frequency_hz`, `bandwidth_hz`,
+> `spreading_factor`, and `coding_rate` must be identical or the link silently fails to
+> form. The default pair `server-serial.json` ↔ `client-ble.json` is aligned at
+> 433 MHz / 500 kHz / SF8 / CR6. The peripheral ID in `client-ble.json` /
+> `server-ble.json` is a `${RNODE_BLE_CLIENT}` / `${RNODE_BLE_SERVER}` placeholder
+> resolved by `envsubst` at run time.
 
 ## Key support files
 

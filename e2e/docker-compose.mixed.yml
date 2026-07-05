@@ -1,0 +1,50 @@
+name: retv2e2e
+
+# Mixed-transport hardware E2E: the SERVER half only.
+#
+# Full path exercised: container → serial → RNode A → LoRa → RNode B → BLE → native.
+# This compose file runs the container/serial end (server). The BLE end (client)
+# runs natively on the host via runner-hw.sh, because BlueZ from a container is a
+# pain — the two ends talk over LoRa RF only, so they need no shared network.
+#
+# Invoke via `runner-hw.sh mixed`, which maps the host serial RNode into the
+# container at /dev/ttyUSB0 (the path server-serial.json expects) and, on the host
+# side, starts a native sing-box + e2e-loadtest against the BLE RNode.
+#
+# Env:
+#   RNODE_SERIAL_SERVER  host device path for the server-side (serial) RNode A.
+
+services:
+  e2e-server:
+    image: retv2e2e-server:latest
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile.server
+    command: >
+      -c "
+        LOG_FILENAME=\"/logs/e2e_mixed$$(ls -1A /logs | wc -l).log\" &&
+        touch $$LOG_FILENAME &&
+        (sum-server 2>&1 | tee -a $$LOG_FILENAME &
+        sing-box run -c /etc/sing-box/config.json 2>&1 | tee -a $$LOG_FILENAME )
+      "
+    volumes:
+      - ./configs/server-serial.json:/etc/sing-box/config.json:ro
+      - ./logs:/logs:rw
+    devices:
+      # Map the host's server-side RNode to /dev/ttyUSB0 inside the container,
+      # matching the "device" field in server-serial.json regardless of host path.
+      - "${RNODE_SERIAL_SERVER:-/dev/ttyUSB0}:/dev/ttyUSB0"
+    group_add:
+      - "dialout"
+    networks:
+      - e2e-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8080/sum -H 'Content-Type: application/json' -d '{\"a\":1,\"b\":1}' > /dev/null 2>&1 && pgrep -x sing-box > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 24
+      start_period: 60s
+
+networks:
+  e2e-net:
+    driver: bridge

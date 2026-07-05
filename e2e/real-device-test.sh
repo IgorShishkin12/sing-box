@@ -233,7 +233,7 @@ CLIENT_CONFIG=$(mktemp /tmp/sb-real-device-client-XXXXXX.json)
 cat > "$CLIENT_CONFIG" <<EOF
 {
   "log": {
-    "level": "debug",
+    "level": "trace",
     "timestamp": true
   },
   "inbounds": [

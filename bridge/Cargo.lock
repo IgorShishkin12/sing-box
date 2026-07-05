@@ -40,6 +40,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -131,6 +137,8 @@ dependencies = [
  "objc2-core-bluetooth",
  "objc2-foundation",
  "once_cell",
+ "serde",
+ "serde_bytes",
  "static_assertions",
  "thiserror 2.0.18",
  "tokio",
@@ -333,9 +341,9 @@ dependencies = [
 
 [[package]]
 name = "dbus"
-version = "0.9.11"
+version = "0.9.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b942602992bb7acfd1f51c49811c58a610ef9181b6e66f3e519d79b540a3bf73"
+checksum = "3ab69f03cc8c4340c9c8e315114e1658e6775a9b16a04357973aa21cec22b32e"
 dependencies = [
  "futures-channel",
  "futures-util",
@@ -986,8 +994,8 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reticulum-rs"
-version = "0.5.1"
-source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=feat%2Flink-data-delivered-event#8d979d2a68288d824103b3821b9e672cdc1b3484"
+version = "0.5.2"
+source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=feat%2Flink-data-delivered-event#cec17d1502fbc27bf78d66faa64ef6ebae2173d9"
 dependencies = [
  "reticulum-rs-core",
  "reticulum-rs-transport",
@@ -995,8 +1003,8 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs-core"
-version = "0.5.1"
-source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=feat%2Flink-data-delivered-event#8d979d2a68288d824103b3821b9e672cdc1b3484"
+version = "0.5.2"
+source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=feat%2Flink-data-delivered-event#cec17d1502fbc27bf78d66faa64ef6ebae2173d9"
 dependencies = [
  "aes",
  "cbc",
@@ -1015,10 +1023,11 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs-transport"
-version = "0.5.1"
-source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=feat%2Flink-data-delivered-event#8d979d2a68288d824103b3821b9e672cdc1b3484"
+version = "0.5.2"
+source = "git+https://github.com/IgorShishkin12/LXMF-rs?branch=feat%2Flink-data-delivered-event#cec17d1502fbc27bf78d66faa64ef6ebae2173d9"
 dependencies = [
  "aes",
+ "base64",
  "btleplug",
  "bzip2",
  "cbc",
@@ -1039,6 +1048,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha2",
+ "shlex",
  "socket2 0.5.10",
  "tokio",
  "tokio-serial",
@@ -1551,9 +1561,9 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "unescaper"
-version = "0.1.8"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4064ed685c487dbc25bd3f0e9548f2e34bab9d18cefc700f9ec2dba74ba1138e"
+checksum = "7285e83a80ce76f5e7bce79fa41f68d78ba62d1003cf27bf748ab24413808cf4"
 dependencies = [
  "thiserror 2.0.18",
 ]
@@ -1571,6 +1581,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf80a72845275afea99e7f2b434723d3bc7e38470fcd1c7ed39a599c73319a53"
 dependencies = [
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

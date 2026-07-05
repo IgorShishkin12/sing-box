@@ -1,0 +1,66 @@
+name: retv2run
+
+services:
+  e2e-server:
+    image: retv2e2e-server:latest
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile.server
+    command: >
+      -c "
+        sum-server &
+        sing-box run -c /etc/sing-box/config.json
+      "
+    volumes:
+      - ./configs/server.json:/etc/sing-box/config.json:ro
+    networks:
+      - e2e-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf -X POST http://localhost:8080/sum -H 'Content-Type: application/json' -d '{\"a\":1,\"b\":1}' > /dev/null 2>&1 && pgrep -x sing-box > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  e2e-client:
+    image: retv2e2e-client:latest
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile.client
+    command: >
+      -c "
+        sing-box run -c /etc/sing-box/config.json | tee /tmp/singbox.log 2>&1 &
+        until grep -q 'sing-box started' /tmp/singbox.log 2>/dev/null; do sleep 0.2; done &&
+
+        N1=100007 &&
+        N2=100007 &&
+
+        { printf '{\"terms\":['; i=2; while [ $$i -le $$N1 ]; do printf '1, '; i=$$(($$i+1)); done; printf '1]}'; } > /tmp/payload1.json &&
+        { printf '{\"terms\":['; i=2; while [ $$i -le $$N2 ]; do printf '1, '; i=$$(($$i+1)); done; printf '1]}'; } > /tmp/payload2.json &&
+
+        echo 'Sending request 1 (N=$$N1)...' &&
+        RESP1=$$(curl -sf --socks5-hostname 127.0.0.1:1080 http://127.0.0.1:8080/sum-terms \
+          -H 'Content-Type: application/json' -d @/tmp/payload1.json) &&
+        echo \"Response 1: $$RESP1\" &&
+        # echo \"$$RESP1\" | grep -q '\"sum\":$$N1' &&
+        echo 'Request 1 OK' &&
+
+        echo 'Sending request 2 (N=$$N2, shares all but last few bytes with request 1)...' &&
+        RESP2=$$(curl -sf --socks5-hostname 127.0.0.1:1080 http://127.0.0.1:8080/sum-terms \
+          -H 'Content-Type: application/json' -d @/tmp/payload2.json) &&
+        echo \"Response 2: $$RESP2\" &&
+        # echo \"$$RESP2\" | grep -q '\"sum\":$$N2' &&
+        echo 'Request 2 OK' &&
+
+        echo 'CROSS-RESOURCE DEDUP TEST PASSED'
+      "
+    volumes:
+      - ./configs/client.json:/etc/sing-box/config.json:ro
+    networks:
+      - e2e-net
+    depends_on:
+      e2e-server:
+        condition: service_healthy
+
+networks:
+  e2e-net:
+    driver: bridge

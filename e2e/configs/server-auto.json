@@ -1,6 +1,6 @@
 {
   "log": {
-    "level": "info",
+    "level": "trace",
     "output": "/dev/stdout",
     "timestamp": true
   },
