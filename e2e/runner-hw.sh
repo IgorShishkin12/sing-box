@@ -136,6 +136,38 @@ check_bluetooth() {
     echo "Bluetooth preflight passed."
 }
 
+# Preflight: verify the host user can actually open a serial RNode device before we
+# hand it to a container. Under rootless podman the container runs as the invoking
+# user, so if that user can't access the device, neither can the container — it fails
+# with "Permission denied" and the test then burns the full warm-up window for nothing.
+# $1 = device path.
+check_serial_device() {
+    local dev="$1"
+    echo "=== Preflight: serial device $dev ==="
+
+    if [ ! -e "$dev" ]; then
+        echo "ERROR: $dev does not exist. Is the RNode plugged in?" >&2
+        echo "  Check: ls -l /dev/ttyUSB* /dev/ttyACM*" >&2
+        return 1
+    fi
+
+    if [ -r "$dev" ] && [ -w "$dev" ]; then
+        echo "Serial device is readable/writable by $(id -un)."
+        return 0
+    fi
+
+    # Not accessible — lead with the group-free fix (works immediately, keeps the
+    # rootless container running as your user), then the persistent alternative.
+    local devgrp
+    devgrp="$(stat -c '%G' "$dev" 2>/dev/null || echo '?')"
+    echo "ERROR: $dev is not accessible by $(id -un) (owner group: $devgrp)." >&2
+    echo "  Pick one:" >&2
+    echo "    - run this whole script with sudo (rootful podman; root owns the device)" >&2
+    echo "    - sudo chmod 666 $dev    (no group change, resets on replug; keeps rootless)" >&2
+    echo "    - sudo usermod -aG $devgrp $(id -un)   (persistent; needs full re-login)" >&2
+    return 1
+}
+
 MODE="${1:-serial}"
 
 case "$MODE" in
@@ -143,6 +175,9 @@ case "$MODE" in
     : "${RNODE_SERIAL_SERVER:?Set RNODE_SERIAL_SERVER to server-side RNode device path (e.g. /dev/ttyUSB0)}"
     : "${RNODE_SERIAL_CLIENT:?Set RNODE_SERIAL_CLIENT to client-side RNode device path (e.g. /dev/ttyUSB1)}"
     export RNODE_SERIAL_SERVER RNODE_SERIAL_CLIENT
+
+    check_serial_device "$RNODE_SERIAL_SERVER" || exit 1
+    check_serial_device "$RNODE_SERIAL_CLIENT" || exit 1
 
     echo "Building e2e images..."
     $COMPOSE_CMD -f docker-compose.serial.yml build
@@ -176,6 +211,7 @@ case "$MODE" in
     : "${RNODE_BLE_CLIENT:?Set RNODE_BLE_CLIENT to the client-side RNode BLE peripheral ID (name or MAC)}"
     export RNODE_SERIAL_SERVER RNODE_BLE_CLIENT
 
+    check_serial_device "$RNODE_SERIAL_SERVER" || exit 1
     check_bluetooth || exit 1
 
     SB_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -220,13 +256,17 @@ case "$MODE" in
         > "$CLIENT_CONFIG"
 
     SINGBOX_CLIENT_PID=""
+    SERVER_LOG_PID=""
     cleanup_mixed() {
         echo "=== Cleanup ==="
         [ -n "$SINGBOX_CLIENT_PID" ] && kill "$SINGBOX_CLIENT_PID" 2>/dev/null || true
+        [ -n "$SERVER_LOG_PID" ] && kill "$SERVER_LOG_PID" 2>/dev/null || true
         $COMPOSE_CMD -f docker-compose.mixed.yml down 2>/dev/null || true
         rm -f "$CLIENT_CONFIG"
         rm -rf "$CLIENT_STORAGE"
         echo "Logs saved in $LOG_DIR"
+        echo "  server (reticulum-in): $LOG_DIR/server.log"
+        echo "  client (reticulum-out): $LOG_DIR/native-client.log"
     }
     trap cleanup_mixed EXIT
 
@@ -235,6 +275,12 @@ case "$MODE" in
     $COMPOSE_CMD -f docker-compose.mixed.yml build
     echo "Starting container/serial server (RNode A on $RNODE_SERIAL_SERVER)..."
     $COMPOSE_CMD -f docker-compose.mixed.yml up -d e2e-server
+
+    # Stream the server container's output (the reticulum-in side) into the run dir,
+    # so it sits next to the client's reticulum-out instead of only in the container's
+    # own /logs/e2e_mixed*.log mount.
+    $COMPOSE_CMD -f docker-compose.mixed.yml logs -f e2e-server > "$LOG_DIR/server.log" 2>&1 &
+    SERVER_LOG_PID=$!
 
     # Poll the server's healthcheck by exec'ing it into the container. Portable
     # across podman-compose (no `up --wait`) and docker compose. Up to ~120s.
