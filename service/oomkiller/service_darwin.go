@@ -34,11 +34,15 @@ import "C"
 
 import (
 	"sync"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing/common/byteformats"
 	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/service"
 )
+
+const oomDraftMinInterval = time.Hour
 
 var (
 	globalAccess   sync.Mutex
@@ -101,5 +105,43 @@ func goMemoryPressureCallback(status C.ulong) {
 		s.logger.Warn("memory pressure: critical, usage: ", byteformats.FormatMemoryBytes(sample.usage))
 		s.writeOOMDraft(sample.usage)
 		s.adaptiveTimer.notifyPressure()
+	}
+}
+
+func (s *Service) writeOOMDraft(memoryUsage uint64) {
+	if s.draftCancelled.Load() {
+		return
+	}
+	now := time.Now().UnixNano()
+	lastDraft := s.lastDraftTime.Load()
+	if time.Duration(now-lastDraft) < oomDraftMinInterval {
+		return
+	}
+	s.lastDraftTime.Store(now)
+	reporter := service.FromContext[OOMReporter](s.ctx)
+	if reporter == nil {
+		return
+	}
+	err := reporter.WriteDraft(memoryUsage)
+	if s.draftCancelled.Load() {
+		reporter.DiscardDraft()
+		return
+	}
+	if err != nil {
+		s.logger.Error("failed to write OOM draft: ", err)
+	} else {
+		s.logger.Warn("OOM draft saved")
+	}
+}
+
+func (s *Service) discardOOMDraft() {
+	s.draftCancelled.Store(true)
+	reporter := service.FromContext[OOMReporter](s.ctx)
+	if reporter == nil {
+		return
+	}
+	err := reporter.DiscardDraft()
+	if err != nil {
+		s.logger.Error("failed to discard OOM draft: ", err)
 	}
 }

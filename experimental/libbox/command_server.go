@@ -14,18 +14,22 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/daemon"
 	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/service/oomkiller"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/service"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
 type CommandServer struct {
 	*daemon.StartedService
+	managedService    *daemon.ManagedService
 	handler           CommandServerHandler
 	platformInterface PlatformInterface
 	platformWrapper   *platformInterfaceWrapper
@@ -41,6 +45,7 @@ type CommandServerHandler interface {
 	SetSystemProxyEnabled(enabled bool) error
 	TriggerNativeCrash() error
 	WriteDebugMessage(message string)
+	ConnectSSHAgent() (int32, error)
 }
 
 func NewCommandServer(handler CommandServerHandler, platformInterface PlatformInterface) (*CommandServer, error) {
@@ -69,6 +74,13 @@ func NewCommandServer(handler CommandServerHandler, platformInterface PlatformIn
 		// UserID:           sUserID,
 		// GroupID:          sGroupID,
 		// SystemProxyEnabled: false,
+	})
+	reporter := &oomReporter{startedService: server.StartedService}
+	service.MustRegister[oomkiller.OOMReporter](ctx, reporter)
+	server.managedService = daemon.NewManagedService(daemon.ManagedServiceOptions{
+		Handler:     (*platformHandler)(server),
+		Debug:       sDebug,
+		OOMReporter: reporter,
 	})
 	return server, nil
 }
@@ -117,7 +129,7 @@ func (s *CommandServer) Start() error {
 	if sCommandServerListenPort == 0 {
 		sockPath := filepath.Join(sBasePath, "command.sock")
 		os.Remove(sockPath)
-		for i := 0; i < 30; i++ {
+		for range 30 {
 			listener, err = net.ListenUnix("unix", &net.UnixAddr{
 				Name: sockPath,
 				Net:  "unix",
@@ -154,6 +166,11 @@ func (s *CommandServer) Start() error {
 	}
 	s.grpcServer = grpc.NewServer(serverOptions...)
 	daemon.RegisterStartedServiceServer(s.grpcServer, s.StartedService)
+	daemon.RegisterManagedServiceServer(s.grpcServer, s.managedService)
+	healthServer := health.NewServer()
+	healthServer.SetServingStatus(daemon.StartedService_ServiceDesc.ServiceName, grpc_health_v1.HealthCheckResponse_SERVING)
+	healthServer.SetServingStatus(daemon.ManagedService_ServiceDesc.ServiceName, grpc_health_v1.HealthCheckResponse_SERVING)
+	grpc_health_v1.RegisterHealthServer(s.grpcServer, healthServer)
 	go s.grpcServer.Serve(listener)
 	return nil
 }
@@ -243,7 +260,7 @@ func (s *CommandServer) ResetNetwork() {
 	if instance == nil || instance.Box() == nil {
 		return
 	}
-	instance.Box().Router().ResetNetwork()
+	instance.Box().Network().ResetNetwork()
 }
 
 func (s *CommandServer) UpdateWIFIState() {
@@ -285,4 +302,8 @@ func (h *platformHandler) TriggerNativeCrash() error {
 
 func (h *platformHandler) WriteDebugMessage(message string) {
 	(*CommandServer)(h).handler.WriteDebugMessage(message)
+}
+
+func (h *platformHandler) ConnectSSHAgent() (int32, error) {
+	return (*CommandServer)(h).handler.ConnectSSHAgent()
 }

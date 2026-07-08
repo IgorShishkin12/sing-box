@@ -3,9 +3,8 @@
 package wireguard
 
 import (
-	"context"
 	"net/netip"
-	"time"
+	"sync"
 
 	"github.com/sagernet/gvisor/pkg/buffer"
 	"github.com/sagernet/gvisor/pkg/tcpip"
@@ -16,12 +15,8 @@ import (
 	"github.com/sagernet/gvisor/pkg/tcpip/transport/icmp"
 	"github.com/sagernet/gvisor/pkg/tcpip/transport/tcp"
 	"github.com/sagernet/gvisor/pkg/tcpip/transport/udp"
-	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-tun"
-	"github.com/sagernet/sing-tun/ping"
 	E "github.com/sagernet/sing/common/exceptions"
-	"github.com/sagernet/sing/common/logger"
 	"github.com/sagernet/wireguard-go/device"
 )
 
@@ -29,11 +24,11 @@ var _ Device = (*systemStackDevice)(nil)
 
 type systemStackDevice struct {
 	*systemDevice
-	ctx       context.Context
-	logger    logger.ContextLogger
-	stack     *stack.Stack
-	endpoint  *deviceEndpoint
-	writeBufs [][]byte
+	stack         *stack.Stack
+	endpoint      *deviceEndpoint
+	icmpForwarder *tun.ICMPForwarder
+	writeBufs     [][]byte
+	closeOnce     sync.Once
 }
 
 func newSystemStackDevice(options DeviceOptions) (*systemStackDevice, error) {
@@ -49,10 +44,6 @@ func newSystemStackDevice(options DeviceOptions) (*systemStackDevice, error) {
 	if err != nil {
 		return nil, err
 	}
-	var (
-		inet4Address netip.Addr
-		inet6Address netip.Addr
-	)
 	for _, prefix := range options.Address {
 		addr := tun.AddressFromAddr(prefix.Addr())
 		protoAddr := tcpip.ProtocolAddress{
@@ -62,10 +53,8 @@ func newSystemStackDevice(options DeviceOptions) (*systemStackDevice, error) {
 			},
 		}
 		if prefix.Addr().Is4() {
-			inet4Address = prefix.Addr()
 			protoAddr.Protocol = ipv4.ProtocolNumber
 		} else {
-			inet6Address = prefix.Addr()
 			protoAddr.Protocol = ipv6.ProtocolNumber
 		}
 		gErr := ipStack.AddProtocolAddress(tun.DefaultNIC, protoAddr, stack.AddressProperties{})
@@ -73,21 +62,20 @@ func newSystemStackDevice(options DeviceOptions) (*systemStackDevice, error) {
 			return nil, E.New("parse local address ", protoAddr.AddressWithPrefix, ": ", gErr.String())
 		}
 	}
-	if options.Handler != nil {
-		ipStack.SetTransportProtocolHandler(tcp.ProtocolNumber, tun.NewTCPForwarder(options.Context, ipStack, options.Handler).HandlePacket)
-		ipStack.SetTransportProtocolHandler(udp.ProtocolNumber, tun.NewUDPForwarder(options.Context, ipStack, options.Handler, options.UDPTimeout).HandlePacket)
-		icmpForwarder := tun.NewICMPForwarder(options.Context, ipStack, options.Handler, options.UDPTimeout)
-		icmpForwarder.SetLocalAddresses(inet4Address, inet6Address)
-		ipStack.SetTransportProtocolHandler(icmp.ProtocolNumber4, icmpForwarder.HandlePacket)
-		ipStack.SetTransportProtocolHandler(icmp.ProtocolNumber6, icmpForwarder.HandlePacket)
-	}
-	return &systemStackDevice{
-		ctx:          options.Context,
-		logger:       options.Logger,
+	stackDevice := &systemStackDevice{
 		systemDevice: system,
 		stack:        ipStack,
 		endpoint:     endpoint,
-	}, nil
+	}
+	if options.Handler != nil {
+		ipStack.SetTransportProtocolHandler(tcp.ProtocolNumber, tun.NewTCPForwarder(options.Context, ipStack, options.Handler).HandlePacket)
+		ipStack.SetTransportProtocolHandler(udp.ProtocolNumber, tun.NewUDPForwarder(options.Context, ipStack, options.Handler, options.UDPTimeout).HandlePacket)
+		icmpForwarder := tun.NewICMPForwarder(ipStack, options.Handler, options.Logger)
+		ipStack.SetTransportProtocolHandler(icmp.ProtocolNumber4, icmpForwarder.HandlePacket)
+		ipStack.SetTransportProtocolHandler(icmp.ProtocolNumber6, icmpForwarder.HandlePacket)
+		stackDevice.icmpForwarder = icmpForwarder
+	}
+	return stackDevice, nil
 }
 
 func (w *systemStackDevice) SetDevice(device *device.Device) {
@@ -103,7 +91,7 @@ func (w *systemStackDevice) Write(bufs [][]byte, offset int) (count int, err err
 			}
 		}
 		if len(w.writeBufs) > 0 {
-			return w.batchDevice.BatchWrite(bufs, offset)
+			return w.batchDevice.BatchWrite(w.writeBufs, offset)
 		}
 	} else {
 		for _, packet := range bufs {
@@ -124,13 +112,20 @@ func (w *systemStackDevice) Write(bufs [][]byte, offset int) (count int, err err
 }
 
 func (w *systemStackDevice) Close() error {
-	close(w.endpoint.done)
-	w.stack.Close()
-	for _, endpoint := range w.stack.CleanupEndpoints() {
-		endpoint.Abort()
-	}
-	w.stack.Wait()
-	return w.systemDevice.Close()
+	var err error
+	w.closeOnce.Do(func() {
+		close(w.endpoint.done)
+		if w.icmpForwarder != nil {
+			w.icmpForwarder.Close()
+		}
+		w.stack.Close()
+		for _, endpoint := range w.stack.CleanupEndpoints() {
+			endpoint.Abort()
+		}
+		w.stack.Wait()
+		err = w.systemDevice.Close()
+	})
+	return err
 }
 
 func (w *systemStackDevice) writeStack(packet []byte) bool {
@@ -157,23 +152,6 @@ func (w *systemStackDevice) writeStack(packet []byte) bool {
 	w.endpoint.dispatcher.DeliverNetworkPacket(networkProtocol, packetBuffer)
 	packetBuffer.DecRef()
 	return true
-}
-
-func (w *systemStackDevice) CreateDestination(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
-	ctx := log.ContextWithNewID(w.ctx)
-	destination, err := ping.ConnectGVisor(
-		ctx, w.logger,
-		metadata.Source.Addr, metadata.Destination.Addr,
-		routeContext,
-		w.stack,
-		w.inet4Address, w.inet6Address,
-		timeout,
-	)
-	if err != nil {
-		return nil, err
-	}
-	w.logger.InfoContext(ctx, "linked ", metadata.Network, " connection from ", metadata.Source.AddrString(), " to ", metadata.Destination.AddrString())
-	return destination, nil
 }
 
 type deviceEndpoint struct {
