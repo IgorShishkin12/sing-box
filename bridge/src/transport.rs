@@ -148,9 +148,16 @@ pub fn init_btleplug_android() -> Result<(), String> {
         let env = jvm
             .attach_current_thread()
             .map_err(|e| format!("attach_current_thread: {:?}", e))?;
-        btleplug::platform::init(&env).map_err(|e| format!("btleplug platform init: {:?}", e))?;
+        btleplug::platform::init(&*env).map_err(|e| format!("btleplug platform init: {:?}", e))?;
+        log::info!("btleplug Android platform initialized");
+        // jni_utils::init seeds the jni-utils Java classes into the classcache and
+        // registers native callback methods. Must run on a Java thread (here: the
+        // calling Java thread that owns the app classloader) *before* any async BLE
+        // future is polled on a Tokio worker thread — those worker threads attach to
+        // the JVM with the system classloader and cannot resolve the app's classes.
+        jni_utils::init(&*env).map_err(|e| format!("jni_utils::init: {:?}", e))?;
+        log::info!("jni_utils initialized");
     }
-    log::info!("btleplug Android platform initialized");
     Ok(())
 }
 

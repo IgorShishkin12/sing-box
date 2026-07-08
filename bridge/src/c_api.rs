@@ -145,6 +145,12 @@ pub unsafe extern "C" fn reticulum_init(
     on_data: Option<extern "C" fn(u64, *const u8, usize)>,
     on_close: Option<extern "C" fn(u64)>,
 ) -> i32 {
+    // Install the panic hook first so any subsequent panic is routed to the Go
+    // log callback. On Android this was previously done from JNI_OnLoad, but the
+    // Rust staticlib is linked into libgojni.so, whose gomobile runtime owns the
+    // one and only JNI_OnLoad — so we no longer export our own (see below).
+    install_panic_hook();
+
     let _ = tracing_log::LogTracer::init();
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("trace,serde=off"));
@@ -248,6 +254,10 @@ pub extern "C" fn reticulum_set_write_callback(on_write: Option<extern "C" fn(u6
 pub unsafe extern "C" fn reticulum_set_jvm(jvm: *mut std::ffi::c_void) {
     #[cfg(all(feature = "rnode-ble", target_os = "android"))]
     {
+        if jvm.is_null() {
+            log::error!("reticulum_set_jvm called with NULL JavaVM");
+            return;
+        }
         crate::transport::set_android_jvm(jvm as usize);
         if let Err(e) = crate::transport::init_btleplug_android() {
             log::error!("btleplug Android init: {}", e);
@@ -257,22 +267,13 @@ pub unsafe extern "C" fn reticulum_set_jvm(jvm: *mut std::ffi::c_void) {
     let _ = jvm;
 }
 
-/// Called automatically by the Android runtime on the Java thread when
-/// System.loadLibrary("reticulum_bridge") runs. Installs the panic hook and
-/// initializes the JVM bridge before any async BLE future is polled.
-///
-/// # Safety
-/// Standard JNI contract: raw_jvm is valid for the process lifetime.
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub unsafe extern "C" fn JNI_OnLoad(
-    raw_jvm: *mut std::ffi::c_void,
-    _: *mut std::ffi::c_void,
-) -> std::os::raw::c_int {
-    install_panic_hook();
-    reticulum_set_jvm(raw_jvm);
-    0x0001_0006 // JNI_VERSION_1_6
-}
+// NOTE: We intentionally do NOT export a `JNI_OnLoad`. The Rust bridge is built
+// as a staticlib and linked into the gomobile `libgojni.so`, whose Go runtime
+// already exports the process's single `JNI_OnLoad`. Exporting a second one here
+// collides at link time. Instead the JavaVM is pushed in explicitly from Kotlin
+// via a libbox JNI export -> reticulum.BridgeSetJVM -> `reticulum_set_jvm`, which
+// runs on the app's main (Java) thread so btleplug/jni-utils can resolve the
+// app classloader's BLE support classes.
 
 /// Shutdown the bridge and release resources.
 #[no_mangle]
