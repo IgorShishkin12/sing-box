@@ -21,6 +21,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/anytls"
 	"github.com/sagernet/sing-box/protocol/block"
+	"github.com/sagernet/sing-box/protocol/bridge"
 	"github.com/sagernet/sing-box/protocol/direct"
 	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing-box/protocol/http"
@@ -30,6 +31,7 @@ import (
 	"github.com/sagernet/sing-box/protocol/reticulum"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
 	"github.com/sagernet/sing-box/protocol/shadowtls"
+	"github.com/sagernet/sing-box/protocol/snell"
 	"github.com/sagernet/sing-box/protocol/socks"
 	"github.com/sagernet/sing-box/protocol/ssh"
 	"github.com/sagernet/sing-box/protocol/tor"
@@ -37,6 +39,7 @@ import (
 	"github.com/sagernet/sing-box/protocol/tun"
 	"github.com/sagernet/sing-box/protocol/vless"
 	"github.com/sagernet/sing-box/protocol/vmess"
+	"github.com/sagernet/sing-box/service/api"
 	originca "github.com/sagernet/sing-box/service/origin_ca"
 	"github.com/sagernet/sing-box/service/resolved"
 	"github.com/sagernet/sing-box/service/ssmapi"
@@ -60,6 +63,7 @@ func InboundRegistry() *inbound.Registry {
 	mixed.RegisterInbound(registry)
 
 	shadowsocks.RegisterInbound(registry)
+	snell.RegisterInbound(registry)
 	vmess.RegisterInbound(registry)
 	trojan.RegisterInbound(registry)
 	naive.RegisterInbound(registry)
@@ -79,6 +83,7 @@ func OutboundRegistry() *outbound.Registry {
 	registry := outbound.NewRegistry()
 
 	direct.RegisterOutbound(registry)
+	bridge.RegisterOutbound(registry)
 
 	block.RegisterOutbound(registry)
 
@@ -88,6 +93,7 @@ func OutboundRegistry() *outbound.Registry {
 	socks.RegisterOutbound(registry)
 	http.RegisterOutbound(registry)
 	shadowsocks.RegisterOutbound(registry)
+	snell.RegisterOutbound(registry)
 	vmess.RegisterOutbound(registry)
 	trojan.RegisterOutbound(registry)
 	registerNaiveOutbound(registry)
@@ -136,13 +142,16 @@ func DNSTransportRegistry() *dns.TransportRegistry {
 func ServiceRegistry() *service.Registry {
 	registry := service.NewRegistry()
 
+	api.RegisterService(registry)
 	resolved.RegisterService(registry)
 	ssmapi.RegisterService(registry)
 
+	registerQUICServices(registry)
 	registerDERPService(registry)
 	registerCCMService(registry)
 	registerOCMService(registry)
 	registerOOMKillerService(registry)
+	registerUSBIPServices(registry)
 
 	return registry
 }

@@ -11,12 +11,10 @@ import (
 )
 
 type TailscaleEndpointOptions struct {
-	// Deprecated: use control_http_client instead
 	DialerOptions
 	StateDirectory             string                     `json:"state_directory,omitempty"`
 	AuthKey                    string                     `json:"auth_key,omitempty"`
 	ControlURL                 string                     `json:"control_url,omitempty"`
-	ControlHTTPClient          *HTTPClientOptions         `json:"control_http_client,omitempty"`
 	Ephemeral                  bool                       `json:"ephemeral,omitempty"`
 	Hostname                   string                     `json:"hostname,omitempty"`
 	AcceptRoutes               bool                       `json:"accept_routes,omitempty"`
@@ -31,6 +29,31 @@ type TailscaleEndpointOptions struct {
 	SystemInterfaceName        string                     `json:"system_interface_name,omitempty"`
 	SystemInterfaceMTU         uint32                     `json:"system_interface_mtu,omitempty"`
 	UDPTimeout                 UDPTimeoutCompat           `json:"udp_timeout,omitempty"`
+	SSHServer                  *TailscaleSSHServerOptions `json:"ssh_server,omitempty"`
+}
+
+type _TailscaleSSHServerOptions struct {
+	Enabled           bool `json:"enabled,omitempty"`
+	DisablePTY        bool `json:"disable_pty,omitempty"`
+	DisableSFTP       bool `json:"disable_sftp,omitempty"`
+	DisableForwarding bool `json:"disable_forwarding,omitempty"`
+}
+
+type TailscaleSSHServerOptions _TailscaleSSHServerOptions
+
+func (o TailscaleSSHServerOptions) MarshalJSON() ([]byte, error) {
+	if !o.DisablePTY && !o.DisableSFTP && !o.DisableForwarding {
+		return json.Marshal(o.Enabled)
+	}
+	return json.Marshal(_TailscaleSSHServerOptions(o))
+}
+
+func (o *TailscaleSSHServerOptions) UnmarshalJSON(bytes []byte) error {
+	err := json.Unmarshal(bytes, &o.Enabled)
+	if err == nil {
+		return nil
+	}
+	return json.UnmarshalDisallowUnknownFields(bytes, (*_TailscaleSSHServerOptions)(o))
 }
 
 type TailscaleDNSServerOptions struct {
