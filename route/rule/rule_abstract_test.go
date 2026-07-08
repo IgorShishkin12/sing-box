@@ -24,10 +24,6 @@ func (f *fakeRuleSet) StartContext(context.Context, *adapter.HTTPStartContext) e
 	return nil
 }
 
-func (f *fakeRuleSet) PostStart() error {
-	return nil
-}
-
 func (f *fakeRuleSet) Metadata() adapter.RuleSetMetadata {
 	return adapter.RuleSetMetadata{}
 }
@@ -141,7 +137,6 @@ func TestAbstractLogicalRule_And_WithRuleSetInvert(t *testing.T) {
 		},
 	}
 	for _, testCase := range testCases {
-		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			logicalRule := &abstractLogicalRule{

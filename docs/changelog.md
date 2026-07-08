@@ -2,6 +2,210 @@
 icon: material/alert-decagram
 ---
 
+#### 1.14.0-alpha.40
+
+* Add bridge outbound **1**
+* Fixes and improvements
+
+**1**:
+
+The new `bridge` outbound is the L3 counterpart of `direct`: it forwards L3
+traffic (TCP, UDP and ICMP) from a TUN or other L3 endpoints directly out of a
+network interface, without going through L3 to L4 translation. It requires
+privileges and is supported on Linux, macOS, rooted Android, and jailbroken iOS.
+
+See [Bridge](/configuration/outbound/bridge/).
+
+#### 1.14.0-alpha.39
+
+* Add L3 forwarding support **1**
+* Fixes and improvements
+
+**1**:
+
+Building on the ICMP proxy support introduced in sing-box 1.13.0, TCP and UDP
+traffic from L3 inbounds (TUN, WireGuard, and Tailscale) can now be forwarded
+directly to WireGuard and Tailscale endpoints at L3, without going through
+L3 to L4 translation.
+
+See [Pre-match](/configuration/shared/pre-match/).
+
+#### 1.14.0-alpha.38
+
+* Add Snell protocol support **1**
+* Fixes and improvements
+
+**1**:
+
+Surge believes that being closed-source and not proliferated can keep
+[Snell](https://kb.nssurge.com/surge-knowledge-base/release-notes/snell)
+covert, but this is already impossible in 2026; considering that Snell still
+has advantages that other random-traffic protocols do not possess, such as
+multiplexing support with complete TCP semantics and traffic-characteristic
+diversity, we [implemented it in Go](https://github.com/SagerNet/sing-snell)
+instead of reinventing the wheel, with all features except the v5 QUIC proxy,
+behavior as consistent with the official implementation as possible, and
+performance at least on par with it.
+
+See [Snell Inbound](/configuration/inbound/snell/) and
+[Snell Outbound](/configuration/outbound/snell/).
+
+#### 1.13.14
+
+* Fixes and improvements
+
+#### 1.14.0-alpha.33
+
+* Add iOS jailbreak release **1**
+* Fixes and improvements
+
+**1**:
+
+A new jailbreak build of the iOS [sing-box for Apple](/clients/apple/) client is
+available, distributed as a `.deb` for rootless iOS 15.0+ from
+[GitHub Releases](https://github.com/SagerNet/sing-box/releases)
+(`SFI-iphoneos-arm64.deb`). Unlike the App Store and TestFlight builds, it can run
+a [Tailscale SSH server](/configuration/endpoint/tailscale/#ssh_server) on the
+device and supports [process matching](/configuration/route/rule/#process_name)
+(`process_name`, `process_path`, `user`, and so on) in route and DNS rules.
+
+#### 1.14.0-alpha.32
+
+* Add dashboard support for the API service **1**
+* Add USB/IP service **2**
+* Fixes and improvements
+
+**1**:
+
+The [sing-box API service](/configuration/service/api/) can now download, update
+and serve [sing-box-dashboard](https://github.com/SagerNet/sing-box-dashboard)
+directly over its listener, configured via the new
+[`dashboard`](/configuration/service/api/#dashboard) option.
+
+**2**:
+
+New [USB/IP Server](/configuration/service/usbip-server/) and
+[USB/IP Client](/configuration/service/usbip-client/) services export and import
+USB devices over the [USB/IP](https://usbip.sourceforge.net/) protocol, built on
+[sing-usbip](https://github.com/SagerNet/sing-usbip), which adds hotplug while
+staying interoperable with standard USB/IP. Exporting config-selected local
+devices (`provider: default`) runs via the CLI on Linux, Windows, and macOS and
+requires elevated privileges (macOS additionally needs a CGO build and disabled
+System Integrity Protection). With `provider: dynamic`, devices are instead
+supplied at runtime through the API service by the graphical clients on macOS and
+Android, or the [sing-box Dashboard](https://github.com/SagerNet/sing-box-dashboard).
+
+#### 1.14.0-alpha.31
+
+* Fixes and improvements
+
+#### 1.14.0-alpha.30
+
+* Introducing sing-box API service **1**
+* Apple/Android: Introducing remote control **2**
+* Introducing sing-box Dashboard **3**
+* Fixes and improvements
+
+**1**:
+
+The new [sing-box API service](/configuration/service/api/) is a gRPC
+server for observing and controlling the running sing-box instance,
+exposing the same interface the graphical clients use locally: service
+status, logs, outbound groups (selection and URL tests), Clash mode,
+connection tracking, and tools such as network quality tests, STUN
+tests, and Tailscale operations.
+
+**2**:
+
+The graphical clients for Apple platforms and Android can now control
+remote sing-box instances running the API service. Remote servers (URL
+and secret) are managed in settings; the dashboard, logs, connections,
+groups, and tools pages can then switch between the local service and
+remote instances.
+
+**3**:
+
+[sing-box Dashboard](https://github.com/SagerNet/sing-box-dashboard) is
+a new web client for the API service, providing almost the same
+experience as the graphical clients. A public instance is available at
+http://sing-box-dashboard.sagernet.org (shortcut: dash.sing-box.app).
+
+#### 1.14.0-alpha.29
+
+* Fixes and improvements
+
+#### 1.13.13
+
+* Fixes and improvements
+
+#### 1.14.0-alpha.27
+
+* Add Tailscale SSH server **1**
+* Fixes and improvements
+
+**1**:
+
+Adds an [`ssh_server`](/configuration/endpoint/tailscale/#ssh_server) field to
+[Tailscale](/configuration/endpoint/tailscale/) endpoints, running a Tailscale SSH
+server on tailnet port 22. Access is controlled by the SSH ACL in the Tailscale
+admin console, which maps each connection to a local user (behavior varies by
+platform; iOS and tvOS are not yet supported). The value may be `true` (equivalent
+to `{ "enabled": true }`), or an object that additionally sets
+[`disable_pty`](/configuration/endpoint/tailscale/#ssh_serverdisable_pty),
+[`disable_sftp`](/configuration/endpoint/tailscale/#ssh_serverdisable_sftp), and
+[`disable_forwarding`](/configuration/endpoint/tailscale/#ssh_serverdisable_forwarding).
+
+#### 1.14.0-alpha.26
+
+* Add gecko obfs for Hysteria2 **1**
+* Fixes and improvements
+
+**1**:
+
+Adds `gecko` as a new QUIC traffic obfuscation type for
+[Hysteria2 inbound](/configuration/inbound/hysteria2/#obfstype) and
+[outbound](/configuration/outbound/hysteria2/#obfstype), alongside the
+existing `salamander`. Gecko supports configurable
+[`min_packet_size`](/configuration/inbound/hysteria2/#obfsmin_packet_size)
+(default 512) and
+[`max_packet_size`](/configuration/inbound/hysteria2/#obfsmax_packet_size)
+(default 1200) fields.
+
+#### 1.14.0-alpha.25
+
+* Revert Tailscale endpoint dial fields deprecation and remove `control_http_client` **1**
+* Fixes and improvements
+
+**1**:
+
+The `control_http_client` field on
+[Tailscale](/configuration/endpoint/tailscale/) endpoints introduced in
+`1.14.0-alpha.13` is removed, and the deprecation of
+[Dial Fields](/configuration/endpoint/tailscale/#dial-fields) is reverted.
+
+#### 1.13.12
+
+* Update naiveproxy to v148.0.7778.96-1
+* Fixes and improvements
+
+#### 1.14.0-alpha.22
+
+* Add Hysteria Realm service and Hysteria2 NAT traversal support **1**
+* Fixes and improvements
+
+**1**:
+
+The new [Hysteria Realm service](/configuration/service/hysteria-realm/)
+is a rendezvous service for Hysteria2 NAT traversal. A Hysteria2 server
+behind NAT registers its STUN-discovered public addresses on a stable
+realm endpoint via the new
+[`realm`](/configuration/inbound/hysteria2/#realm) inbound field;
+clients query the realm via the new
+[`realm`](/configuration/outbound/hysteria2/#realm) outbound field to
+learn the server's current addresses and perform UDP hole-punching to
+establish a direct QUIC connection. Once hole-punching succeeds, all
+proxy traffic flows directly between client and server.
+
 #### 1.14.0-alpha.21
 
 * Allow customizing TUN DNS mode and hijack interface DNS by default **1**
@@ -10,7 +214,7 @@ icon: material/alert-decagram
 * Add neighbor-based hostname resolution for the local DNS server **4**
 * Update NaiveProxy to 148.0.7778.96-1
 * Add more TLS spoof methods and route rule action support **5**
-** Fixes and improvements
+* Fixes and improvements
 
 **1**:
 

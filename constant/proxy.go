@@ -5,12 +5,14 @@ const (
 	TypeRedirect           = "redirect"
 	TypeTProxy             = "tproxy"
 	TypeDirect             = "direct"
+	TypeBridge             = "bridge"
 	TypeBlock              = "block"
 	TypeDNS                = "dns"
 	TypeSOCKS              = "socks"
 	TypeHTTP               = "http"
 	TypeMixed              = "mixed"
 	TypeShadowsocks        = "shadowsocks"
+	TypeSnell              = "snell"
 	TypeVMess              = "vmess"
 	TypeTrojan             = "trojan"
 	TypeNaive              = "naive"
@@ -29,9 +31,13 @@ const (
 	TypeDERP               = "derp"
 	TypeResolved           = "resolved"
 	TypeSSMAPI             = "ssm-api"
+	TypeAPI                = "api"
 	TypeCCM                = "ccm"
 	TypeOCM                = "ocm"
 	TypeOOMKiller          = "oom-killer"
+	TypeUSBIPServer        = "usbip-server"
+	TypeUSBIPClient        = "usbip-client"
+	TypeHysteriaRealm      = "hysteria-realm"
 	TypeACME               = "acme"
 	TypeCloudflareOriginCA = "cloudflare-origin-ca"
 	TypeReticulum          = "reticulum"
@@ -52,6 +58,8 @@ func ProxyDisplayName(proxyType string) string {
 		return "TProxy"
 	case TypeDirect:
 		return "Direct"
+	case TypeBridge:
+		return "Bridge"
 	case TypeBlock:
 		return "Block"
 	case TypeDNS:
@@ -64,6 +72,8 @@ func ProxyDisplayName(proxyType string) string {
 		return "Mixed"
 	case TypeShadowsocks:
 		return "Shadowsocks"
+	case TypeSnell:
+		return "Snell"
 	case TypeVMess:
 		return "VMess"
 	case TypeTrojan:
