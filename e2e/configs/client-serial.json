@@ -25,7 +25,7 @@
           {
             "name": "RNode Serial Client",
             "type": "RNodeSerial",
-            "device": "/dev/ttyUSB0",
+            "device": "/dev/ttyUSB1",
             "frequency_hz": 433000000,
             "bandwidth_hz": 500000,
             "tx_power_dbm": 0,

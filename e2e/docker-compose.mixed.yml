@@ -31,14 +31,8 @@ services:
       - ./configs/server-serial.json:/etc/sing-box/config.json:ro
       - ./logs:/logs:rw
     devices:
-      # Map the host's server-side RNode to /dev/ttyUSB0 inside the container,
-      # matching the "device" field in server-serial.json regardless of host path.
-      - "${RNODE_SERIAL_SERVER:-/dev/ttyUSB0}:/dev/ttyUSB0"
-    # No group_add here. Device access depends on how you run the compose:
-    #   - with sudo (rootful podman): root owns /dev/ttyUSB0, works as-is; OR
-    #   - rootless (as your user): loosen the device first, e.g.
-    #       sudo chmod 666 /dev/ttyUSB0     # resets on replug; keeps rootless cache
-    # runner-hw.sh's serial preflight prints these options if the device is unreadable.
+      - "/dev/ttyUSB0:/dev/ttyUSB0"
+      - "/dev/ttyUSB1:/dev/ttyUSB1"
     networks:
       - e2e-net
     healthcheck:
