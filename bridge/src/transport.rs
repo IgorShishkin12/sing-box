@@ -963,6 +963,14 @@ pub async fn open_channel_and_forward(conn_id: u64, link_id: AddressHash) {
     }
     match ch
         .register_handler(MUX_CHANNEL_MSG_TYPE, move |envelope| {
+            // Source tag: lets a log diff prove whether channel and raw link-data
+            // paths ever both feed the same conn (double-delivery → mux corruption).
+            log::debug!(
+                "[on_data] conn={} src=channel seq={} len={}",
+                conn_id,
+                envelope.sequence,
+                envelope.payload.len()
+            );
             crate::c_api::call_on_data(conn_id, &envelope.payload);
             true
         })
@@ -999,6 +1007,14 @@ pub fn spawn_link_data_reader(
                     if data.destination == link_id
                         && data.context != Some(PacketContext::LinkIdentify)
                     {
+                        // Source tag: paired with the src=channel line, a log diff
+                        // reveals if both paths deliver the same bytes to one conn.
+                        log::debug!(
+                            "[on_data] conn={} src=link_raw ctx={:?} len={}",
+                            conn_id,
+                            data.context,
+                            data.data.len()
+                        );
                         crate::c_api::call_on_data(conn_id, data.data.as_slice());
                     }
                 }

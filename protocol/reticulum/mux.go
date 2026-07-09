@@ -3,6 +3,7 @@ package reticulum
 import (
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"net"
 	"sync"
@@ -531,6 +532,18 @@ func (s *muxSession) readLoop() {
 		if mc == nil {
 			continue
 		}
+		// Integrity accounting mirroring the sender's mux tx line. A mismatch in
+		// cum_bytes/cum_crc at the same msg# between the two ends pinpoints the
+		// direction and message where loss/duplication/corruption occurred.
+		mc.rxMsgs++
+		mc.rxBytes += uint64(len(assembled))
+		mc.rxCRC = crc32.Update(mc.rxCRC, crc32.IEEETable, assembled)
+		if s.logger != nil {
+			s.logger.Debug(fmt.Sprintf(
+				"mux rx conn=%d msg#=%d bytes=%d cum_bytes=%d cum_crc=%08x",
+				pkt.connID, mc.rxMsgs, len(assembled), mc.rxBytes, mc.rxCRC,
+			))
+		}
 		select {
 		case mc.readCh <- assembled:
 		case <-mc.done:
@@ -606,6 +619,16 @@ type muxConn struct {
 
 	localAddr  net.Addr
 	remoteAddr net.Addr
+
+	// Per-connection integrity accounting for the mux message layer. tx fields are
+	// only touched in Write (serialised by writeMu); rx fields only in the single
+	// readLoop goroutine — so the two sets never race and need no extra locking.
+	// cumCRC is a running CRC32 (IEEE) of the conn's byte stream in each direction;
+	// comparing a sender's cum{Bytes,CRC} at msg#N against the receiver's localises
+	// loss/duplication/corruption to a direction and a message in one log diff.
+	txMsgs, rxMsgs   uint64
+	txBytes, rxBytes uint64
+	txCRC, rxCRC     uint32
 }
 
 func newMuxConn(id uint16, s *muxSession, dest string) *muxConn {
@@ -648,6 +671,16 @@ func (c *muxConn) Write(b []byte) (int, error) {
 	defer c.writeMu.Unlock()
 	if err := c.session.writeData(c.id, b); err != nil {
 		return 0, err
+	}
+	// Integrity accounting: one message == one Write. See muxConn field docs.
+	c.txMsgs++
+	c.txBytes += uint64(len(b))
+	c.txCRC = crc32.Update(c.txCRC, crc32.IEEETable, b)
+	if c.session.logger != nil {
+		c.session.logger.Debug(fmt.Sprintf(
+			"mux tx conn=%d msg#=%d bytes=%d cum_bytes=%d cum_crc=%08x",
+			c.id, c.txMsgs, len(b), c.txBytes, c.txCRC,
+		))
 	}
 	return len(b), nil
 }
