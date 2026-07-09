@@ -533,23 +533,20 @@ func TestConcurrentWriteNoDeadlock(t *testing.T) {
 	}
 }
 
-// TestFragBuffer_DuplicateDelivery verifies that injecting the same fragment a second
-// time (simulating a retransmit arriving after first assembly) delivers the message
-// only once to the upper layer, not twice.
-func TestFragBuffer_DuplicateDelivery(t *testing.T) {
+// TestFragBuffer_ConsecutiveSingleFragmentMessages verifies that two consecutive
+// single-fragment messages on the same connID are BOTH delivered. The mux no longer
+// de-duplicates retransmits (the Reticulum channel guarantees reliable, ordered,
+// exactly-once delivery), so each fragment starts a fresh message rather than being
+// dropped as a duplicate of an already-delivered one.
+func TestFragBuffer_ConsecutiveSingleFragmentMessages(t *testing.T) {
 	inner, remote := newChanConnPair()
 	s := newMuxSession(inner, nil, true, MaxReticulumMessage)
 	t.Cleanup(func() { s.Close() })
 
 	const connID = uint16(1)
-	payload := []byte("hello-once")
 
 	// Announce the connection.
 	remote.Write(encodePacket(muxPacket{typeByte: TypeNewConn, connID: connID, payload: []byte("peer:1")}))
-
-	// One-fragment message: encodeDataByte(totalParts=1, partIndex=0).
-	frag := encodePacket(muxPacket{typeByte: encodeDataByte(1, 0), connID: connID, payload: payload})
-	remote.Write(frag)
 
 	var sc *muxConn
 	select {
@@ -559,21 +556,70 @@ func TestFragBuffer_DuplicateDelivery(t *testing.T) {
 	}
 	defer sc.Close()
 
-	got := make([]byte, len(payload))
-	_, err := io.ReadFull(sc, got)
-	require.NoError(t, err)
-	require.Equal(t, payload, got)
+	// Two distinct one-fragment messages, back to back, on the same conn.
+	for _, payload := range [][]byte{[]byte("first-msg"), []byte("second-msg")} {
+		frag := encodePacket(muxPacket{typeByte: encodeDataByte(1, 0), connID: connID, payload: payload})
+		remote.Write(frag)
 
-	// Inject the same fragment again — simulates a retransmit arriving late.
-	// With fb.delivered set, the readLoop must NOT push another message onto sc.readCh.
-	remote.Write(frag)
-
-	select {
-	case extra := <-sc.readCh:
-		t.Fatalf("duplicate delivery: %q", extra)
-	case <-time.After(100 * time.Millisecond):
-		// good: no duplicate
+		got := make([]byte, len(payload))
+		_, err := io.ReadFull(sc, got)
+		require.NoError(t, err)
+		require.Equal(t, payload, got)
 	}
+}
+
+// TestMuxSession_MultipleMessagesOneConn verifies that several distinct messages
+// written on the SAME virtual connection are all delivered, intact and in order.
+// This is the streaming case (e.g. a TLS handshake spanning many writes) that the
+// old `delivered` de-dup flag silently dropped after the first message.
+func TestMuxSession_MultipleMessagesOneConn(t *testing.T) {
+	client, server := newTestMuxPair(t)
+
+	mc, err := client.OpenConn("127.0.0.1:8080")
+	require.NoError(t, err)
+	defer mc.Close()
+
+	var sc *muxConn
+	select {
+	case sc = <-server.incomingCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout accepting conn")
+	}
+	defer sc.Close()
+
+	// Distinct messages of varying multi-fragment sizes, mirroring a handshake
+	// flight: a small first record, then larger ones that must not be dropped.
+	msgs := [][]byte{
+		[]byte("ServerHello + CCS record"),
+		make([]byte, 300), // ~3 fragments
+		make([]byte, 500), // ~5 fragments
+		[]byte("Finished"),
+	}
+	for i := range msgs {
+		for j := range msgs[i] {
+			msgs[i][j] = byte('A' + (i*7+j)%26)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		for i := range msgs {
+			if _, err := mc.Write(msgs[i]); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+
+	for i := range msgs {
+		got := make([]byte, len(msgs[i]))
+		if _, err := io.ReadFull(sc, got); err != nil {
+			t.Fatalf("message %d read failed: %v", i, err)
+		}
+		require.Equalf(t, msgs[i], got, "message %d corrupted/out of order", i)
+	}
+	require.NoError(t, <-done)
 }
 
 // TestMuxSession_DynamicMaxMsg verifies that a session created with a larger maxMsg

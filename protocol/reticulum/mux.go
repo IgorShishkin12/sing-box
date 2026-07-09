@@ -41,7 +41,6 @@ const (
 	// the reassembled data via a single on_data callback.
 	TypeLargeData byte = 0xC0
 
-	maxRetransmitDelay = 30 * time.Second
 	defaultFragTimeout = 2 * time.Second
 )
 
@@ -129,16 +128,17 @@ func (s *muxSession) fragmentData(data []byte) [][]byte {
 
 // fragBuffer accumulates fragments for one logical message.
 // Only accessed from the readLoop goroutine; no locking needed.
+//
+// A buffer holds exactly one in-progress message: it is discarded as soon as the
+// message is assembled (see readLoop), so the next message on the same connID
+// starts from a fresh buffer. Reliability, ordering and exactly-once delivery are
+// guaranteed by the Reticulum channel under the bridge, so the mux does not need
+// per-message sequence numbers or retransmit de-duplication here.
 type fragBuffer struct {
 	parts        [][]byte
 	gotLast      bool
 	lastIdx      int
 	lastActivity time.Time
-	// delivered is set after the assembled message has been sent to readCh.
-	// Subsequent retransmits of the same connID are ACKed but not re-delivered,
-	// preventing duplicate HTTP handler invocations when the sender retransmits
-	// before its ACK arrives.
-	delivered bool
 }
 
 // addPart records one fragment. Returns the assembled payload and true when complete.
@@ -496,21 +496,19 @@ func (s *muxSession) readLoop() {
 			continue
 		}
 
-		// Data packet: reassemble. No ACK is sent — the Reticulum channel under
-		// the bridge already acknowledges and orders delivery.
+		// Data packet: reassemble. No ACK is sent and no retransmit de-duplication
+		// is done — the Reticulum channel under the bridge already guarantees
+		// reliable, ordered, exactly-once delivery, so each fragment belongs to the
+		// current in-progress message on its connID.
 		fb := fragBufs[pkt.connID]
 		if fb == nil {
 			fb = &fragBuffer{}
 			fragBufs[pkt.connID] = fb
-		} else if fb.delivered {
-			// Already fully delivered. Update lastActivity so the GC doesn't expire
-			// the delivery marker too early, suppressing any late retransmit.
-			fb.lastActivity = time.Now()
-			continue
 		}
 		assembled, done := fb.addPart(pkt.partIndex, pkt.isLast, pkt.payload)
 		if !done {
-			// Periodically GC stale incomplete buffers and expired delivery markers.
+			// Periodically GC stale incomplete buffers (a connID whose sender
+			// vanished mid-message) so the map doesn't grow unbounded.
 			gcCounter++
 			if gcCounter >= 100 {
 				gcCounter = 0
@@ -519,21 +517,13 @@ func (s *muxSession) readLoop() {
 					if !b.gotLast && now.Sub(b.lastActivity) > s.fragTimeout {
 						delete(fragBufs, cid)
 					}
-					// Keep delivered markers for maxRetransmitDelay so any
-					// remaining sender retransmits are suppressed, then GC.
-					if b.delivered && now.Sub(b.lastActivity) > maxRetransmitDelay {
-						delete(fragBufs, cid)
-					}
 				}
 			}
 			continue
 		}
-		// Mark delivered so retransmits of this connID don't re-trigger upper layer.
-		// The parts slice is cleared to free memory; the struct stays in fragBufs
-		// as a delivery marker until it is GC'd by the loop above.
-		fb.delivered = true
-		fb.parts = nil
-		fb.lastActivity = time.Now()
+		// Message fully assembled: drop the buffer so the next message on this
+		// connID reassembles from scratch (addPart already zeroed *fb on completion).
+		delete(fragBufs, pkt.connID)
 
 		s.mu.Lock()
 		mc := s.conns[pkt.connID]
