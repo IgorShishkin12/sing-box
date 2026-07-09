@@ -5,6 +5,7 @@ Rust bridge crate providing a C FFI layer between the [sing-box](https://github.
 ## Features
 
 - ~~**`real-reticulum`**~~: **Deprecated and removed.** The reticulum transport layer is now always compiled in; there is no longer a stub/mock alternative controlled by this flag.
+- **`rnode-ble`** *(default)*: Enables the RNode BLE LoRa transport (pulls in `reticulum-rs-transport/rnode-ble` and the `btleplug` dependency). This is the only feature; `default = ["rnode-ble"]` (see `Cargo.toml`). Disable with `--no-default-features` to drop the BLE dependency.
 
 ## Architecture
 
@@ -20,7 +21,7 @@ Go calls the bridge via synchronous C FFI. Internally the bridge runs a **multi-
 
 `block_on()` is not re-entrant. A thread-local `Cell<bool>` (`IN_BLOCK_ON`) detects recursive calls on the same thread and skips the internal serial lock (which would deadlock). Calls from different threads serialize via a global `BLOCK_ON_LOCK` mutex.
 
-`reticulum_shutdown()` aborts all registered background tasks, then drops the `Arc<Runtime>`, fully releasing the runtime. All three transport singletons (`TRANSPORT`, `TRANSPORT_IDENTITY`, `TRANSPORT_IDENTITY_HASH`) are cleared so a subsequent `reticulum_init()` starts fresh. All six callback atomics are zeroed last — after tasks are dead — to prevent any surviving task from invoking a dangling function pointer.
+`reticulum_shutdown()` aborts all registered background tasks, then drops the `Arc<Runtime>`, fully releasing the runtime. All three transport singletons (`TRANSPORT`, `TRANSPORT_IDENTITY`, `TRANSPORT_IDENTITY_HASH`) are cleared so a subsequent `reticulum_init()` starts fresh. All seven callback atomics are zeroed last — after tasks are dead — to prevent any surviving task from invoking a dangling function pointer.
 
 ### Event delivery
 
@@ -39,15 +40,57 @@ A long-lived Tokio task sends periodic announces every 5 s. It is controlled via
 
 `logger.rs` installs a `tracing_subscriber::Layer` (`CLogLayer`) that converts every Rust `tracing` event into a call to the Go log callback registered via `reticulum_set_log_callback()`. Log levels map as: 1=Error, 2=Warn, 3=Info, 4=Debug, 5=Trace. If no callback is registered, log events are silently discarded.
 
+## FFI Surface
+
+`c_api.rs` exports **19** `#[no_mangle] pub extern "C"` functions:
+
+| Function | Purpose |
+|---|---|
+| `reticulum_init` | Initialize the runtime and transport from a JSON config |
+| `reticulum_set_log_callback` | Register `on_log` |
+| `reticulum_set_resolve_callback` | Register `on_resolve` |
+| `reticulum_set_write_callback` | Register `on_write` (write-completion / backpressure signal) |
+| `reticulum_set_jvm` | Hand a `JavaVM*` to the bridge for Android BLE (see below) |
+| `reticulum_shutdown` | Abort tasks, drop runtime, clear singletons + callbacks |
+| `reticulum_dial` | Non-blocking dial; result via `on_connect` |
+| `reticulum_listen` | Blocking listen; returns listener handle or `-1` |
+| `reticulum_write` | Write a message to a connection |
+| `reticulum_close` | Close a connection |
+| `reticulum_get_listener_hash` | Listener destination hash (malloc'd) |
+| `reticulum_get_conn_peer_hash` | Peer hash for a connection (malloc'd) |
+| `reticulum_get_conn_identified_peer` | Identified peer hash after LinkIdentify (malloc'd) |
+| `reticulum_get_conn_max_payload` | Channel-aware max mux payload for a connection |
+| `reticulum_get_transport_hash` | Local transport identity hash (malloc'd) |
+| `reticulum_register_name` | Register/announce a human-readable name |
+| `get_hash` | Compute a destination hash from a name (malloc'd) |
+| `reticulum_resolve_name` | Non-blocking name resolve; result via `on_resolve` |
+| `reticulum_free` | Free any malloc'd pointer returned above |
+
+### Channel-aware payload sizing
+
+`reticulum_get_conn_max_payload(conn_id)` returns the largest mux payload that
+fits a single Reticulum **Channel** packet on that link: the link plaintext
+capacity minus `CHANNEL_ENVELOPE_OVERHEAD` (6 bytes, `connection.rs`). The Go mux
+uses this as the per-session `maxFragPayload` so each fragment maps to exactly one
+Channel packet. On a plain LoRa link this resolves to the conservative 120-byte
+default; higher-MTU links get a larger value.
+
+### Android BLE (`reticulum_set_jvm`)
+
+`reticulum_set_jvm(jvm)` receives the process `JavaVM*` so the `rnode-ble`
+transport (via `btleplug`/`jni`) can attach to the JVM and drive Android BLE. It
+is pushed from the app through a libbox JNI export rather than `JNI_OnLoad`. Pass
+`NULL` and it logs an error and no-ops.
+
 ## FFI Safety
 
 **Callbacks are called from Tokio worker threads**, not from Go-started OS threads. Go's CGO runtime does not know about these threads. Callback implementations must be minimal — write to a channel and return. Doing heavy work or calling back into Rust from a callback is unsafe.
 
-Six callback function pointers (`on_accept`, `on_connect`, `on_data`, `on_close`, `on_resolve`, `on_log`) are stored as `usize` atomics and transmuted to function pointers at call time. This is safe as long as:
+Seven callback function pointers (`on_log`, `on_accept`, `on_connect`, `on_data`, `on_close`, `on_resolve`, `on_write`) are stored as `usize` atomics and transmuted to function pointers at call time. This is safe as long as:
 1. Callbacks are registered before the first `reticulum_dial` / `reticulum_listen` / `reticulum_resolve_name` call.
 2. `reticulum_shutdown()` is called before the Go side unloads any callback function.
 
-All six atomics are zeroed at the end of `reticulum_shutdown()`, after all background tasks are aborted and the runtime is dropped, so no surviving task can call into freed Go memory.
+All seven atomics are zeroed at the end of `reticulum_shutdown()`, after all background tasks are aborted and the runtime is dropped, so no surviving task can call into freed Go memory.
 
 **Memory ownership**: values returned by `reticulum_get_listener_hash()`, `reticulum_get_conn_peer_hash()`, `reticulum_get_conn_identified_peer()`, `reticulum_get_transport_hash()`, and `get_hash()` are allocated with `libc::malloc`. The caller must free them with `reticulum_free()`. Do **not** use Go's `C.free` — it uses a different allocator.
 
@@ -120,8 +163,13 @@ The build tag is added to the existing tag list (e.g., `with_gvisor,with_quic,..
 Currently, the bridge is supported for:
 - `linux/amd64` (x86_64-unknown-linux-gnu)
 - `linux/arm64` (aarch64-unknown-linux-gnu)
+- Android: `aarch64-linux-android` (primary tested target)
 
-Support for additional architectures can be added by installing the appropriate Rust targets and cross-compilation toolchains.
+`.cargo/config.toml` also wires up NDK linkers for `armv7-linux-androideabi`,
+`i686-linux-android`, and `x86_64-linux-android`, so those Android targets can be
+built by installing the matching Rust target. Support for further architectures
+can be added by installing the appropriate Rust targets and cross-compilation
+toolchains.
 
 ### AutoInterface limitations
 
@@ -191,7 +239,7 @@ bridge/
 │   └── build-android.sh     # Android cross-compile build script
 ├── src/
 │   ├── lib.rs               # Crate root; global config singleton
-│   ├── c_api.rs             # C FFI exports (14 public functions)
+│   ├── c_api.rs             # C FFI exports (19 public functions)
 │   ├── config.rs            # JSON config parsing
 │   ├── connection.rs        # Connection handle (real link or test buffer)
 │   ├── listener.rs          # Listener handle

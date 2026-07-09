@@ -1,7 +1,9 @@
 [package]
 name = "sing-box-reticulum-bridge"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+homepage = "https://github.com/IgorShishkin12/sing-box/testing/bridge"
+license = "EPL-2.0"
 
 [lib]
 crate-type = ["rlib", "staticlib", "cdylib"]
@@ -15,13 +17,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"
 once_cell = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Compile-time log-verbosity cap. The `release_max_level_*` feature sets the
-# `log` crate's STATIC_MAX_LEVEL for release builds (the e2e/production build):
-# anything above it is dead-code-eliminated, so it costs zero instructions in
-# production (per CLAUDE.md). This also applies to the reticulum-rs (lxmf-rs)
-# dependency via Cargo feature unification — no change needed there.
-# Keep at `trace` while diagnosing so nothing is hidden; lower to
-# `release_max_level_debug` / `_info` / `_warn` for production.
 log = { version = "0.4", features = ["release_max_level_trace"] }
 libc = "0.2"
 rand_core = "0.6"

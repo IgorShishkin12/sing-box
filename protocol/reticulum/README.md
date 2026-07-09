@@ -22,7 +22,7 @@ A sing-box inbound/outbound plugin that tunnels TCP streams over the [Reticulum 
 │   one Reticulum link; handles        │
 │   fragmentation and reassembly       │
 └──────────────────┬───────────────────┘
-                   │ raw Reticulum packets (≤200 B)
+                   │ raw Reticulum packets (≤120 B)
 ┌──────────────────▼───────────────────┐
 │   framedConn  (Go)                   │
 │   separates auth control messages    │
@@ -40,9 +40,14 @@ A sing-box inbound/outbound plugin that tunnels TCP streams over the [Reticulum 
 │   Rust bridge  (libreticulumbridge)  │
 │   async Tokio runtime; drives RNS    │
 └──────────────────┬───────────────────┘
-                   │ UDP / TCP / AutoInterface
+                   │ UDP / TCP / AutoInterface / RNode (LoRa)
        Reticulum network (mesh)
 ```
+
+Ordering, acknowledgement, flow control and retransmission are handled by the
+native Reticulum **Channel** that sits under the bridge. The mux keeps no send
+window, in-flight table, fragment ACKs, or retransmit loop of its own — it only
+splits messages into Channel-sized fragments and reassembles them in order.
 
 ---
 
@@ -115,7 +120,7 @@ Identity binding (committing both peer IDs into the MAC) prevents replay across 
 
 **Salts** are 32 random bytes, generated fresh per connection but held stable across retry attempts.
 
-**Timeout:** each round has a 30 s idle deadline (timer starts after WriteMsg, not before) (`authTimeout`).
+**Timeout:** each round has a 40 s idle deadline (timer starts after WriteMsg, not before) (`authTimeout`). Once the peer starts responding, `ReadMsg` waits the *sooner* of the global 40 s deadline or a 20 s per-message inactivity deadline (`authInactivityTimeout`).
 
 **Retry policies** (`auth_retry` field):
 
@@ -138,8 +143,14 @@ All packets share a 3-byte header:
 └────────┴────────┴────────┴──────────────────────┘
 ```
 
-Maximum packet size: **200 bytes** (enforced by Reticulum message limit).  
-Maximum payload: **197 bytes** (200 − 3 header bytes).
+Maximum packet size: **120 bytes**.  
+Maximum payload: **117 bytes** (120 − 3 header bytes).
+
+The 120-byte cap is derived from the LoRa/RNode serial link MTU of 220 bytes:
+after Reticulum's per-packet overhead (header, IFAC, IV, worst-case AES padding,
+HMAC) the largest plaintext that still fits one on-wire packet is 120 bytes (see
+`mux.go:16–27`). Links with a larger MTU negotiate a bigger per-session payload
+via the bridge (`reticulum_get_conn_max_payload`); 120 is the conservative default.
 
 ### typeByte encoding
 
@@ -153,6 +164,7 @@ Maximum payload: **197 bytes** (200 − 3 header bytes).
 | `0x83` | `TypeCloseConn` | empty |
 | `0x84` | `TypeRequestAuth` | 32-byte salt |
 | `0x85` | `TypeResponseAuth` | 32-byte HMAC-SHA256 |
+| `0xC0` | `TypeLargeData` | whole oversized message (see below) |
 
 **Data packets** — high bit clear (0x00–0x7F):
 
@@ -168,9 +180,9 @@ typeByte = 0b01000000 = 0x40   (isLast=1, partIndex=0)
 packet:  [0x40][0x12][0x34]["Hello, world!"]
 ```
 
-Two-fragment example (200 bytes split into 197 + 3):
+Two-fragment example (120 bytes split into 117 + 3):
 ```
-fragment 0:  [0x00][connID][197 bytes]   (isLast=0, partIndex=0)
+fragment 0:  [0x00][connID][117 bytes]   (isLast=0, partIndex=0)
 fragment 1:  [0x41][connID][3 bytes]     (isLast=1, partIndex=1)
 ```
 
@@ -179,10 +191,20 @@ fragment 1:  [0x41][connID][3 bytes]     (isLast=1, partIndex=1)
 | Limit | Value |
 |---|---|
 | Max fragments per message | 64 (6-bit partIndex) |
-| Max fragment payload | 197 B |
-| Max reassembled message | 64 × 197 = **12,608 B** |
+| Max fragment payload | 117 B |
+| Max reassembled message | 64 × 117 = **7,488 B** |
 
 Fragments are reassembled in-order within each virtual connection. A lost fragment stalls that message but does not affect other virtual connections on the same session.
+
+### Large messages (`TypeLargeData`)
+
+A message that exceeds the 64-fragment limit (> ~7.5 KB) is not fragmented by the
+mux. Instead it is sent whole as a single `TypeLargeData` (`0xC0`) control packet,
+which the Rust bridge ships over the Reticulum **Resource** protocol (bulk
+transfer with its own segmentation and reliability) rather than as ordinary
+Channel packets. The receiver delivers the reassembled payload to the target
+virtual connection as one message. See `mux.go` (`writeData`, `TypeLargeData`
+handling).
 
 ---
 
@@ -240,6 +262,7 @@ Fragments are reassembled in-order within each virtual connection. A lost fragme
   "identity_key":  "base64...",               // inline identity (alternative to path)
   "identity_name": "mynode",                  // human-readable label
   "reticulum_config_path": "/etc/rns.cfg",    // path to native RNS config file
+  "rust_log": "info",                         // RUST_LOG tracing filter for the bridge
   "interfaces": [ /* []ReticulumInterface */ ]
 }
 ```
@@ -273,6 +296,28 @@ Fragments are reassembled in-order within each virtual connection. A lost fragme
   "type": "AutoInterface",
   "data_port": 4242   // optional; 0 = OS-assigned
 }
+
+// RNode LoRa radio over a serial device
+{
+  "name": "lora0",
+  "type": "RNodeSerial",
+  "device": "/dev/ttyUSB0",   // required
+  // shared LoRa radio params (unset → US915 band defaults):
+  "frequency_hz":     915000000,
+  "bandwidth_hz":     125000,
+  "tx_power_dbm":     17,
+  "spreading_factor": 8,
+  "coding_rate":      5           // 5–8, maps to 4/5 … 4/8
+}
+
+// RNode LoRa radio over BLE (Android / btleplug)
+{
+  "name": "lora-ble0",
+  "type": "RNodeBLE",
+  "peripheral_id": "RNode 1234",  // required; BLE name or MAC address
+  // same shared LoRa radio params as RNodeSerial
+  "frequency_hz": 915000000
+}
 ```
 
 ---
@@ -281,27 +326,29 @@ Fragments are reassembled in-order within each virtual connection. A lost fragme
 
 | Constant | Value | Source | Description |
 |---|---|---|---|
-| `MaxReticulumMessage` | 200 B | `mux.go:16` | Hard Reticulum message size cap |
-| `muxHeaderSize` | 3 B | `mux.go:17` | 1 typeByte + 2 connID |
-| `maxFragPayload` | 197 B | `mux.go:18` | `MaxReticulumMessage − muxHeaderSize` |
-| Max fragments / message | 64 | `mux.go:40–48` | 6-bit `partIndex` field |
-| Max reassembled payload | 12,608 B | derived | 64 × 197 |
-| Max virtual connections | 65,535 | `mux.go:192` | uint16 connID space |
-| `authTimeout` | 30 s | `auth.go` | Idle deadline for ReadMsg (starts after WriteMsg completes) |
-| Linear retry delay | 5 s | `auth.go:40` | Fixed inter-attempt pause |
-| Exp retry base | 4 s × 2ⁿ | `auth.go:43` | 4 s → 8 s → 16 s → 32 s … |
-| Salt / MAC size | 32 B | `auth.go:50,90` | Challenge and response lengths |
-| `globalAcceptCh` buffer | 256 | `conn.go:36` | Rust→Go inbound connection events |
-| Per-conn receive buffer | 256 | `conn.go:68` | Packet queue per `reticulumConn` |
-| `incomingCh` buffer | 64 | `mux.go:178` | Pending virtual conns (server side) |
-| `muxConn.readCh` buffer | 64 | `mux.go:387` | Assembled messages per virtual conn |
-| `framedConn.ctrlCh` buffer | 8 | `framed_conn.go:47` | Auth control messages |
-| `framedConn.dataCh` buffer | 128 | `framed_conn.go:48` | Data messages buffered before gate opens |
-| `DIAL_TIMEOUT` | 30 s | `bridge/src/transport.rs:36` | Link activation deadline |
-| `DIAL_POLL_INTERVAL` | 100 ms | `bridge/src/transport.rs:38` | Poll cadence during dial |
-| `ANNOUNCE_INTERVAL` | 5 s | `bridge/src/transport.rs:41` | Service re-announce period |
-| `ANNOUNCE_WAIT` | 15 s | `bridge/src/c_api.rs:551` | Per-attempt name resolve wait |
-| `MAX_ATTEMPTS` | 3 | `bridge/src/c_api.rs:552` | Name resolution retry count |
-| `INITIAL_BACKOFF` | 3 s | `bridge/src/c_api.rs:553` | First retry delay for name resolve |
-| Max resolve backoff | 30 s | `bridge/src/c_api.rs:567` | Backoff cap (doubles each attempt) |
-| Identify timeout | 5 s | `bridge/src/transport.rs:696` | Peer LinkIdentify exchange deadline |
+| `MaxReticulumMessage` | 120 B | `mux.go:28` | Default (LoRa) mux-packet size cap |
+| `muxHeaderSize` | 3 B | `mux.go:29` | 1 typeByte + 2 connID |
+| `maxFragPayload` | 117 B | `mux.go:30` | `MaxReticulumMessage − muxHeaderSize` |
+| Max fragments / message | 64 | `mux.go` (`encodeDataByte`) | 6-bit `partIndex` field |
+| Max reassembled payload | 7,488 B | derived | 64 × 117 (before `TypeLargeData` kicks in) |
+| Max virtual connections | 65,535 | `mux.go` (`OpenConn`) | uint16 connID space |
+| `authTimeout` | 40 s | `auth.go:31` | Global idle deadline for ReadMsg (starts after WriteMsg completes) |
+| `authInactivityTimeout` | 20 s | `framed_conn.go:35` | Per-message idle deadline once the peer starts responding |
+| Linear retry delay | 5 s | `auth.go:48` | Fixed inter-attempt pause |
+| Exp retry base | 4 s × 2ⁿ | `auth.go:51` | 4 s → 8 s → 16 s → 32 s … |
+| Salt / MAC size | 32 B | `auth.go:58` | Challenge and response lengths |
+| `globalAcceptCh` buffer | 256 | `conn.go:83` | Rust→Go inbound connection events |
+| Per-conn receive buffer | 256 | `conn.go:115` | Packet queue per `reticulumConn` |
+| `incomingCh` buffer | 1024 | `mux.go:272` | Pending virtual conns (server side) |
+| `muxConn.readCh` buffer | 1024 | `mux.go:626` | Assembled messages per virtual conn |
+| `framedConn.ctrlCh` buffer | 8 | `framed_conn.go:73` | Auth control messages |
+| `framedConn.dataCh` buffer | 128 | `framed_conn.go:74` | Data messages buffered before gate opens |
+| `DIAL_TIMEOUT` | 10 s | `bridge/src/transport.rs:47` | Link activation deadline |
+| `DIAL_POLL_INTERVAL` | 100 ms | `bridge/src/transport.rs:49` | Poll cadence during dial |
+| `ANNOUNCE_INTERVAL` | 5 s | `bridge/src/transport.rs:52` | Service re-announce period |
+| `IDENTIFY_TIMEOUT` | 30 s | `bridge/src/transport.rs:836` | Peer LinkIdentify exchange deadline |
+| `IDENTIFY_RETRY_INTERVAL` | 3 s | `bridge/src/transport.rs:837` | LinkIdentify re-send cadence |
+| `ANNOUNCE_WAIT` | 15 s | `bridge/src/c_api.rs:686` | Per-attempt name resolve wait |
+| `MAX_ATTEMPTS` | 3 | `bridge/src/c_api.rs:687` | Name resolution retry count |
+| `INITIAL_BACKOFF` | 3 s | `bridge/src/c_api.rs:688` | First retry delay for name resolve |
+| Max resolve backoff | 30 s | `bridge/src/c_api.rs:702` | Backoff cap (doubles each attempt) |
